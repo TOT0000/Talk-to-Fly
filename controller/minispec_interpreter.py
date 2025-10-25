@@ -1,5 +1,6 @@
 from typing import List, Tuple, Union
 import re, queue
+import ast
 from enum import Enum
 import time
 from typing import Optional
@@ -14,21 +15,36 @@ def print_debug(*args):
     print(*args)
     # pass
 
-MiniSpecValueType = Union[int, float, bool, str, None]
+MiniSpecValueType = Union[int, float, bool, str, None, list] #支援list
+
 
 def evaluate_value(value: str) -> MiniSpecValueType:
-    if value.isdigit():
-        return int(value)
-    elif value.replace('.', '', 1).isdigit():
-        return float(value)
-    elif value == 'True':
-        return True
-    elif value == 'False':
-        return False
-    elif value == 'None' or len(value) == 0:
-        return None
-    else:
-        return value.strip('\'"')
+    value = value.strip()
+    try:
+        # 嘗試將字串轉為 Python 資料結構（int, float, list, dict 等）
+        val = ast.literal_eval(value)
+        if isinstance(val, list):
+            # 對 list 內元素也做轉換（可選）
+            return [evaluate_value(str(x)) if not isinstance(x, (int, float, bool, type(None))) else x for x in val]
+        elif isinstance(val, (int, float, bool, type(None))):
+            return val
+        else:
+            return str(val)
+    except Exception:
+        # 不是 Python 表示法就用原有邏輯
+        if value.isdigit():
+            return int(value)
+        elif value.replace('.', '', 1).isdigit():
+            return float(value)
+        elif value == 'True':
+            return True
+        elif value == 'False':
+            return False
+        elif value == 'None' or len(value) == 0:
+            return None
+        else:
+            return value.strip('\'"')
+
 
 class MiniSpecReturnValue:
     def __init__(self, value: MiniSpecValueType, replan: bool):
@@ -160,7 +176,7 @@ class Statement:
                     else:
                         if c == '(':
                             self.read_argument = True
-                        if c.isalpha() or c == '_':
+                        if c.isalpha() or c == '_' or c == '-':
                             self.allow_digit = True
                         self.code_buffer += c
                     if c.isdigit() and not self.allow_digit:
@@ -248,11 +264,13 @@ class Statement:
         name = func[0].strip()
         if len(func) == 2:
             args = func[1].strip()[:-1]
+            print_debug(f'Args string before split_args: "{func[1].strip()[:-1]}"')
             args = split_args(args)
+            print_debug(f'split_args returned: {args}')
             for i in range(0, len(args)):
                 args[i] = args[i].strip().strip('\'"')
-                if args[i].startswith('_'):
-                    args[i] = self.get_env_value(args[i])
+                if args[i].startswith('_') or args[i].startswith('-') or any(op in args[i] for op in '+-*/'):
+                    args[i] = self.eval_expr(args[i]).value  # 注意這裡用 eval_expr，並取 .value
         else:
             args = []
 
@@ -280,55 +298,158 @@ class Statement:
                 return val
             raise Exception(f'Skill {name} is not defined')
 
+    def split_expr_operands(self, expr: str, ops: list[str]) -> list[str]:
+        operands = []
+        current = ''
+        paren_count = 0
+        bracket_count = 0
+        brace_count = 0
+        in_quote = False
+        quote_char = ''
+
+        for c in expr:
+            if in_quote:
+                current += c
+                if c == quote_char:
+                    in_quote = False
+                continue
+            if c in ('"', "'"):
+                in_quote = True
+                quote_char = c
+                current += c
+                continue
+
+            if c == '(':
+                paren_count += 1
+            elif c == ')':
+                paren_count -= 1
+            elif c == '[':
+                bracket_count += 1
+            elif c == ']':
+                bracket_count -= 1
+            elif c == '{':
+                brace_count += 1
+            elif c == '}':
+                brace_count -= 1
+
+            if c in ops and paren_count == 0 and bracket_count == 0 and brace_count == 0 and not in_quote:
+                if current.strip():
+                    operands.append(current.strip())
+                operands.append(c)
+                current = ''
+            else:
+                current += c
+
+        if current.strip():
+            operands.append(current.strip())
+        return operands
+
+
+    def has_ops_outside_parentheses(self, expr: str, ops: list[str]) -> bool:
+        paren_count = 0
+        bracket_count = 0
+        brace_count = 0
+        in_quote = False
+        quote_char = ''
+
+        for c in expr:
+            if in_quote:
+                if c == quote_char:
+                    in_quote = False
+                continue
+            if c in ("'", '"'):
+                in_quote = True
+                quote_char = c
+                continue
+            if c == '(':
+                paren_count += 1
+            elif c == ')':
+                paren_count -= 1
+            elif c == '[':
+                bracket_count += 1
+            elif c == ']':
+                bracket_count -= 1
+            elif c == '{':
+                brace_count += 1
+            elif c == '}':
+                brace_count -= 1
+
+            if c in ops and paren_count == 0 and bracket_count == 0 and brace_count == 0 and not in_quote:
+                return True
+        return False
+
+
     def eval_expr(self, var: str) -> MiniSpecReturnValue:
         print_t(f'Eval expr: {var}')
         var = var.strip()
+
+        # 一元負號，且後面不是括號或字母開頭函式呼叫（負號前有括號或函式參數會進這裡）
+        if var.startswith('-') and len(var) > 1 and var[1] not in ('(',) + tuple('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'):
+            val = self.eval_expr(var[1:]).value
+            return MiniSpecReturnValue(-val, False)
+
         if var.startswith('->'):
             self.ret = True
             return MiniSpecReturnValue(self.eval_expr(var.lstrip('->')).value, True)
+
         if '=' in var:
-            
-            var, expr = var.split('=')
+            var, expr = var.split('=', 1)
             print_t(f'Eval expr var assign: {var} {expr}')
             expr = expr.strip()
             ret_val = self.eval_expr(expr)
-            # if not ret_val.replan:
-            self.env[var] = ret_val.value
+            self.env[var.strip()] = ret_val.value
             return ret_val
-        # deal with + - * / operators
-        if '+' in var or '-' in var or '*' in var or '/' in var:
-            if '+' in var:
-                operands = var.split('+')
-                val = 0
-                for operand in operands:
-                    val += self.eval_expr(operand).value
-            elif '-' in var:
-                operands = var.split('-')
-                val = self.eval_expr(operands[0]).value
-                for operand in operands[1:]:
-                    val -= self.eval_expr(operand).value
-            elif '*' in var:
-                operands = var.split('*')
-                val = 1
-                for operand in operands:
-                    val *= self.eval_expr(operand).value
-            elif '/' in var:
-                operands = var.split('/')
-                val = self.eval_expr(operands[0]).value
-                for operand in operands[1:]:
-                    val /= self.eval_expr(operand).value
-            return MiniSpecReturnValue(val, False)
+
+        # 只有括號外有運算符才拆解計算
+        if self.has_ops_outside_parentheses(var, ['+', '-', '*', '/']):
+            tokens = self.split_expr_operands(var, ['+', '-', '*', '/'])
+
+            def apply_op(a, b, op):
+                if op == '+': return a + b
+                if op == '-': return a - b
+                if op == '*': return a * b
+                if op == '/': return a / b
+                raise Exception("Unknown operator")
+
+            val_stack = []
+            op_stack = []
+
+            i = 0
+            while i < len(tokens):
+                token = tokens[i]
+                if token in ['+', '-', '*', '/']:
+                    op_stack.append(token)
+                else:
+                    val_stack.append(self.eval_expr(token).value)
+                i += 1
+
+            result = val_stack[0]
+            for i, op in enumerate(op_stack):
+                result = apply_op(result, val_stack[i + 1], op)
+
+            return MiniSpecReturnValue(result, False)
 
         if len(var) == 0:
             raise Exception('Empty operand')
+
         if var.startswith('_'):
-            return MiniSpecReturnValue(self.get_env_value(var), False)
+            if '[' in var and var.endswith(']'):
+                base, idx_str = var.split('[', 1)
+                idx_str = idx_str[:-1]
+                base_val = self.get_env_value(base)
+                index_val = self.eval_expr(idx_str).value
+                return MiniSpecReturnValue(base_val[index_val], False)
+            else:
+                return MiniSpecReturnValue(self.get_env_value(var), False)
+
         elif var == 'True' or var == 'False':
             return MiniSpecReturnValue(evaluate_value(var), False)
         elif var[0].isalpha():
             return self.eval_function(var)
         else:
             return MiniSpecReturnValue(evaluate_value(var), False)
+
+
 
     def eval_condition(self, condition: str) -> MiniSpecReturnValue:
         if '&' in condition:

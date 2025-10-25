@@ -14,13 +14,25 @@ class FrameReader:
         # Read a frame from the video capture
         ret, frame = self.cap.read()
         if not ret:
-            raise ValueError("Could not read frame")
+            # raise ValueError("Could not read frame")
+            return None
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
 class VirtualRobotWrapper(RobotWrapper):
-    def __init__(self):
+
+    # ***
+    def __init__(self, enable_video: bool = False):
         self.stream_on = False
-        pass
+        self.enable_video = enable_video
+        self.movement_x_accumulator = 0.0 
+        self.movement_y_accumulator = 0.0 
+        self.movement_z_accumulator = 0.0 
+        self.rotation_accumulator = 0.0 
+        
+        if self.enable_video:  
+            self.start_stream()  
+        
+        print(f"[INFO] VirtualRobotWrapper: enable_video = {self.enable_video}")
 
     def keep_active(self):
         pass
@@ -34,50 +46,63 @@ class VirtualRobotWrapper(RobotWrapper):
     def land(self):
         pass
 
+    # ***
     def start_stream(self):
-        self.cap = cv2.VideoCapture(0)
-        self.stream_on = True
-
+        if not hasattr(self, 'cap') or self.cap is None or not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(0)
+            if not self.cap.isOpened():
+                raise RuntimeError("Failed to open camera for virtual robot.")
+            self.stream_on = True
+        print("[VR] Video stream started.")
+        
+    # ***
     def stop_stream(self):
-        self.cap.release()
-        self.stream_on = False
+        if hasattr(self, 'cap') and self.cap is not None:
+            self.cap.release()
+            self.cap = None
+            self.stream_on = False
+            print("[VR] Video stream stopped.")
+
 
     def get_frame_reader(self):
         if not self.stream_on:
             return None
         return FrameReader(self.cap)
-
-    def move_forward(self, distance: int) -> Tuple[bool, bool]:
-        print(f"-> Moving forward {distance} cm")
-        self.movement_x_accumulator += distance
-        time.sleep(1)
-        return True, False
-
-    def move_backward(self, distance: int) -> Tuple[bool, bool]:
-        print(f"-> Moving backward {distance} cm")
-        self.movement_x_accumulator -= distance
-        time.sleep(1)
-        return True, False
-
-    def move_left(self, distance: int) -> Tuple[bool, bool]:
-        print(f"-> Moving left {distance} cm")
+        
+    # ***
+    def move_forward(self, distance: float) -> Tuple[bool, bool]:
+        print(f"-> Moving forward {distance} m")
         self.movement_y_accumulator += distance
         time.sleep(1)
         return True, False
-
-    def move_right(self, distance: int) -> Tuple[bool, bool]:
-        print(f"-> Moving right {distance} cm")
+    # ***
+    def move_backward(self, distance: float) -> Tuple[bool, bool]:
+        print(f"-> Moving backward {distance} m")
         self.movement_y_accumulator -= distance
         time.sleep(1)
         return True, False
-
-    def move_up(self, distance: int) -> Tuple[bool, bool]:
-        print(f"-> Moving up {distance} cm")
+    # ***
+    def move_left(self, distance: float) -> Tuple[bool, bool]:
+        print(f"-> Moving left {distance} m")
+        self.movement_x_accumulator -= distance
         time.sleep(1)
         return True, False
-
-    def move_down(self, distance: int) -> Tuple[bool, bool]:
-        print(f"-> Moving down {distance} cm")
+    # ***
+    def move_right(self, distance: float) -> Tuple[bool, bool]:
+        print(f"-> Moving right {distance} m")
+        self.movement_x_accumulator += distance
+        time.sleep(1)
+        return True, False
+    # ***
+    def move_up(self, distance: float) -> Tuple[bool, bool]:
+        print(f"-> Moving up {distance} m")
+        self.movement_z_accumulator += distance  # ***
+        time.sleep(1)
+        return True, False
+    # ***
+    def move_down(self, distance: float) -> Tuple[bool, bool]:
+        print(f"-> Moving down {distance} m")
+        self.movement_z_accumulator -= distance  # ***
         time.sleep(1)
         return True, False
 
@@ -98,3 +123,13 @@ class VirtualRobotWrapper(RobotWrapper):
             return True, False
         time.sleep(1)
         return True, False
+   
+    # ***    
+    def get_drone_position(self) -> Tuple[float, float, float]:
+        # return current drone_position
+        return (
+            round(self.movement_x_accumulator, 2),
+            round(self.movement_y_accumulator, 2),
+            round(self.movement_z_accumulator, 2)
+        )
+

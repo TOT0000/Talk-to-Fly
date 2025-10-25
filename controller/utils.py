@@ -16,29 +16,50 @@ def input_t(literal):
     return input(f"[{current_time}] {literal}")
 
 def split_args(arg_str: str) -> list[str]:
-        args = []
-        current_arg = ''
-        parentheses_count = 0  # Keep track of open parentheses
+    print(f'split_args input: "{arg_str}"')
+    args = []
+    current_arg = ''
+    parentheses_count = 0
+    bracket_count = 0
+    brace_count = 0
+    in_quote = False
+    quote_char = ''
 
-        if arg_str.startswith('\'') and arg_str.endswith('\''):
-            args.append(arg_str)
-            return args
+    for char in arg_str:
+        if in_quote:
+            current_arg += char
+            if char == quote_char:
+                in_quote = False
+            continue
 
-        for char in arg_str:
-            if char == ',' and parentheses_count == 0:
-                # If we encounter a comma and we're not inside parentheses, split here
+        if char in ("'", '"'):
+            in_quote = True
+            quote_char = char
+            current_arg += char
+            continue
+
+        if char == '(':
+            parentheses_count += 1
+        elif char == ')':
+            parentheses_count -= 1
+        elif char == '[':
+            bracket_count += 1
+        elif char == ']':
+            bracket_count -= 1
+        elif char == '{':
+            brace_count += 1
+        elif char == '}':
+            brace_count -= 1
+
+        if (char == ',' and parentheses_count == 0 and bracket_count == 0 and brace_count == 0):
+            if current_arg.strip():
                 args.append(current_arg.strip())
-                current_arg = ''
-            else:
-                # Otherwise, keep adding characters to the current argument
-                if char == '(':
-                    parentheses_count += 1
-                elif char == ')':
-                    parentheses_count -= 1
-                current_arg += char
+            current_arg = ''
+        else:
+            current_arg += char
 
-        # Don't forget to add the last argument after the loop finishes
-        if current_arg:
-            args.append(current_arg.strip())
+    if current_arg.strip():
+        args.append(current_arg.strip())
 
-        return args
+    return args
+

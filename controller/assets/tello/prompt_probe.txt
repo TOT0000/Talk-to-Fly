@@ -1,45 +1,71 @@
-"""
-You are given a scene description and a question. You should output the answer to the question based on the scene description.
-The scene description contains listed objects with their respective names, locations, and sizes.
-The question is a string that asks about the scene or the objects in the scene.
-For yes-or-no questions, output with 'True' or 'False' only.
-For object identification, output the object's name (if there are multiple same objects, output the target one with x value). If the object is not in the list, output with 'False'.
-For counting questions, output the exact number of target objects.
-For general questions, output a brief, single-sentence answer.
+You are given the **latest** scene description based on real-time spatial (positioning) data, and a specific question.  
+This question comes from a control plan (minispec) that could not be fully resolved earlier because the initial scene description was outdated or incomplete. 
+Your task is to answer the question using the most recent scene information.
+
+The latest scene description contains the positions of the drone and the user (the person being followed or observed), represented as 3D coordinates     [x, y, z] rounded to two decimal places.
+
+If available, visual object detections (name, location, size) may also be provided as supplemental context. Vision data is optional and may be omitted.
+
+**Instructions:**
+- For yes-or-no questions, output only 'True' or 'False'.
+- For distance-related questions, return a short direct answer, e.g., "3.5 meters".
+- For directional questions, describe relative direction, e.g., "ahead", "to the left".
+- For object recognition, return object name (optionally with x), or 'False' if not present.
+- For counting, output an integer.
+- For general questions, respond in one brief sentence.
+- For positions, output a list like "[x, y, z]".
+
+---
 
 Input Format:
-Scene Description:[List of Objects with Attributes]
-Question:[A String]
+Scene Description:
+[
+    drone_position: [x, y, z],
+    user_position: [x, y, z],
+    (Optional) objects: [name x:float y:float width:float height:float, ...]
+]
+
+Question: [A String]
 
 Output Format:
-[A String]
+[A concise answer only]
 
-Here are some examples:
-Example 1:
-Scene Description:[person x:0.59 y:0.55 width:0.81 height:0.91, bottle x:0.85 y:0.54 width:0.21 height:0.93]
-Question:'Any drinkable target here?'
+---
+
+### Examples
+
+Example 1:  
+Scene Description:[drone_position:[1.00, 2.00, 1.20], user_position:[3.00, 2.50, 1.50]]  
+Question:'How far is the user from the drone?'  
+Output:2.06 meters
+
+Example 2:  
+Scene Description:[drone_position:[0.00, 0.00, 1.00], user_position:[0.00, 0.00, 1.00]]  
+Question:'Is the drone close to the user?'  
+Output:True
+
+Example 3:  
+Scene Description:[drone_position:[1.50, 2.50, 1.20], user_position:[1.00, 3.50, 1.50], objects:[bottle x:0.85 y:0.54 width:0.21 height:0.93]]  
+Question:'Any drinkable target near the user?'  
 Output:bottle
 
-Example 2:
+Example 4:  
+Scene Description:[drone_position:[2.10, 3.00, 1.50], user_position:[4.30, 2.50, 1.50]]  
+Question:'Where should the drone move to follow the user?'  
+Output:toward x:4.30 y:2.50
+
+Example 5:  
 Scene Description:[]
-Question:'Any table in the room?'
+Question:'Is the user detected?'
 Output:False
 
-Example 3:
-Scene Description:[chair x:0.1 y:0.35 width:0.56 height:0.41, chair x:0.49 y:0.59 width:0.61 height:0.35]
-Question:'How many chairs you can see?'
-Output:2
+Example 6:  
+Scene Description: [drone_position:[1.00, 2.00, 1.20], user_position:[3.00, 2.50, 1.50]]  
+Question: 'What is the user position?'  
+Output:[3.00, 2.50, 1.50]
+---
 
-Example 4:
-Scene Description:[bottle x:0.1 y:0.35 width:0.56 height:0.41, chair x:0.49 y:0.59 width:0.61 height:0.35]
-Question:'Any edible target here?'
-Output:False
-
-Example 5:
-Scene Description:[chair x:0.18 y:0.5 width:0.43 height:0.7, chair x:0.6 y:0.3 width:0.08 height:0.09, book x:0.62 y:0.26 width:0.23 height:0.17]
-Question:'Any chair with a laptop on it?'
-Output:chair[0.6]
-"""
-Scene Description:{scene_description}
-Question:{question}
+Scene Description:{scene_description}  
+Question:{question}  
 Please give the content of results only, don't include 'Output:' in the results.
+

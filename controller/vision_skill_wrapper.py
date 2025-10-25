@@ -77,7 +77,8 @@ class ObjectTracker:
         return kf
 
 class VisionSkillWrapper():
-    def __init__(self, shared_frame: SharedFrame):
+    def __init__(self, shared_frame: SharedFrame, enabled=False):
+        self.enabled = enabled
         self.shared_frame = shared_frame
         self.last_update = 0
         self.object_trackers: dict[str, ObjectTracker] = {}
