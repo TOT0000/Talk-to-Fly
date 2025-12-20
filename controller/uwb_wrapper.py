@@ -100,6 +100,10 @@ class UWBWrapper:
     def get_user_position(self) -> Tuple[float, float, float]:
         return self.latest_position
 
+    # The UWB module now provides the drone's real-time position.
+    def get_drone_position(self) -> Tuple[float, float, float]:
+        return self.latest_position
+
     def set_anchor_count(self, n: int):
         if n <= 0:
             print("UWBWrapper: Anchor count must be positive.")

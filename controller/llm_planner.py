@@ -64,10 +64,10 @@ class LLMPlanner():
             drone_pos = (0.00, 0.00, 0.00)
             try:
                 if self.controller:
-                    if hasattr(self.controller, 'drone'):
-                        drone_pos = self.controller.drone.get_drone_position()
                     if hasattr(self.controller, 'uwb') and self.controller.uwb.latest_position != (0.00, 0.00, 0.00):
-                        user_pos = self.controller.uwb.get_user_position()
+                        drone_pos = self.controller.uwb.get_drone_position()
+                    if hasattr(self.controller, 'drone'):
+                        user_pos = self.controller.get_simulated_user_position()
             except Exception:
                 pass
             location_info = (
@@ -93,14 +93,15 @@ class LLMPlanner():
     def probe(self, question: str) -> MiniSpecValueType:
         # 預設定位值
         person_pos = (0.00, 0.00, 0.00)
+        user_pos = person_pos
         drone_pos = (0.00, 0.00, 0.00)
 
         try:
             if self.controller:
-                if hasattr(self.controller, 'drone'):
-                    drone_pos = self.controller.drone.get_drone_position()
                 if hasattr(self.controller, 'uwb') and self.controller.uwb.latest_position != (0.00, 0.00, 0.00):
-                    user_pos = self.controller.uwb.get_user_position()
+                    drone_pos = self.controller.uwb.get_drone_position()
+                if hasattr(self.controller, 'drone'):
+                    user_pos = self.controller.get_simulated_user_position()
         except Exception:
             pass
 

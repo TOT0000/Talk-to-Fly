@@ -210,7 +210,9 @@ class TypeFly:
             return
 
         timestamp = time.time()
-        tag = "[VirtualPos]" if source == "virtual" else "[UWBPos]" if source == "uwb" else "[Pos]"
+        is_drone = source in ("uwb", "drone")
+        is_user = source in ("virtual", "user")
+        tag = "[DronePos]" if is_drone else "[UserPos]" if is_user else "[Pos]"
 
         # 初始化紀錄字典
         if not hasattr(self, '_last_position_map'):
@@ -222,13 +224,13 @@ class TypeFly:
         if current_pos != last_pos:
             # 有改變才放入 queue
             try:
-                if source == "uwb":
-                    print(f"[receive_position] UWB pos: {x}, {y}, {z}") # 確認 callback 有進資料
+                if is_drone:
+                    print(f"[receive_position] Drone(UWB) pos: {x}, {y}, {z}") # 確認 callback 有進資料
                     self.uwb_queue.put_nowait((timestamp, x, y, z))
                 else:
                     self.virtual_queue.put_nowait((timestamp, x, y, z))
             except queue.Full:
-                if source == "uwb":
+                if is_drone:
                     self.uwb_queue.get()
                     self.uwb_queue.put_nowait((timestamp, x, y, z))
                 else:
@@ -460,10 +462,10 @@ class TypeFly:
 
         plot_df = pd.DataFrame()
         if not df_uwb.empty:
-            df_uwb["type"] = "UWB"
+            df_uwb["type"] = "Drone(UWB)"
             plot_df = pd.concat([plot_df, df_uwb])
         if not df_virt.empty:
-            df_virt["type"] = "Virtual"
+            df_virt["type"] = "User(Sim)"
             plot_df = pd.concat([plot_df, df_virt])
 
         if plot_df.empty:
@@ -474,7 +476,7 @@ class TypeFly:
                 self.create_sequence_plot("Z in Sequence", "Index", "Z (m)", (0, 1), (0, 5)),
             )
 
-        colors_map = {"UWB": "red", "Virtual": "blue"}
+        colors_map = {"Drone(UWB)": "red", "User(Sim)": "blue"}
 
         fig_xy, ax_xy = plt.subplots(figsize=(5, 4))
         for dtype, color in colors_map.items():
@@ -499,7 +501,7 @@ class TypeFly:
         ax_xy.set_yticks([i * 0.5 for i in range(11)])
         ax_xy.set_xlabel("X (m)")
         ax_xy.set_ylabel("Y (m)")
-        ax_xy.set_title("UWB & Virtual Drone Position (XY view)")
+        ax_xy.set_title("Drone (UWB) & User (Simulated) Position (XY view)")
         ax_xy.grid(True, linestyle='--', linewidth=0.5)
         ax_xy.legend()
 

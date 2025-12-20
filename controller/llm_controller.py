@@ -65,7 +65,8 @@ class LLMController():
         # UWB wrapper
         self.uwb = UWBWrapper()
         self.position_update_callback = None
-        self.uwb.register_callback(self.notify_user_position_updated)
+        self.uwb.register_callback(self.notify_drone_position_updated)
+        self.latest_virtual_position = (0.0, 0.0, 0.0)
 
         # load low-level skills
         self.low_level_skillset = SkillSet(level="low")
@@ -115,24 +116,34 @@ class LLMController():
     def register_position_callback(self, callback):
         self.position_update_callback = callback
         
-    def notify_user_position_updated(self, position: Tuple[float, float, float, float]):
+    def notify_drone_position_updated(self, position: Tuple[float, float, float, float]):
         timestamp, x, y, z = position
-        position_str = f"User position updated: x={x:.2f}, y={y:.2f}, z={z:.2f}"
+        position_str = f"Drone position updated (UWB): x={x:.2f}, y={y:.2f}, z={z:.2f}"
        #self.append_message(f"[LOG] {position_str}")
         if hasattr(self, 'position_update_callback') and self.position_update_callback:
             self.position_update_callback(x, y, z, "uwb")
     
     def skill_get_drone_position(self) -> Tuple[str, bool]:
-        x, y, z = self.drone.get_drone_position()
-        position_str = f"Drone position is x={x:.2f}, y={y:.2f}, z={z:.2f}"
+        x, y, z = self.uwb.get_drone_position()
+        position_str = f"Drone position is x={x:.2f}, y={y:.2f}, z={z:.2f} (UWB)"
        #self.append_message(f"[LOG] {position_str}")
         return position_str, False
-        
+
     def skill_get_user_position(self) -> Tuple[str, bool]:
-        x, y, z = self.uwb.get_user_position()
-        position_str = f"User position is x={x:.2f}, y={y:.2f}, z={z:.2f}"
+        x, y, z = self.get_simulated_user_position()
+        position_str = f"User position is x={x:.2f}, y={y:.2f}, z={z:.2f} (simulated)"
        #self.append_message(f"[LOG] {position_str}")
         return position_str, False
+
+    def get_simulated_user_position(self) -> Tuple[float, float, float]:
+        if self.latest_virtual_position != (0.0, 0.0, 0.0):
+            return self.latest_virtual_position
+        if hasattr(self, "drone"):
+            try:
+                return self.drone.get_drone_position()
+            except Exception:
+                pass
+        return (0.0, 0.0, 0.0)
         
     def start_uwb(self):
         print_t("[C] Starting UWB tracking...")
@@ -149,13 +160,14 @@ class LLMController():
         def loop():
             while self.controller_active and self.virtual_position_active:
                 x, y, z = self.drone.get_drone_position()
+                self.latest_virtual_position = (x, y, z)
                 try:
                     self.virtual_queue.put_nowait((time.time(), x, y, z))
                 except queue.Full:
                     self.virtual_queue.get()
                     self.virtual_queue.put_nowait((time.time(), x, y, z))
                 if self.position_update_callback:
-                    self.position_update_callback(x, y, z, "virtual")
+                    self.position_update_callback(x, y, z, "user")
                 time.sleep(0.1)
         threading.Thread(target=loop, daemon=True).start()
         
@@ -230,8 +242,8 @@ class LLMController():
         self.append_message('[TASK]: ' + task_description)
         ret_val = None
         while True:
-            user_pos = self.uwb.get_user_position() if hasattr(self, "uwb") else (0.00, 0.00, 0.00)
-            drone_pos = self.drone.get_drone_position() if hasattr(self, "drone") else (0.00, 0.00, 0.00)
+            user_pos = self.get_simulated_user_position() if hasattr(self, "drone") else (0.00, 0.00, 0.00)
+            drone_pos = self.uwb.get_drone_position() if hasattr(self, "uwb") else (0.00, 0.00, 0.00)
             
             location_info = {
                 "user": {"x": round(user_pos[0], 2), "y": round(user_pos[1], 2), "z": round(user_pos[2], 2)},
