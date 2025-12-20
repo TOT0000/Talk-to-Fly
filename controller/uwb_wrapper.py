@@ -97,8 +97,15 @@ class UWBWrapper:
                 print(f"UWBWrapper: Error parsing line: {e}")
             time.sleep(0.01)
 
-    def get_user_position(self) -> Tuple[float, float, float]:
+    def get_drone_position(self) -> Tuple[float, float, float]:
         return self.latest_position
+
+    # Historical alias left in place to signal that UWB now tracks the drone only
+    def get_user_position(self) -> Tuple[float, float, float]:
+        raise NotImplementedError(
+            "UWBWrapper no longer exposes user coordinates; use the controller's "
+            "virtual user position helpers instead."
+        )
 
     def set_anchor_count(self, n: int):
         if n <= 0:
