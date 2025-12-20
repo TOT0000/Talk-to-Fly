@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from PIL import Image
 import queue, time, os, json
 from typing import Optional, Tuple
@@ -6,6 +7,7 @@ import uuid
 from enum import Enum
 import threading
 
+# 保留原本的引用
 from .shared_frame import SharedFrame, Frame
 from .yolo_client import YoloClient
 from .yolo_grpc_client import YoloGRPCClient
@@ -22,96 +24,174 @@ from .uwb_wrapper import UWBWrapper
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# --- 新增：設定檔管理類別 ---
+@dataclass
+class ControllerConfig:
+    cache_dir: Optional[str] = None
+    assets_dir: Optional[str] = None
+
+    @classmethod
+    def from_env(cls) -> "ControllerConfig":
+        return cls(
+            cache_dir=os.getenv("LLM_CONTROLLER_CACHE_DIR"),
+            assets_dir=os.getenv("LLM_CONTROLLER_ASSETS_DIR"),
+        )
+
+    def resolve(self, base_dir: str) -> "ControllerConfig":
+        return ControllerConfig(
+            cache_dir=self.cache_dir or os.path.join(base_dir, "cache"),
+            assets_dir=self.assets_dir or os.path.join(base_dir, "assets"),
+        )
+
 class LLMController():
-    def __init__(self, robot_type, virtual_queue, use_http=False, message_queue: Optional[queue.Queue]=None, enable_video=False):
+    # --- 重構後的 __init__ ---
+    def __init__(self, robot_type, virtual_queue, use_http=False, message_queue: Optional[queue.Queue]=None, enable_video=False, config: Optional[ControllerConfig] = None):
         self.virtual_queue = virtual_queue
         self.enable_video = enable_video
         self.shared_frame = SharedFrame()
-        if use_http:
-            self.yolo_client = YoloClient(shared_frame=self.shared_frame)
-        else:
-            self.yolo_client = YoloGRPCClient(shared_frame=self.shared_frame)
-        self.vision = VisionSkillWrapper(self.shared_frame, enabled=enable_video)
-        self.latest_frame = None
+        self.message_queue = message_queue
         self.controller_active = True
         self.controller_wait_takeoff = True
-        self.message_queue = message_queue
-        if message_queue is None:
-            self.cache_folder = os.path.join(CURRENT_DIR, 'cache')
-        else:
-            try:
-                self.cache_folder = message_queue.get(timeout=1.0)
-            except queue.Empty:
-                self.cache_folder = "cache/default"
-
-        if not os.path.exists(self.cache_folder):
-            os.makedirs(self.cache_folder)
         
+        # 1. 初始化設定 (路徑)
+        self.config = self._init_config(config)
+        self.cache_folder = self._resolve_cache_folder()
+        
+        # 2. 初始化視覺 (YOLO)
+        self.yolo_client, self.vision = self._init_vision(use_http)
+        self.latest_frame = None
+        
+        # 3. 初始化機器人與規劃器
+        self.drone: RobotWrapper = self._init_robot(robot_type)
+        self.planner = self._init_planner(robot_type)
+        
+        # 4. 初始化 UWB
+        self._init_uwb()
+        
+        # 5. 載入技能 (Skills)
+        self.low_level_skillset, self.high_level_skillset = self._init_skills(robot_type)
+        
+        # 綁定全域變數 (為了讓其他模組存取)
+        Statement.low_level_skillset = self.low_level_skillset
+        Statement.high_level_skillset = self.high_level_skillset
+        
+        self.current_plan = None
+        self.execution_history = None
+        self.execution_time = time.time()
+
+    # --- 新增的 Helper Methods (讓 __init__ 變乾淨) ---
+
+    def _init_config(self, config: Optional[ControllerConfig]) -> ControllerConfig:
+        env_config = ControllerConfig.from_env()
+        if config is None:
+            resolved_config = env_config.resolve(CURRENT_DIR)
+        else:
+            merged = ControllerConfig(
+                cache_dir=config.cache_dir or env_config.cache_dir,
+                assets_dir=config.assets_dir or env_config.assets_dir,
+            )
+            resolved_config = merged.resolve(CURRENT_DIR)
+        return resolved_config
+
+    def _resolve_cache_folder(self) -> str:
+        cache_dir = self.config.cache_dir
+        if self.message_queue is not None:
+            try:
+                # 嘗試從 Queue 獲取路徑 (相容舊邏輯)
+                cache_dir = self.message_queue.get(timeout=1.0)
+            except queue.Empty:
+                pass
+        
+        cache_dir = cache_dir or os.path.join(CURRENT_DIR, "cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        return cache_dir
+
+    def _init_vision(self, use_http: bool):
+        if use_http:
+            yolo_client = YoloClient(shared_frame=self.shared_frame)
+        else:
+            yolo_client = YoloGRPCClient(shared_frame=self.shared_frame)
+        
+        vision = VisionSkillWrapper(self.shared_frame, enabled=self.enable_video)
+        return yolo_client, vision
+
+    def _init_robot(self, robot_type) -> RobotWrapper:
         match robot_type:
             case RobotType.TELLO:
                 print_t("[C] Start Tello drone...")
-                self.drone: RobotWrapper = TelloWrapper()
+                return TelloWrapper()
             case RobotType.GEAR:
                 print_t("[C] Start Gear robot car...")
                 from .gear_wrapper import GearWrapper
-                self.drone: RobotWrapper = GearWrapper()
+                return GearWrapper()
             case _:
                 print_t("[C] Start virtual drone...")
-                self.drone: RobotWrapper = VirtualRobotWrapper(enable_video=self.enable_video)
-        
-        self.planner = LLMPlanner(robot_type)
-        self.planner.controller = self
+                return VirtualRobotWrapper(enable_video=self.enable_video)
 
-        # UWB wrapper
+    def _init_planner(self, robot_type):
+        planner = LLMPlanner(robot_type)
+        planner.controller = self
+        return planner
+
+    def _init_uwb(self):
         self.uwb = UWBWrapper()
         self.position_update_callback = None
         self.uwb.register_callback(self.notify_user_position_updated)
 
-        # load low-level skills
-        self.low_level_skillset = SkillSet(level="low")
-        self.low_level_skillset.add_skill(LowLevelSkillItem("move_forward", self.drone.move_forward, "Move forward by a distance", args=[SkillArg("distance", float)]))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("move_backward", self.drone.move_backward, "Move backward by a distance", args=[SkillArg("distance", float)]))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("move_left", self.drone.move_left, "Move left by a distance", args=[SkillArg("distance", float)]))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("move_right", self.drone.move_right, "Move right by a distance", args=[SkillArg("distance", float)]))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("move_up", self.drone.move_up, "Move up by a distance", args=[SkillArg("distance", float)]))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("move_down", self.drone.move_down, "Move down by a distance", args=[SkillArg("distance", float)]))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("turn_cw", self.drone.turn_cw, "Rotate clockwise/right by certain degrees", args=[SkillArg("degrees", int)]))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("turn_ccw", self.drone.turn_ccw, "Rotate counterclockwise/left by certain degrees", args=[SkillArg("degrees", int)]))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("delay", self.skill_delay, "Wait for specified seconds", args=[SkillArg("seconds", float)]))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("is_visible", self.vision.is_visible, "Check the visibility of target object", args=[SkillArg("object_name", str)]))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("object_x", self.vision.object_x, "Get object's X-coordinate in (0,1)", args=[SkillArg("object_name", str)]))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("object_y", self.vision.object_y, "Get object's Y-coordinate in (0,1)", args=[SkillArg("object_name", str)]))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("object_width", self.vision.object_width, "Get object's width in (0,1)", args=[SkillArg("object_name", str)]))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("object_height", self.vision.object_height, "Get object's height in (0,1)", args=[SkillArg("object_name", str)]))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("object_dis", self.vision.object_distance, "Get object's distance in cm", args=[SkillArg("object_name", str)]))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("probe", self.planner.probe, "Probe the LLM for reasoning", args=[SkillArg("question", str)]))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("log", self.skill_log, "Output text to console", args=[SkillArg("text", str)]))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("take_picture", self.skill_take_picture, "Take a picture"))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("re_plan", self.skill_re_plan, "Replanning"))
+    def _init_skills(self, robot_type):
+        # 載入低階技能 (Low Level)
+        low_level_skillset = SkillSet(level="low")
+        # --- 移動類 ---
+        low_level_skillset.add_skill(LowLevelSkillItem("move_forward", self.drone.move_forward, "Move forward by a distance", args=[SkillArg("distance", float)]))
+        low_level_skillset.add_skill(LowLevelSkillItem("move_backward", self.drone.move_backward, "Move backward by a distance", args=[SkillArg("distance", float)]))
+        low_level_skillset.add_skill(LowLevelSkillItem("move_left", self.drone.move_left, "Move left by a distance", args=[SkillArg("distance", float)]))
+        low_level_skillset.add_skill(LowLevelSkillItem("move_right", self.drone.move_right, "Move right by a distance", args=[SkillArg("distance", float)]))
+        low_level_skillset.add_skill(LowLevelSkillItem("move_up", self.drone.move_up, "Move up by a distance", args=[SkillArg("distance", float)]))
+        low_level_skillset.add_skill(LowLevelSkillItem("move_down", self.drone.move_down, "Move down by a distance", args=[SkillArg("distance", float)]))
+        low_level_skillset.add_skill(LowLevelSkillItem("turn_cw", self.drone.turn_cw, "Rotate clockwise/right by certain degrees", args=[SkillArg("degrees", int)]))
+        low_level_skillset.add_skill(LowLevelSkillItem("turn_ccw", self.drone.turn_ccw, "Rotate counterclockwise/left by certain degrees", args=[SkillArg("degrees", int)]))
+        low_level_skillset.add_skill(LowLevelSkillItem("delay", self.skill_delay, "Wait for specified seconds", args=[SkillArg("seconds", float)]))
+        
+        # --- 視覺類 ---
+        low_level_skillset.add_skill(LowLevelSkillItem("is_visible", self.vision.is_visible, "Check the visibility of target object", args=[SkillArg("object_name", str)]))
+        low_level_skillset.add_skill(LowLevelSkillItem("object_x", self.vision.object_x, "Get object's X-coordinate in (0,1)", args=[SkillArg("object_name", str)]))
+        low_level_skillset.add_skill(LowLevelSkillItem("object_y", self.vision.object_y, "Get object's Y-coordinate in (0,1)", args=[SkillArg("object_name", str)]))
+        low_level_skillset.add_skill(LowLevelSkillItem("object_width", self.vision.object_width, "Get object's width in (0,1)", args=[SkillArg("object_name", str)]))
+        low_level_skillset.add_skill(LowLevelSkillItem("object_height", self.vision.object_height, "Get object's height in (0,1)", args=[SkillArg("object_name", str)]))
+        low_level_skillset.add_skill(LowLevelSkillItem("object_dis", self.vision.object_distance, "Get object's distance in cm", args=[SkillArg("object_name", str)]))
+        low_level_skillset.add_skill(LowLevelSkillItem("take_picture", self.skill_take_picture, "Take a picture"))
+        
+        # --- 邏輯類 ---
+        low_level_skillset.add_skill(LowLevelSkillItem("probe", self.planner.probe, "Probe the LLM for reasoning", args=[SkillArg("question", str)]))
+        low_level_skillset.add_skill(LowLevelSkillItem("log", self.skill_log, "Output text to console", args=[SkillArg("text", str)]))
+        low_level_skillset.add_skill(LowLevelSkillItem("re_plan", self.skill_re_plan, "Replanning"))
+        low_level_skillset.add_skill(LowLevelSkillItem("time", self.skill_time, "Get current execution time", args=[]))
 
-      # self.low_level_skillset.add_skill(LowLevelSkillItem("goto", self.skill_goto, "goto the object", args=[SkillArg("object_name[*x-value]", str)]))
-        self.low_level_skillset.add_skill(LowLevelSkillItem("time", self.skill_time, "Get current execution time", args=[]))
-      
-
-        # load high-level skills
-        self.high_level_skillset = SkillSet(level="high", lower_level_skillset=self.low_level_skillset)
+        # 載入高階技能 (High Level) - 從 JSON 讀取
+        high_level_skillset = SkillSet(level="high", lower_level_skillset=low_level_skillset)
 
         type_folder_name = 'tello'
         if robot_type == RobotType.GEAR:
             type_folder_name = 'gear'
-        with open(os.path.join(CURRENT_DIR, f"assets/{type_folder_name}/high_level_skills copy.json"), "r") as f:
+        
+        # 使用設定檔中的路徑
+        assets_path = os.path.join(self.config.assets_dir, f"{type_folder_name}/high_level_skills copy.json")
+        
+        # 容錯：如果 config 路徑找不到，回退到原本的 assets
+        if not os.path.exists(assets_path):
+             assets_path = os.path.join(CURRENT_DIR, f"assets/{type_folder_name}/high_level_skills copy.json")
+
+        with open(assets_path, "r") as f:
             json_data = json.load(f)
             for skill in json_data:
-                self.high_level_skillset.add_skill(HighLevelSkillItem.load_from_dict(skill))
-
-        Statement.low_level_skillset = self.low_level_skillset
-        Statement.high_level_skillset = self.high_level_skillset
-        self.planner.init(high_level_skillset=self.high_level_skillset, low_level_skillset=self.low_level_skillset, vision_skill=self.vision)
-
-        self.current_plan = None
-        self.execution_history = None
-        self.execution_time = time.time()
+                high_level_skillset.add_skill(HighLevelSkillItem.load_from_dict(skill))
         
+        self.planner.init(high_level_skillset=high_level_skillset, low_level_skillset=low_level_skillset, vision_skill=self.vision)
+        
+        return low_level_skillset, high_level_skillset
+
+    # --- 以下保持原本的邏輯 ---
+
     def register_position_callback(self, callback):
         self.position_update_callback = callback
         
@@ -316,4 +396,3 @@ class LLMController():
         self.drone.land()
         asyncio_loop.stop()
         print_t("[C] Capture loop stopped")
-
