@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from PIL import Image
-import queue, time, os, json
+import queue, time, os, json, math
 from typing import Optional, Tuple
 import asyncio
 import uuid
@@ -200,7 +200,7 @@ class LLMController():
     def notify_drone_position_updated(self, position: Tuple[float, float, float, float]):
         timestamp, x, y, z = position
         position_str = f"Drone position updated (UWB): x={x:.2f}, y={y:.2f}, z={z:.2f}"
-       #self.append_message(f"[LOG] {position_str}")
+        # self.append_message(f"[LOG] {position_str}")
         self.latest_drone_position = (x, y, z)
         if hasattr(self, 'position_update_callback') and self.position_update_callback:
             self.position_update_callback(x, y, z, "uwb")
@@ -219,13 +219,13 @@ class LLMController():
     def skill_get_drone_position(self) -> Tuple[str, bool]:
         x, y, z = self.get_drone_position()
         position_str = f"Drone position is x={x:.2f}, y={y:.2f}, z={z:.2f}"
-       #self.append_message(f"[LOG] {position_str}")
+        # self.append_message(f"[LOG] {position_str}")
         return position_str, False
 
     def skill_get_user_position(self) -> Tuple[str, bool]:
         x, y, z = self.get_virtual_user_position()
         position_str = f"User position is x={x:.2f}, y={y:.2f}, z={z:.2f}"
-       #self.append_message(f"[LOG] {position_str}")
+        # self.append_message(f"[LOG] {position_str}")
         return position_str, False
         
     def start_uwb(self):
@@ -240,9 +240,14 @@ class LLMController():
         
     def start_virtual_user_position_loop(self):
         self.virtual_position_active = True
+        start_time = time.time()
         def loop():
             while self.controller_active and self.virtual_position_active:
-                x, y, z = self.latest_virtual_user_position
+                elapsed = time.time() - start_time
+                x = 1.0 + 0.5 * math.sin(elapsed / 3.0)
+                y = 1.0 + 0.5 * math.cos(elapsed / 3.0)
+                z = 0.25
+                self.latest_virtual_user_position = (x, y, z)
                 try:
                     self.virtual_queue.put_nowait((time.time(), x, y, z))
                 except queue.Full:
