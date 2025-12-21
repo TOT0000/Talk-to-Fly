@@ -64,15 +64,15 @@ class LLMPlanner():
             drone_pos = (0.00, 0.00, 0.00)
             try:
                 if self.controller:
-                    if hasattr(self.controller, 'drone'):
-                        drone_pos = self.controller.drone.get_drone_position()
-                    if hasattr(self.controller, 'uwb') and self.controller.uwb.latest_position != (0.00, 0.00, 0.00):
-                        user_pos = self.controller.uwb.get_user_position()
+                    if hasattr(self.controller, 'get_drone_position'):
+                        drone_pos = self.controller.get_drone_position()
+                    if hasattr(self.controller, 'get_virtual_user_position'):
+                        user_pos = self.controller.get_virtual_user_position()
             except Exception:
                 pass
             location_info = (
-                f"Drone position: x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}\n"
-                f"User position: x={user_pos[0]:.2f}, y={user_pos[1]:.2f}, z={user_pos[2]:.2f}"
+                f"Drone position (UWB): x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}\n"
+                f"User position (Virtual): x={user_pos[0]:.2f}, y={user_pos[1]:.2f}, z={user_pos[2]:.2f}"
             )
 
         full_scene = f"{scene_description}\n{location_info}".strip()
@@ -92,21 +92,21 @@ class LLMPlanner():
     
     def probe(self, question: str) -> MiniSpecValueType:
         # 預設定位值
-        person_pos = (0.00, 0.00, 0.00)
+        user_pos = (0.00, 0.00, 0.00)
         drone_pos = (0.00, 0.00, 0.00)
 
         try:
             if self.controller:
-                if hasattr(self.controller, 'drone'):
-                    drone_pos = self.controller.drone.get_drone_position()
-                if hasattr(self.controller, 'uwb') and self.controller.uwb.latest_position != (0.00, 0.00, 0.00):
-                    user_pos = self.controller.uwb.get_user_position()
+                if hasattr(self.controller, 'get_drone_position'):
+                    drone_pos = self.controller.get_drone_position()
+                if hasattr(self.controller, 'get_virtual_user_position'):
+                    user_pos = self.controller.get_virtual_user_position()
         except Exception:
             pass
 
         location_info = (
-            f"Drone position: x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}\n"
-            f"User position: x={user_pos[0]:.2f}, y={user_pos[1]:.2f}, z={user_pos[2]:.2f}"
+            f"Drone position (UWB): x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}\n"
+            f"User position (Virtual): x={user_pos[0]:.2f}, y={user_pos[1]:.2f}, z={user_pos[2]:.2f}"
         )
 
         # 是否啟用影像辨識

@@ -41,6 +41,8 @@ class UWBWrapper:
                     print("UWBWrapper: UWB started successfully.")
                 except Exception as e:
                     print(f"UWBWrapper: Failed to open serial port: {e}")
+                    if "module 'serial' has no attribute 'Serial'" in str(e):
+                        print("UWBWrapper: Please ensure pyserial is installed (pip install pyserial).")
                     time.sleep(1)
         threading.Thread(target=try_connect, daemon=True).start()
 
@@ -97,8 +99,15 @@ class UWBWrapper:
                 print(f"UWBWrapper: Error parsing line: {e}")
             time.sleep(0.01)
 
-    def get_user_position(self) -> Tuple[float, float, float]:
+    def get_drone_position(self) -> Tuple[float, float, float]:
         return self.latest_position
+
+    # Historical alias left in place to signal that UWB now tracks the drone only
+    def get_user_position(self) -> Tuple[float, float, float]:
+        raise NotImplementedError(
+            "UWBWrapper no longer exposes user coordinates; use the controller's "
+            "virtual user position helpers instead."
+        )
 
     def set_anchor_count(self, n: int):
         if n <= 0:

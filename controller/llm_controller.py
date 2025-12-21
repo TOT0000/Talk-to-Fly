@@ -52,6 +52,8 @@ class LLMController():
         self.message_queue = message_queue
         self.controller_active = True
         self.controller_wait_takeoff = True
+        self.latest_virtual_user_position = (0.0, 0.0, 0.0)
+        self.latest_drone_position = (0.0, 0.0, 0.0)
         
         # 1. 初始化設定 (路徑)
         self.config = self._init_config(config)
@@ -136,7 +138,7 @@ class LLMController():
     def _init_uwb(self):
         self.uwb = UWBWrapper()
         self.position_update_callback = None
-        self.uwb.register_callback(self.notify_user_position_updated)
+        self.uwb.register_callback(self.notify_drone_position_updated)
 
     def _init_skills(self, robot_type):
         # 載入低階技能 (Low Level)
@@ -194,22 +196,34 @@ class LLMController():
 
     def register_position_callback(self, callback):
         self.position_update_callback = callback
-        
-    def notify_user_position_updated(self, position: Tuple[float, float, float, float]):
+
+    def notify_drone_position_updated(self, position: Tuple[float, float, float, float]):
         timestamp, x, y, z = position
-        position_str = f"User position updated: x={x:.2f}, y={y:.2f}, z={z:.2f}"
+        position_str = f"Drone position updated (UWB): x={x:.2f}, y={y:.2f}, z={z:.2f}"
        #self.append_message(f"[LOG] {position_str}")
+        self.latest_drone_position = (x, y, z)
         if hasattr(self, 'position_update_callback') and self.position_update_callback:
             self.position_update_callback(x, y, z, "uwb")
-    
+
+    def notify_virtual_drone_position_updated(self, x: float, y: float, z: float):
+        self.latest_drone_position = (x, y, z)
+        if hasattr(self, 'position_update_callback') and self.position_update_callback:
+            self.position_update_callback(x, y, z, "virtual_drone")
+
+    def get_drone_position(self) -> Tuple[float, float, float]:
+        # Always return the latest known drone position, preferring UWB updates when available.
+        if hasattr(self, "uwb") and self.uwb.latest_position != (0.0, 0.0, 0.0):
+            return self.uwb.get_drone_position()
+        return self.latest_drone_position
+
     def skill_get_drone_position(self) -> Tuple[str, bool]:
-        x, y, z = self.drone.get_drone_position()
+        x, y, z = self.get_drone_position()
         position_str = f"Drone position is x={x:.2f}, y={y:.2f}, z={z:.2f}"
        #self.append_message(f"[LOG] {position_str}")
         return position_str, False
-        
+
     def skill_get_user_position(self) -> Tuple[str, bool]:
-        x, y, z = self.uwb.get_user_position()
+        x, y, z = self.get_virtual_user_position()
         position_str = f"User position is x={x:.2f}, y={y:.2f}, z={z:.2f}"
        #self.append_message(f"[LOG] {position_str}")
         return position_str, False
@@ -224,11 +238,11 @@ class LLMController():
         self.uwb.stop()
         self.uwb_active = False
         
-    def start_virtual_position_loop(self):
+    def start_virtual_user_position_loop(self):
         self.virtual_position_active = True
         def loop():
             while self.controller_active and self.virtual_position_active:
-                x, y, z = self.drone.get_drone_position()
+                x, y, z = self.latest_virtual_user_position
                 try:
                     self.virtual_queue.put_nowait((time.time(), x, y, z))
                 except queue.Full:
@@ -238,9 +252,22 @@ class LLMController():
                     self.position_update_callback(x, y, z, "virtual")
                 time.sleep(0.1)
         threading.Thread(target=loop, daemon=True).start()
-        
-    def stop_virtual_position_loop(self):
+
+    def stop_virtual_user_position_loop(self):
         self.virtual_position_active = False
+
+    def start_virtual_drone_position_loop(self):
+        """Continuously mirror the simulated drone pose for fallback positioning."""
+        def loop():
+            while self.controller_active:
+                x, y, z = self.drone.get_drone_position()
+                self.notify_virtual_drone_position_updated(x, y, z)
+                time.sleep(0.1)
+
+        threading.Thread(target=loop, daemon=True).start()
+
+    def get_virtual_user_position(self) -> Tuple[float, float, float]:
+        return self.latest_virtual_user_position
 
 
     def skill_time(self) -> Tuple[float, bool]:
@@ -310,8 +337,8 @@ class LLMController():
         self.append_message('[TASK]: ' + task_description)
         ret_val = None
         while True:
-            user_pos = self.uwb.get_user_position() if hasattr(self, "uwb") else (0.00, 0.00, 0.00)
-            drone_pos = self.drone.get_drone_position() if hasattr(self, "drone") else (0.00, 0.00, 0.00)
+            user_pos = self.get_virtual_user_position()
+            drone_pos = self.get_drone_position()
             
             location_info = {
                 "user": {"x": round(user_pos[0], 2), "y": round(user_pos[1], 2), "z": round(user_pos[2], 2)},
@@ -345,13 +372,13 @@ class LLMController():
         self.drone.connect()
         print_t("[C] Starting robot...")
         self.drone.takeoff()
-        self.drone.move_up(0.25)
         if self.enable_video:
             print_t("[C] Starting stream...")
             self.drone.start_stream()
         self.start_uwb()
-        print_t("[C] Starting virtual position loop...")
-        self.start_virtual_position_loop()
+        self.start_virtual_drone_position_loop()
+        print_t("[C] Starting virtual user position loop...")
+        self.start_virtual_user_position_loop()
         self.controller_wait_takeoff = False
 
     def stop_robot(self):
@@ -361,8 +388,8 @@ class LLMController():
             self.drone.stop_stream()
         print_t("[C] Stopping UWB tracking...")
         self.stop_uwb()
-        print_t("[C] Stopping virtual position loop...")
-        self.stop_virtual_position_loop()
+        print_t("[C] Stopping virtual user position loop...")
+        self.stop_virtual_user_position_loop()
         self.controller_wait_takeoff = True
 
     def capture_loop(self, asyncio_loop):
