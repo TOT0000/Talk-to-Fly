@@ -1,5 +1,5 @@
 import os, ast
-from typing import Optional
+from typing import Optional, Tuple, Union
 
 from .skillset import SkillSet
 from .llm_wrapper import LLMWrapper, GPT3, GPT4
@@ -41,7 +41,17 @@ class LLMPlanner():
         self.low_level_skillset = low_level_skillset
         self.vision_skill = vision_skill
 
-    def plan(self, task_description: str, scene_description: Optional[str] = None, location_info: Optional[str] = None, error_message: Optional[str] = None, execution_history: Optional[str] = None):
+    def _format_location_info(self, location: Tuple[float, float, float], label: str) -> str:
+        return f"{label}: x={location[0]:.2f}, y={location[1]:.2f}, z={location[2]:.2f}"
+
+    def plan(
+        self,
+        task_description: str,
+        scene_description: Optional[str] = None,
+        location_info: Optional[Union[str, dict]] = None,
+        error_message: Optional[str] = None,
+        execution_history: Optional[str] = None,
+    ):
     
         # by default, the task_description is an action
         if not task_description.startswith("["):
@@ -64,15 +74,23 @@ class LLMPlanner():
             drone_pos = (0.00, 0.00, 0.00)
             try:
                 if self.controller:
-                    if hasattr(self.controller, 'uwb') and self.controller.uwb.latest_position != (0.00, 0.00, 0.00):
-                        drone_pos = self.controller.uwb.get_drone_position()
+                    if hasattr(self.controller, 'get_drone_position'):
+                        drone_pos = self.controller.get_drone_position()
                     if hasattr(self.controller, 'get_virtual_user_position'):
                         user_pos = self.controller.get_virtual_user_position()
             except Exception:
                 pass
+            location_info = {
+                "drone": drone_pos,
+                "user": user_pos,
+            }
+
+        if isinstance(location_info, dict):
+            user_pos = location_info.get("user", (0.00, 0.00, 0.00))
+            drone_pos = location_info.get("drone", (0.00, 0.00, 0.00))
             location_info = (
-                f"Drone position (UWB): x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}\n"
-                f"User position (Virtual): x={user_pos[0]:.2f}, y={user_pos[1]:.2f}, z={user_pos[2]:.2f}"
+                f"{self._format_location_info(drone_pos, 'Drone position (UWB)')}\n"
+                f"{self._format_location_info(user_pos, 'User position (Virtual)')}"
             )
 
         full_scene = f"{scene_description}\n{location_info}".strip()
@@ -97,16 +115,16 @@ class LLMPlanner():
 
         try:
             if self.controller:
-                if hasattr(self.controller, 'uwb') and self.controller.uwb.latest_position != (0.00, 0.00, 0.00):
-                    drone_pos = self.controller.uwb.get_drone_position()
+                if hasattr(self.controller, 'get_drone_position'):
+                    drone_pos = self.controller.get_drone_position()
                 if hasattr(self.controller, 'get_virtual_user_position'):
                     user_pos = self.controller.get_virtual_user_position()
         except Exception:
             pass
 
         location_info = (
-            f"Drone position (UWB): x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}\n"
-            f"User position (Virtual): x={user_pos[0]:.2f}, y={user_pos[1]:.2f}, z={user_pos[2]:.2f}"
+            f"{self._format_location_info(drone_pos, 'Drone position (UWB)')}\n"
+            f"{self._format_location_info(user_pos, 'User position (Virtual)')}"
         )
 
         # 是否啟用影像辨識

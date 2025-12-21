@@ -2,7 +2,7 @@ import queue
 import time
 import sys, os
 import asyncio
-import io, time
+import io
 import gradio as gr
 import argparse
 import pandas as pd
@@ -213,7 +213,7 @@ class TypeFly:
             return
 
         timestamp = time.time()
-        tag = "[User/Virtual]" if source == "virtual" else "[Drone/UWB]" if source == "uwb" else "[Pos]"
+        tag = "[User/Virtual]" if source == "virtual" else "[Drone/UWB]" if source == "uwb" else "[Drone/Virtual]" if source == "virtual_drone" else "[Pos]"
 
         # 初始化紀錄字典
         if not hasattr(self, '_last_position_map'):
@@ -225,13 +225,13 @@ class TypeFly:
         if current_pos != last_pos:
             # 有改變才放入 queue
             try:
-                if source == "uwb":
+                if source in ("uwb", "virtual_drone"):
                     print(f"[receive_position] UWB pos: {x}, {y}, {z}") # 確認 callback 有進資料
                     self.uwb_queue.put_nowait((timestamp, x, y, z))
                 else:
                     self.virtual_queue.put_nowait((timestamp, x, y, z))
             except queue.Full:
-                if source == "uwb":
+                if source in ("uwb", "virtual_drone"):
                     self.uwb_queue.get()
                     self.uwb_queue.put_nowait((timestamp, x, y, z))
                 else:

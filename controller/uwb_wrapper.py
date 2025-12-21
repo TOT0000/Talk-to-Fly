@@ -41,6 +41,8 @@ class UWBWrapper:
                     print("UWBWrapper: UWB started successfully.")
                 except Exception as e:
                     print(f"UWBWrapper: Failed to open serial port: {e}")
+                    if "module 'serial' has no attribute 'Serial'" in str(e):
+                        print("UWBWrapper: Please ensure pyserial is installed (pip install pyserial).")
                     time.sleep(1)
         threading.Thread(target=try_connect, daemon=True).start()
 
