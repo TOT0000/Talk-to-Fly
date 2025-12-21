@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from PIL import Image
-import queue, time, os, json, math
+import queue, time, os, json, math, random
 from typing import Optional, Tuple
 import asyncio
 import uuid
@@ -237,25 +237,28 @@ class LLMController():
         self.uwb.stop()
         self.uwb_active = False
         
+    def _publish_virtual_user_position(self, x: float, y: float, z: float):
+        self.latest_virtual_user_position = (x, y, z)
+        try:
+            self.virtual_queue.put_nowait((time.time(), x, y, z))
+        except queue.Full:
+            self.virtual_queue.get()
+            self.virtual_queue.put_nowait((time.time(), x, y, z))
+        if self.position_update_callback:
+            self.position_update_callback(x, y, z, "virtual")
+
+    def set_random_virtual_user_position(self, margin: float = 0.5, xlim=(0.0, 5.0), ylim=(0.0, 5.0), z: float = 0.25):
+        """Assign a stable virtual user position per task away from plot corners."""
+        x_min, x_max = xlim[0] + margin, xlim[1] - margin
+        y_min, y_max = ylim[0] + margin, ylim[1] - margin
+        x = random.uniform(x_min, x_max)
+        y = random.uniform(y_min, y_max)
+        self._publish_virtual_user_position(x, y, z)
+
     def start_virtual_user_position_loop(self):
+        """Initialize a virtual user position without continuous drifting."""
         self.virtual_position_active = True
-        start_time = time.time()
-        def loop():
-            while self.controller_active and self.virtual_position_active:
-                elapsed = time.time() - start_time
-                x = 1.0 + 0.5 * math.sin(elapsed / 3.0)
-                y = 1.0 + 0.5 * math.cos(elapsed / 3.0)
-                z = 0.25
-                self.latest_virtual_user_position = (x, y, z)
-                try:
-                    self.virtual_queue.put_nowait((time.time(), x, y, z))
-                except queue.Full:
-                    self.virtual_queue.get()
-                    self.virtual_queue.put_nowait((time.time(), x, y, z))
-                if self.position_update_callback:
-                    self.position_update_callback(x, y, z, "virtual")
-                time.sleep(0.1)
-        threading.Thread(target=loop, daemon=True).start()
+        self.set_random_virtual_user_position()
 
     def stop_virtual_user_position_loop(self):
         self.virtual_position_active = False
@@ -339,6 +342,8 @@ class LLMController():
             self.append_message("[Warning] Controller is waiting for takeoff...")
             return
         self.append_message('[TASK]: ' + task_description)
+        # 每個任務開始時，為虛擬使用者隨機生成一個固定位置，避免落在座標邊角。
+        self.set_random_virtual_user_position()
         ret_val = None
         while True:
             user_pos = self.get_virtual_user_position()
