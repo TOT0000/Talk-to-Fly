@@ -4,7 +4,6 @@ import queue, time, os, json, math
 from typing import Optional, Tuple
 import asyncio
 import uuid
-from enum import Enum
 import threading
 
 # 保留原本的引用
@@ -17,7 +16,7 @@ from .abs.robot_wrapper import RobotWrapper
 from .vision_skill_wrapper import VisionSkillWrapper
 from .llm_planner import LLMPlanner
 from .skillset import SkillSet, LowLevelSkillItem, HighLevelSkillItem, SkillArg
-from .utils import print_t, input_t
+from .utils import print_t
 from .minispec_interpreter import MiniSpecInterpreter, Statement
 from .abs.robot_wrapper import RobotType
 from .uwb_wrapper import UWBWrapper
