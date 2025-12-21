@@ -2,7 +2,7 @@ import queue
 import time
 import sys, os
 import asyncio
-import io, time
+import io
 import gradio as gr
 import argparse
 import pandas as pd
