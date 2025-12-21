@@ -38,12 +38,13 @@ class TypeFly:
 
         self.llm_controller = LLMController(robot_type, self.virtual_queue, use_http, self.message_queue, enable_video=enable_video)
         self.llm_controller.register_position_callback(self.receive_position)
-        
+
         self.system_stop = False
-        self.ui = gr.Blocks(title="TypeFly")
+        self.ui = gr.Blocks(title="Talk-to-Fly")
         self.asyncio_loop = asyncio.get_event_loop()
         self.use_llama3 = False
         self.robot_type = robot_type
+        self.axis_limit_m = 20
 
         # 狀態資料
         self.anchor_count = 0
@@ -153,20 +154,29 @@ class TypeFly:
             with gr.Row():
                 with gr.Column(scale=2):
                     self.xy_plot = gr.Image(
-                        value=self.create_blank_plot("UWB & Virtual Drone Position (XY view)", "X (m)", "Y (m)", xlim=(0, 5), ylim=(0, 5)),
+                        value=self.create_blank_plot(
+                            "UWB & Virtual Drone Position (XY view)", "X (m)", "Y (m)",
+                            xlim=(0, self.axis_limit_m), ylim=(0, self.axis_limit_m)
+                        ),
                         label="XY Plot"
                     )
                     self.x_plot = gr.Image(
-                        value=self.create_sequence_plot("X in Sequence", "Index", "X (m)", xlim=(0, 1), ylim=(0, 5)),
+                        value=self.create_sequence_plot(
+                            "X in Sequence", "Index", "X (m)", xlim=(0, 1), ylim=(0, self.axis_limit_m)
+                        ),
                         label="X in Sequence"
                     )
                 with gr.Column(scale=2):
                     self.z_plot = gr.Image(
-                        value=self.create_sequence_plot("Z in Sequence", "Index", "Z (m)", xlim=(0, 1), ylim=(0, 5)),
+                        value=self.create_sequence_plot(
+                            "Z in Sequence", "Index", "Z (m)", xlim=(0, 1), ylim=(0, self.axis_limit_m)
+                        ),
                         label="Z in Sequence"
                     )
                     self.y_plot = gr.Image(
-                        value=self.create_sequence_plot("Y in Sequence", "Index", "Y (m)", xlim=(0, 1), ylim=(0, 5)),
+                        value=self.create_sequence_plot(
+                            "Y in Sequence", "Index", "Y (m)", xlim=(0, 1), ylim=(0, self.axis_limit_m)
+                        ),
                         label="Y in Sequence"
                     )
 
@@ -419,8 +429,10 @@ class TypeFly:
         fig, ax = plt.subplots(figsize=(5, 4))
         ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
-        ax.set_xticks([round(xlim[0] + i * 0.5, 2) for i in range(int((xlim[1]-xlim[0])/0.5)+1)])
-        ax.set_yticks([round(ylim[0] + i * 0.5, 2) for i in range(int((ylim[1]-ylim[0])/0.5)+1)])
+        x_tick_step = max((xlim[1] - xlim[0]) / 10, 0.1)
+        y_tick_step = max((ylim[1] - ylim[0]) / 10, 0.1)
+        ax.set_xticks([round(xlim[0] + i * x_tick_step, 2) for i in range(int((xlim[1]-xlim[0])/x_tick_step)+1)])
+        ax.set_yticks([round(ylim[0] + i * y_tick_step, 2) for i in range(int((ylim[1]-ylim[0])/y_tick_step)+1)])
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
         ax.set_title(title)
@@ -431,12 +443,12 @@ class TypeFly:
         plt.close(fig)
         return Image.open(buf)
 
-    def create_sequence_plot(self, title, xlabel, ylabel, xlim=(0, 1), ylim=(0, 5)):
+    def create_sequence_plot(self, title, xlabel, ylabel, xlim=(0, 1), ylim=(0, 20)):
         fig, ax = plt.subplots(figsize=(5, 4))
         ax.set_xlim(xlim)
         ax.set_ylim(ylim)
-        ax.set_xticks([i * 0.2 for i in range(6)])
-        ax.set_yticks([i * 0.5 for i in range(11)])
+        ax.set_xticks([i * (xlim[1] - xlim[0]) / 5 for i in range(6)])
+        ax.set_yticks([ylim[0] + i * (ylim[1] - ylim[0]) / 10 for i in range(11)])
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
         ax.set_title(title)
@@ -453,8 +465,8 @@ class TypeFly:
         return xy, x, y, z, counter
 
     def update_position_plot(self):  
-        uwb_data = list(self.uwb_queue.queue)[-1:]
-        virtual_data = list(self.virtual_queue.queue)[-1:]
+        uwb_data = list(self.uwb_queue.queue)
+        virtual_data = list(self.virtual_queue.queue)
 
         df_uwb = pd.DataFrame(uwb_data, columns=["t", "x", "y", "z"]) if uwb_data else pd.DataFrame()
         df_virt = pd.DataFrame(virtual_data, columns=["t", "x", "y", "z"]) if virtual_data else pd.DataFrame()
@@ -469,23 +481,23 @@ class TypeFly:
 
         if plot_df.empty:
             return (
-                self.create_blank_plot("XY Plot", "X", "Y", (0, 5), (0, 5)),
-                self.create_sequence_plot("X in Sequence", "Index", "X (m)", (0, 1), (0, 5)),
-                self.create_sequence_plot("Y in Sequence", "Index", "Y (m)", (0, 1), (0, 5)),
-                self.create_sequence_plot("Z in Sequence", "Index", "Z (m)", (0, 1), (0, 5)),
+                self.create_blank_plot("XY Plot", "X", "Y", (0, self.axis_limit_m), (0, self.axis_limit_m)),
+                self.create_sequence_plot("X in Sequence", "Index", "X (m)", (0, 1), (0, self.axis_limit_m)),
+                self.create_sequence_plot("Y in Sequence", "Index", "Y (m)", (0, 1), (0, self.axis_limit_m)),
+                self.create_sequence_plot("Z in Sequence", "Index", "Z (m)", (0, 1), (0, self.axis_limit_m)),
             )
 
         colors_map = {"UWB": "red", "Virtual": "blue"}
 
         fig_xy, ax_xy = plt.subplots(figsize=(5, 4))
         for dtype, color in colors_map.items():
-            subset = plot_df[plot_df["type"] == dtype]
+            subset = plot_df[plot_df["type"] == dtype].sort_values("t")
             if not subset.empty:
-                ax_xy.scatter(subset["x"], subset["y"], c=color, label=dtype, marker='o')
+                ax_xy.plot(subset["x"], subset["y"], c=color, marker='o', label=dtype)
                 latest = subset.iloc[-1]
                 ax_xy.text(
-                    latest["x"] + 0.05,
-                    latest["y"] + 0.05,
+                    latest["x"] + 0.1,
+                    latest["y"] + 0.1,
                     f"({latest['x']:.2f}, {latest['y']:.2f})",
                     fontsize=8,
                     color=color,
@@ -494,10 +506,10 @@ class TypeFly:
                 )
             else:
                 ax_xy.scatter([], [], c=color, label=dtype, marker='o')
-        ax_xy.set_xlim(0, 5)
-        ax_xy.set_ylim(0, 5)
-        ax_xy.set_xticks([i * 0.5 for i in range(11)])
-        ax_xy.set_yticks([i * 0.5 for i in range(11)])
+        ax_xy.set_xlim(0, self.axis_limit_m)
+        ax_xy.set_ylim(0, self.axis_limit_m)
+        ax_xy.set_xticks([i * (self.axis_limit_m / 10) for i in range(11)])
+        ax_xy.set_yticks([i * (self.axis_limit_m / 10) for i in range(11)])
         ax_xy.set_xlabel("X (m)")
         ax_xy.set_ylabel("Y (m)")
         ax_xy.set_title("UWB & Virtual Drone Position (XY view)")
@@ -513,21 +525,27 @@ class TypeFly:
         imgs = []
         for axis in ["x", "y", "z"]:
             fig, ax = plt.subplots(figsize=(5, 4))
+            max_points = 1
             for label, color in colors_map.items():
                 ax.scatter([], [], color=color, label=label, marker='o')
             for label, group in plot_df.groupby("type"):
+                group = group.sort_values("t").reset_index(drop=True)
                 if len(group) >= 1:
-                    x_vals = group.index / max(len(group.index) - 1, 1)
+                    x_vals = group.index
                     y_vals = group[axis]
-                    ax.scatter(x_vals, y_vals, color=colors_map[label], marker='o')
+                    max_points = max(max_points, len(group))
+                    ax.plot(x_vals, y_vals, color=colors_map[label], marker='o')
                     latest_x = x_vals.iloc[-1] if isinstance(x_vals, pd.Series) else x_vals[-1]
                     latest_y = y_vals.iloc[-1] if isinstance(y_vals, pd.Series) else y_vals[-1]
-                    ax.text(latest_x + 0.01, latest_y + 0.05, f"{axis}={latest_y:.2f}",
+                    ax.text(latest_x + 0.1, latest_y + 0.2, f"{axis}={latest_y:.2f}",
                             fontsize=8, color=colors_map[label], ha='left', va='bottom')
-            ax.set_xlim(0, 1)
-            ax.set_xticks([i * 0.2 for i in range(6)])
-            ax.set_ylim(0, 5)
-            ax.set_yticks([i * 0.5 for i in range(11)])
+            ax.set_xlim(0, max(max_points - 1, 1))
+            ax.set_xticks([
+                round((max(max_points - 1, 1)) * i / 5, 2)
+                for i in range(6)
+            ])
+            ax.set_ylim(0, self.axis_limit_m)
+            ax.set_yticks([i * (self.axis_limit_m / 10) for i in range(11)])
             ax.set_title(f"{axis.upper()} in Sequence")
             ax.set_xlabel("Index")
             ax.set_ylabel(f"{axis.upper()} (m)")
