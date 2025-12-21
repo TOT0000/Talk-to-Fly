@@ -52,7 +52,7 @@ class TypeFly:
         # 浮動提示 internal state
         self._temp_message = ""
         self._temp_message_expire = 0.0
-
+        '''
         default_sentences = [
             "Find something I can eat.",
             "What you can see?",
@@ -60,6 +60,7 @@ class TypeFly:
             "Find a chair for me.",
             "Go to the chair without book."
         ]
+        '''
 
         with self.ui:
             gr.HTML(open(os.path.join(CURRENT_DIR, 'header.html'), 'r').read())
@@ -177,7 +178,7 @@ class TypeFly:
                 outputs=[self.xy_plot, self.x_plot, self.y_plot, self.z_plot, self.counter]
             )
 
-            self.chat = gr.ChatInterface(self.process_message, fill_height=False, examples=default_sentences)
+            self.chat = gr.ChatInterface(self.process_message, fill_height=False)
 
     def show_temporary_message(self, text, duration=3):
         self._temp_message = text
@@ -392,7 +393,7 @@ class TypeFly:
             flask_thread = None
 
         self.chat.queue()
-        self.ui.launch(show_api=False, server_port=50001, prevent_thread_lock=True)
+        self.ui.launch(server_port=50001, prevent_thread_lock=True)
 
         while not self.system_stop:
             time.sleep(1)
