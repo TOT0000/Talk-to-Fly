@@ -395,7 +395,8 @@ class TypeFly:
             flask_thread = None
 
         self.chat.queue()
-        self.ui.launch(show_api=False, server_port=50001, prevent_thread_lock=True)
+        # `show_api` parameter was removed in newer Gradio versions; omit it for compatibility.
+        self.ui.launch(server_port=50001, prevent_thread_lock=True)
 
         while not self.system_stop:
             time.sleep(1)
