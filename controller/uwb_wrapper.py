@@ -26,11 +26,12 @@ class UWBWrapper:
 
     def start(self):
         self.serial_port = serial.Serial(self.port, self.baudrate, timeout=1)
+        self.reset_anchors()
         self.running = True
         self.thread = threading.Thread(target=self._read_loop, daemon=True)
         self.thread.start()
         print("UWBWrapper: Serial port connected and reading thread started.")
-        self.reset_anchors()
+        
 
     def start_with_retry(self):
         def try_connect():
