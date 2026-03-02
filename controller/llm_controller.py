@@ -20,8 +20,7 @@ from .utils import print_t, input_t
 from .minispec_interpreter import MiniSpecInterpreter, Statement
 from .abs.robot_wrapper import RobotType
 from .uwb_wrapper import UWBWrapper
-from .state_provider import StateProvider, UwbStateProvider
-from .sim_state_provider import SimStateProvider
+from .state_provider import StateProvider, UwbStateProvider, NullUserProvider
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -72,13 +71,11 @@ class LLMController():
         # state provider
         self.uwb = UWBWrapper()
         if robot_type == RobotType.PX4_SIM:
-            self.state_provider = SimStateProvider()
-            if hasattr(self.drone, "set_state_provider"):
-                self.drone.set_state_provider(self.state_provider)
+            self.state_provider = NullUserProvider(self.drone)
         elif state_provider is not None:
             self.state_provider = state_provider
         else:
-            self.state_provider = UwbStateProvider(self.uwb)
+            self.state_provider = UwbStateProvider(self.uwb, self.drone)
 
         self.position_update_callback = None
         self.state_provider.register_callback(self.notify_user_position_updated)
