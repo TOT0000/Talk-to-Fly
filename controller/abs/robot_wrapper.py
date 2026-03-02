@@ -1,10 +1,12 @@
 from abc import ABC, abstractmethod
 from enum import Enum
+from typing import Tuple
 
 class RobotType(Enum):
     VIRTUAL = 0
     TELLO = 1
     GEAR = 2
+    PX4_SIM = 3
 
 class RobotWrapper(ABC):
     movement_x_accumulator = 0
@@ -68,4 +70,8 @@ class RobotWrapper(ABC):
 
     @abstractmethod
     def turn_cw(self, degree: int) -> bool:
+        pass
+
+    @abstractmethod
+    def get_drone_position(self) -> Tuple[float, float, float]:
         pass

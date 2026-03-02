@@ -236,3 +236,6 @@ class GearWrapper(RobotWrapper):
             time.sleep(0.1)
         self.robot.send_command_hover(0, 0, 0, 0)
         return True, False
+    def get_drone_position(self) -> Tuple[float, float, float]:
+        return 0.0, 0.0, 0.0
+
