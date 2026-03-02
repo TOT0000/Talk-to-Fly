@@ -19,6 +19,16 @@ class StateProvider(ABC):
         pass
 
     @abstractmethod
+    def get_drone_position(self) -> Tuple[float, float, float]:
+        pass
+
+    def get_drone_velocity(self) -> Tuple[float, float, float]:
+        return 0.0, 0.0, 0.0
+
+    def get_drone_yaw(self) -> float:
+        return 0.0
+
+    @abstractmethod
     def has_valid_position(self) -> bool:
         pass
 
@@ -36,9 +46,10 @@ class StateProvider(ABC):
 
 
 class UwbStateProvider(StateProvider):
-    def __init__(self, uwb: Optional[UWBWrapper] = None):
+    def __init__(self, uwb: Optional[UWBWrapper] = None, robot: Optional[RobotWrapper] = None):
         super().__init__()
         self.uwb = uwb or UWBWrapper()
+        self.robot = robot
 
     def register_callback(self, callback: Callable[[Tuple[float, float, float, float]], None]):
         super().register_callback(callback)
@@ -46,6 +57,11 @@ class UwbStateProvider(StateProvider):
 
     def get_user_position(self) -> Tuple[float, float, float]:
         return self.uwb.get_user_position()
+
+    def get_drone_position(self) -> Tuple[float, float, float]:
+        if self.robot is None:
+            return 0.0, 0.0, 0.0
+        return self.robot.get_drone_position()
 
     def has_valid_position(self) -> bool:
         return self.uwb.latest_position != (0.00, 0.00, 0.00)
@@ -60,13 +76,17 @@ class UwbStateProvider(StateProvider):
         self.uwb.stop()
 
 
-class SimStateProvider(StateProvider):
-    def __init__(self, robot: RobotWrapper):
+class NullUserProvider(StateProvider):
+    def __init__(self, robot: RobotWrapper, user_position: Tuple[float, float, float] = (0.0, 0.0, 0.0)):
         super().__init__()
         self.robot = robot
+        self.user_position = user_position
         self._active = False
 
     def get_user_position(self) -> Tuple[float, float, float]:
+        return self.user_position
+
+    def get_drone_position(self) -> Tuple[float, float, float]:
         return self.robot.get_drone_position()
 
     def has_valid_position(self) -> bool:
@@ -92,3 +112,9 @@ class SimStateProvider(StateProvider):
 
     def stop(self):
         self._active = False
+
+
+class SimStateProvider(NullUserProvider):
+    """Backward-compatible alias for previous simulation provider name."""
+
+    pass
