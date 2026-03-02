@@ -156,3 +156,10 @@ class TelloWrapper(RobotWrapper):
             print('[OK]')
             return True
         return False
+
+    def get_drone_position(self) -> Tuple[float, float, float]:
+        return (
+            float(self.movement_x_accumulator),
+            float(self.movement_y_accumulator),
+            0.0,
+        )
