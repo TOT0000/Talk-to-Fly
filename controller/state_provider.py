@@ -33,6 +33,10 @@ class StateProvider(ABC):
         pass
 
     @abstractmethod
+    def get_user_yaw(self) -> float:
+        pass
+
+    @abstractmethod
     def start(self):
         pass
 
@@ -62,6 +66,9 @@ class UwbStateProvider(StateProvider):
     def has_valid_position(self) -> bool:
         return self.uwb.latest_position != (0.00, 0.00, 0.00)
 
+    def get_user_yaw(self) -> float:
+        return 0.0
+
     def start(self):
         self.uwb.start_with_retry()
 
@@ -84,6 +91,12 @@ class NullUserProvider(StateProvider):
 
     def has_valid_position(self) -> bool:
         return True
+
+    def get_user_yaw(self) -> float:
+        get_yaw = getattr(self.robot, "get_drone_yaw", None)
+        if callable(get_yaw):
+            return float(get_yaw())
+        return 0.0
 
     def start(self):
         self._active = True
