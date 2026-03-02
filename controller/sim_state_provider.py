@@ -34,6 +34,8 @@ class SimStateProvider(StateProvider):
         self._rclpy = None
 
         self._fixed_user_position = fixed_user_position or self._load_user_position_from_env()
+        self._last_position_ts: float = 0.0
+        self._ros_ready: bool = False
 
     def _load_user_position_from_env(self) -> Tuple[float, float, float]:
         raw = os.getenv("SIM_USER_POSITION", "0,0,0")
@@ -52,6 +54,7 @@ class SimStateProvider(StateProvider):
             self._cache.position = position
             self._cache.velocity = velocity
             self._cache.yaw = yaw
+            self._last_position_ts = time.time()
 
         if self._callback:
             self._callback((time.time(), position[0], position[1], position[2]))
@@ -65,7 +68,9 @@ class SimStateProvider(StateProvider):
         return self._fixed_user_position
 
     def has_valid_position(self) -> bool:
-        return True
+        with self._lock:
+            # PX4 local position (0,0,0) 可能是合法原點，故以時間戳判定是否曾收過資料
+            return (time.time() - self._last_position_ts) < 1.0 and self._last_position_ts > 0.0
 
     def get_drone_position(self) -> Tuple[float, float, float]:
         with self._lock:
@@ -98,11 +103,13 @@ class SimStateProvider(StateProvider):
         except ImportError as exc:
             print(f"[WARN] SimStateProvider disabled (ROS2/PX4 messages unavailable): {exc}")
             self._active = True
+            self._ros_ready = False
             return
 
         self._rclpy = rclpy
         self._rclpy.init(args=None)
         self._node = Node("sim_state_provider")
+        self._ros_ready = True
 
         self._node.create_subscription(
             VehicleLocalPosition,
@@ -126,6 +133,17 @@ class SimStateProvider(StateProvider):
         self._spin_thread = threading.Thread(target=_spin, daemon=True)
         self._spin_thread.start()
 
+    def is_ros_ready(self) -> bool:
+        return self._ros_ready
+
+    def wait_for_position(self, timeout_s: float = 3.0) -> bool:
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if self.has_valid_position():
+                return True
+            time.sleep(0.05)
+        return self.has_valid_position()
+
     def stop(self):
         self._active = False
 
@@ -141,3 +159,4 @@ class SimStateProvider(StateProvider):
 
         if self._rclpy.ok():
             self._rclpy.shutdown()
+        self._ros_ready = False
