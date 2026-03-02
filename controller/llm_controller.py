@@ -283,8 +283,7 @@ class LLMController():
         if self.enable_video:
             print_t("[C] Starting stream...")
             self.drone.start_stream()
-        if self.robot_type != RobotType.PX4_SIM:
-            self.start_uwb()
+        self.start_uwb()
         print_t("[C] Starting virtual position loop...")
         self.start_virtual_position_loop()
         self.controller_wait_takeoff = False
@@ -294,9 +293,8 @@ class LLMController():
         self.drone.land()
         if self.enable_video:
             self.drone.stop_stream()
-        if self.robot_type != RobotType.PX4_SIM:
-            print_t("[C] Stopping UWB tracking...")
-            self.stop_uwb()
+        print_t("[C] Stopping UWB tracking...")
+        self.stop_uwb()
         print_t("[C] Stopping virtual position loop...")
         self.stop_virtual_position_loop()
         self.controller_wait_takeoff = True
