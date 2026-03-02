@@ -115,6 +115,26 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         yaw = self.get_drone_yaw()
         return pos, yaw
 
+    def _normalize_angle(self, angle: float) -> float:
+        return math.atan2(math.sin(angle), math.cos(angle))
+
+    def _wait_for_state(self, timeout_s: float = 2.0) -> bool:
+        if self._state_provider is not None and hasattr(self._state_provider, "wait_for_position"):
+            return bool(self._state_provider.wait_for_position(timeout_s=timeout_s))
+        return True
+
+    def _move_to_target(self, target_x: float, target_y: float, target_z: float, yaw: float, timeout_s: float) -> Tuple[bool, bool]:
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            self._publish_offboard_setpoint(target_x, target_y, target_z, yaw=yaw)
+            self._spin_once()
+            cx, cy, cz = self.get_drone_position()
+            err = math.sqrt((target_x - cx) ** 2 + (target_y - cy) ** 2 + (target_z - cz) ** 2)
+            if err < 0.25:
+                return True, False
+            time.sleep(0.05)
+        return True, False
+
     def get_drone_position(self) -> Tuple[float, float, float]:
         if self._state_provider is not None and hasattr(self._state_provider, "get_drone_position"):
             return self._state_provider.get_drone_position()
@@ -182,31 +202,69 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
     def move_forward(self, distance: float) -> Tuple[bool, bool]:
         if not self._ensure_ros_publishers():
             return False, False
-
-        if self._state_provider is not None and hasattr(self._state_provider, "wait_for_position"):
-            if not self._state_provider.wait_for_position(timeout_s=2.0):
-                return False, False
+        if not self._wait_for_state(timeout_s=2.0):
+            return False, False
 
         (x, y, z), yaw = self._get_state()
-
-        # Assume local XY frame where yaw rotates heading in plane
         dx = float(distance) * math.cos(yaw)
         dy = float(distance) * math.sin(yaw)
         target_x = x + dx
         target_y = y + dy
         target_z = z
+        return self._move_to_target(target_x, target_y, target_z, yaw=yaw, timeout_s=max(3.0, abs(distance) * 3.0))
 
-        deadline = time.time() + max(3.0, abs(distance) * 3.0)
+    def move_backward(self, distance: float) -> Tuple[bool, bool]:
+        return self.move_forward(-float(distance))
+
+    def move_left(self, distance: float) -> Tuple[bool, bool]:
+        if not self._ensure_ros_publishers():
+            return False, False
+        if not self._wait_for_state(timeout_s=2.0):
+            return False, False
+
+        (x, y, z), yaw = self._get_state()
+        side_yaw = yaw + (math.pi / 2.0)
+        dx = float(distance) * math.cos(side_yaw)
+        dy = float(distance) * math.sin(side_yaw)
+        return self._move_to_target(x + dx, y + dy, z, yaw=yaw, timeout_s=max(3.0, abs(distance) * 3.0))
+
+    def move_right(self, distance: float) -> Tuple[bool, bool]:
+        return self.move_left(-float(distance))
+
+    def move_up(self, distance: float) -> Tuple[bool, bool]:
+        if not self._ensure_ros_publishers():
+            return False, False
+        if not self._wait_for_state(timeout_s=2.0):
+            return False, False
+
+        (x, y, z), yaw = self._get_state()
+        target_z = z - float(distance)
+        return self._move_to_target(x, y, target_z, yaw=yaw, timeout_s=max(3.0, abs(distance) * 3.0))
+
+    def move_down(self, distance: float) -> Tuple[bool, bool]:
+        return self.move_up(-float(distance))
+
+    def turn_cw(self, degree: int) -> Tuple[bool, bool]:
+        if not self._ensure_ros_publishers():
+            return False, False
+        if not self._wait_for_state(timeout_s=2.0):
+            return False, False
+
+        (x, y, z), yaw = self._get_state()
+        target_yaw = self._normalize_angle(yaw - math.radians(float(degree)))
+        deadline = time.time() + max(2.0, abs(float(degree)) / 45.0)
         while time.time() < deadline:
-            self._publish_offboard_setpoint(target_x, target_y, target_z, yaw=yaw)
+            self._publish_offboard_setpoint(x, y, z, yaw=target_yaw)
             self._spin_once()
-            cx, cy, cz = self.get_drone_position()
-            err = math.sqrt((target_x - cx) ** 2 + (target_y - cy) ** 2 + (target_z - cz) ** 2)
-            if err < 0.25:
+            cyaw = self.get_drone_yaw()
+            yaw_err = abs(self._normalize_angle(target_yaw - cyaw))
+            if yaw_err < math.radians(5.0):
                 return True, False
             time.sleep(0.05)
-
         return True, False
+
+    def turn_ccw(self, degree: int) -> Tuple[bool, bool]:
+        return self.turn_cw(-int(degree))
 
     def land(self):
         if not self._ensure_ros_publishers():
