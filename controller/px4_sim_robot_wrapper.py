@@ -3,6 +3,7 @@ import time
 from typing import Optional, Tuple
 
 from .virtual_robot_wrapper import VirtualRobotWrapper
+from .sim_state_provider import _SharedRos2Context
 
 
 class Px4SimRobotWrapper(VirtualRobotWrapper):
@@ -28,6 +29,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._pub_vehicle_cmd = None
 
         self._offboard_counter = 0
+        self._ros_context_acquired = False
 
     def set_state_provider(self, state_provider):
         self._state_provider = state_provider
@@ -36,17 +38,18 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         if self._node is not None:
             return True
         try:
-            import rclpy
             from rclpy.node import Node
             from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand
         except ImportError as exc:
             print(f"[WARN] Px4SimRobotWrapper ROS2/PX4 unavailable: {exc}")
             return False
 
-        self._rclpy = rclpy
-        if not self._rclpy.ok():
-            self._rclpy.init(args=None)
+        self._rclpy = _SharedRos2Context.acquire()
+        if self._rclpy is None:
+            print("[WARN] Px4SimRobotWrapper ROS2 context unavailable")
+            return False
 
+        self._ros_context_acquired = True
         self._node = Node("px4_sim_robot_wrapper")
         self._msg_OffboardControlMode = OffboardControlMode
         self._msg_TrajectorySetpoint = TrajectorySetpoint
@@ -210,6 +213,18 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             return
         cmd_land = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_NAV_LAND", 21)
         self._publish_vehicle_command(cmd_land)
+
+
+    def close(self):
+        if self._node is not None:
+            self._node.destroy_node()
+            self._node = None
+
+        if self._ros_context_acquired:
+            _SharedRos2Context.release(self._rclpy)
+            self._ros_context_acquired = False
+
+        self._rclpy = None
 
     def stop_stream(self):
         super().stop_stream()

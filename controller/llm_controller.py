@@ -282,11 +282,11 @@ class LLMController():
 
     def start_robot(self):
         print_t("[C] Connecting to robot...")
+
+        # Start state provider first so PX4_SIM wrapper can immediately consume live state.
+        self.start_uwb()
         self.drone.connect()
         print_t("[C] Starting robot...")
-
-        # Start state provider before PX4_SIM takeoff so wrapper has live sim state.
-        self.start_uwb()
 
         self.drone.takeoff()
         if self.robot_type != RobotType.PX4_SIM:
@@ -304,10 +304,12 @@ class LLMController():
         self.drone.land()
         if self.enable_video:
             self.drone.stop_stream()
-        print_t("[C] Stopping UWB tracking...")
-        self.stop_uwb()
         print_t("[C] Stopping virtual position loop...")
         self.stop_virtual_position_loop()
+        print_t("[C] Stopping UWB tracking...")
+        self.stop_uwb()
+        if hasattr(self.drone, "close"):
+            self.drone.close()
         self.controller_wait_takeoff = True
 
     def capture_loop(self, asyncio_loop):
