@@ -16,6 +16,41 @@ class _SimStateCache:
     arming_state: int = 0
 
 
+class _SharedRos2Context:
+    """Process-wide ROS2 context guard with reference counting."""
+
+    _lock = threading.Lock()
+    _ref_count = 0
+    _rclpy = None
+
+    @classmethod
+    def acquire(cls):
+        try:
+            import rclpy
+        except ImportError:
+            return None
+
+        with cls._lock:
+            if not rclpy.ok():
+                rclpy.init(args=None)
+            cls._ref_count += 1
+            cls._rclpy = rclpy
+            return cls._rclpy
+
+    @classmethod
+    def release(cls, rclpy_module):
+        if rclpy_module is None:
+            return
+
+        with cls._lock:
+            if cls._ref_count > 0:
+                cls._ref_count -= 1
+
+            if cls._ref_count == 0 and rclpy_module.ok():
+                rclpy_module.shutdown()
+                cls._rclpy = None
+
+
 class SimStateProvider(StateProvider):
     """State provider for PX4 SITL via ROS2 topics.
 
@@ -32,7 +67,9 @@ class SimStateProvider(StateProvider):
         self._spin_thread: Optional[threading.Thread] = None
         self._node = None
         self._rclpy = None
+        self._ros_context_acquired = False
 
+        # TODO(px4-sim): user position is currently fixed/env-driven, not dynamic from simulator topics.
         self._fixed_user_position = fixed_user_position or self._load_user_position_from_env()
         self._last_position_ts: float = 0.0
         self._ros_ready: bool = False
@@ -67,6 +104,10 @@ class SimStateProvider(StateProvider):
     def get_user_position(self) -> Tuple[float, float, float]:
         return self._fixed_user_position
 
+    def get_user_yaw(self) -> float:
+        # TODO(px4-sim): derive dynamic user yaw from simulator once a user-state source is available.
+        return 0.0
+
     def has_valid_position(self) -> bool:
         with self._lock:
             # PX4 local position (0,0,0) 可能是合法原點，故以時間戳判定是否曾收過資料
@@ -97,7 +138,6 @@ class SimStateProvider(StateProvider):
             return
 
         try:
-            import rclpy
             from rclpy.node import Node
             from px4_msgs.msg import VehicleLocalPosition, VehicleStatus
         except ImportError as exc:
@@ -106,8 +146,14 @@ class SimStateProvider(StateProvider):
             self._ros_ready = False
             return
 
-        self._rclpy = rclpy
-        self._rclpy.init(args=None)
+        self._rclpy = _SharedRos2Context.acquire()
+        if self._rclpy is None:
+            print("[WARN] SimStateProvider disabled (rclpy unavailable).")
+            self._active = True
+            self._ros_ready = False
+            return
+
+        self._ros_context_acquired = True
         self._node = Node("sim_state_provider")
         self._ros_ready = True
 
@@ -157,6 +203,9 @@ class SimStateProvider(StateProvider):
             self._node.destroy_node()
             self._node = None
 
-        if self._rclpy.ok():
-            self._rclpy.shutdown()
+        if self._ros_context_acquired:
+            _SharedRos2Context.release(self._rclpy)
+            self._ros_context_acquired = False
+
+        self._rclpy = None
         self._ros_ready = False
