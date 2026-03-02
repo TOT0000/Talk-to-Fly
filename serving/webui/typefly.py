@@ -27,7 +27,7 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 class TypeFly:
-    def __init__(self, robot_type, use_http=False, enable_video=False):
+    def __init__(self, robot_type, use_http=False, enable_video=False, backend="uwb"):
         self.cache_folder = os.path.join(CURRENT_DIR, 'cache')
         if not os.path.exists(self.cache_folder):
             os.makedirs(self.cache_folder)
@@ -36,14 +36,15 @@ class TypeFly:
         self.uwb_queue = queue.Queue(maxsize=500)
         self.virtual_queue = queue.Queue(maxsize=500)
 
-        self.llm_controller = LLMController(robot_type, self.virtual_queue, use_http, self.message_queue, enable_video=enable_video)
+        controller_robot_type = RobotType.PX4_SIM if backend == "sim" else robot_type
+        self.llm_controller = LLMController(controller_robot_type, self.virtual_queue, use_http, self.message_queue, enable_video=enable_video)
         self.llm_controller.register_position_callback(self.receive_position)
         
         self.system_stop = False
         self.ui = gr.Blocks(title="TypeFly")
         self.asyncio_loop = asyncio.get_event_loop()
         self.use_llama3 = False
-        self.robot_type = robot_type
+        self.robot_type = controller_robot_type
 
         # 狀態資料
         self.anchor_count = 0
@@ -211,7 +212,7 @@ class TypeFly:
             return
 
         timestamp = time.time()
-        tag = "[VirtualPos]" if source == "virtual" else "[UWBPos]" if source == "uwb" else "[Pos]"
+        tag = "[VirtualPos]" if source == "virtual" else "[UWBPos]" if source == "uwb" else "[SimPos]" if source == "sim" else "[Pos]"
 
         # 初始化紀錄字典
         if not hasattr(self, '_last_position_map'):
@@ -549,14 +550,18 @@ if __name__ == "__main__":
     parser.add_argument('--use_http', action='store_true')
     parser.add_argument('--gear', action='store_true')
     parser.add_argument('--image', action='store_true')
+    parser.add_argument('--px4_sim', action='store_true')
 
     args = parser.parse_args()
     robot_type = RobotType.TELLO
-    if args.use_virtual_robot:
+    backend = "uwb"
+    if args.px4_sim:
+        robot_type = RobotType.PX4_SIM
+        backend = "sim"
+    elif args.use_virtual_robot:
         robot_type = RobotType.VIRTUAL
     elif args.gear:
         robot_type = RobotType.GEAR
 
-    typefly = TypeFly(robot_type, use_http=args.use_http, enable_video=args.image)
+    typefly = TypeFly(robot_type, use_http=args.use_http, enable_video=args.image, backend=backend)
     typefly.run()
-
