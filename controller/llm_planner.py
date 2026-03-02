@@ -66,8 +66,8 @@ class LLMPlanner():
                 if self.controller:
                     if hasattr(self.controller, 'drone'):
                         drone_pos = self.controller.drone.get_drone_position()
-                    if hasattr(self.controller, 'uwb') and self.controller.uwb.latest_position != (0.00, 0.00, 0.00):
-                        user_pos = self.controller.uwb.get_user_position()
+                    if hasattr(self.controller, 'state_provider') and self.controller.state_provider.has_valid_position():
+                        user_pos = self.controller.state_provider.get_user_position()
             except Exception:
                 pass
             location_info = (
@@ -99,14 +99,14 @@ class LLMPlanner():
             if self.controller:
                 if hasattr(self.controller, 'drone'):
                     drone_pos = self.controller.drone.get_drone_position()
-                if hasattr(self.controller, 'uwb') and self.controller.uwb.latest_position != (0.00, 0.00, 0.00):
-                    user_pos = self.controller.uwb.get_user_position()
+                if hasattr(self.controller, 'state_provider') and self.controller.state_provider.has_valid_position():
+                    person_pos = self.controller.state_provider.get_user_position()
         except Exception:
             pass
 
         location_info = (
             f"Drone position: x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}\n"
-            f"User position: x={user_pos[0]:.2f}, y={user_pos[1]:.2f}, z={user_pos[2]:.2f}"
+            f"User position: x={person_pos[0]:.2f}, y={person_pos[1]:.2f}, z={person_pos[2]:.2f}"
         )
 
         # 是否啟用影像辨識

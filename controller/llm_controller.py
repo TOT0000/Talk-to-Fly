@@ -11,6 +11,7 @@ from .yolo_client import YoloClient
 from .yolo_grpc_client import YoloGRPCClient
 from .tello_wrapper import TelloWrapper
 from .virtual_robot_wrapper import VirtualRobotWrapper
+from .px4_sim_robot_wrapper import Px4SimRobotWrapper
 from .abs.robot_wrapper import RobotWrapper
 from .vision_skill_wrapper import VisionSkillWrapper
 from .llm_planner import LLMPlanner
@@ -19,12 +20,14 @@ from .utils import print_t, input_t
 from .minispec_interpreter import MiniSpecInterpreter, Statement
 from .abs.robot_wrapper import RobotType
 from .uwb_wrapper import UWBWrapper
+from .state_provider import StateProvider, UwbStateProvider, SimStateProvider
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 class LLMController():
-    def __init__(self, robot_type, virtual_queue, use_http=False, message_queue: Optional[queue.Queue]=None, enable_video=False):
+    def __init__(self, robot_type, virtual_queue, use_http=False, message_queue: Optional[queue.Queue]=None, enable_video=False, state_provider: Optional[StateProvider]=None):
         self.virtual_queue = virtual_queue
+        self.robot_type = robot_type
         self.enable_video = enable_video
         self.shared_frame = SharedFrame()
         if use_http:
@@ -55,6 +58,9 @@ class LLMController():
                 print_t("[C] Start Gear robot car...")
                 from .gear_wrapper import GearWrapper
                 self.drone: RobotWrapper = GearWrapper()
+            case RobotType.PX4_SIM:
+                print_t("[C] Start PX4 sim drone...")
+                self.drone: RobotWrapper = Px4SimRobotWrapper(enable_video=self.enable_video)
             case _:
                 print_t("[C] Start virtual drone...")
                 self.drone: RobotWrapper = VirtualRobotWrapper(enable_video=self.enable_video)
@@ -62,10 +68,17 @@ class LLMController():
         self.planner = LLMPlanner(robot_type)
         self.planner.controller = self
 
-        # UWB wrapper
+        # state provider
         self.uwb = UWBWrapper()
+        if robot_type == RobotType.PX4_SIM:
+            self.state_provider = SimStateProvider(self.drone)
+        elif state_provider is not None:
+            self.state_provider = state_provider
+        else:
+            self.state_provider = UwbStateProvider(self.uwb)
+
         self.position_update_callback = None
-        self.uwb.register_callback(self.notify_user_position_updated)
+        self.state_provider.register_callback(self.notify_user_position_updated)
 
         # load low-level skills
         self.low_level_skillset = SkillSet(level="low")
@@ -120,7 +133,8 @@ class LLMController():
         position_str = f"User position updated: x={x:.2f}, y={y:.2f}, z={z:.2f}"
        #self.append_message(f"[LOG] {position_str}")
         if hasattr(self, 'position_update_callback') and self.position_update_callback:
-            self.position_update_callback(x, y, z, "uwb")
+            source = "sim" if self.robot_type == RobotType.PX4_SIM else "uwb"
+            self.position_update_callback(x, y, z, source)
     
     def skill_get_drone_position(self) -> Tuple[str, bool]:
         x, y, z = self.drone.get_drone_position()
@@ -129,19 +143,19 @@ class LLMController():
         return position_str, False
         
     def skill_get_user_position(self) -> Tuple[str, bool]:
-        x, y, z = self.uwb.get_user_position()
+        x, y, z = self.state_provider.get_user_position()
         position_str = f"User position is x={x:.2f}, y={y:.2f}, z={z:.2f}"
        #self.append_message(f"[LOG] {position_str}")
         return position_str, False
         
     def start_uwb(self):
         print_t("[C] Starting UWB tracking...")
-        self.uwb.start_with_retry()
+        self.state_provider.start()
         self.uwb_active = True
         
     def stop_uwb(self):
         print_t("[C] Stopping UWB tracking...")
-        self.uwb.stop()
+        self.state_provider.stop()
         self.uwb_active = False
         
     def start_virtual_position_loop(self):
@@ -230,7 +244,7 @@ class LLMController():
         self.append_message('[TASK]: ' + task_description)
         ret_val = None
         while True:
-            user_pos = self.uwb.get_user_position() if hasattr(self, "uwb") else (0.00, 0.00, 0.00)
+            user_pos = self.state_provider.get_user_position() if hasattr(self, "state_provider") else (0.00, 0.00, 0.00)
             drone_pos = self.drone.get_drone_position() if hasattr(self, "drone") else (0.00, 0.00, 0.00)
             
             location_info = {
@@ -269,7 +283,8 @@ class LLMController():
         if self.enable_video:
             print_t("[C] Starting stream...")
             self.drone.start_stream()
-        self.start_uwb()
+        if self.robot_type != RobotType.PX4_SIM:
+            self.start_uwb()
         print_t("[C] Starting virtual position loop...")
         self.start_virtual_position_loop()
         self.controller_wait_takeoff = False
@@ -279,8 +294,9 @@ class LLMController():
         self.drone.land()
         if self.enable_video:
             self.drone.stop_stream()
-        print_t("[C] Stopping UWB tracking...")
-        self.stop_uwb()
+        if self.robot_type != RobotType.PX4_SIM:
+            print_t("[C] Stopping UWB tracking...")
+            self.stop_uwb()
         print_t("[C] Stopping virtual position loop...")
         self.stop_virtual_position_loop()
         self.controller_wait_takeoff = True
@@ -316,4 +332,3 @@ class LLMController():
         self.drone.land()
         asyncio_loop.stop()
         print_t("[C] Capture loop stopped")
-
