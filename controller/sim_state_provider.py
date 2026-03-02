@@ -71,7 +71,10 @@ class SimStateProvider(StateProvider):
 
         # TODO(px4-sim): user position is currently fixed/env-driven, not dynamic from simulator topics.
         self._fixed_user_position = fixed_user_position or self._load_user_position_from_env()
+        self._user_position = self._fixed_user_position
+        self._user_position_topic = os.getenv("SIM_USER_POSITION_TOPIC", "/sim/user_position")
         self._last_position_ts: float = 0.0
+        self._last_user_position_ts: float = 0.0
         self._ros_ready: bool = False
 
     def _load_user_position_from_env(self) -> Tuple[float, float, float]:
@@ -101,8 +104,37 @@ class SimStateProvider(StateProvider):
             self._cache.nav_state = int(getattr(msg, "nav_state", 0))
             self._cache.arming_state = int(getattr(msg, "arming_state", 0))
 
+
+    def _on_user_position(self, msg):
+        if hasattr(msg, "point"):
+            position = (
+                float(getattr(msg.point, "x", 0.0)),
+                float(getattr(msg.point, "y", 0.0)),
+                float(getattr(msg.point, "z", 0.0)),
+            )
+        elif hasattr(msg, "pose") and hasattr(msg.pose, "position"):
+            position = (
+                float(getattr(msg.pose.position, "x", 0.0)),
+                float(getattr(msg.pose.position, "y", 0.0)),
+                float(getattr(msg.pose.position, "z", 0.0)),
+            )
+        else:
+            return
+
+        with self._lock:
+            self._user_position = position
+            self._last_user_position_ts = time.time()
+
+        if self._callback:
+            self._callback((time.time(), position[0], position[1], position[2]))
+
     def get_user_position(self) -> Tuple[float, float, float]:
-        return self._fixed_user_position
+        with self._lock:
+            return self._user_position
+
+    def get_user_yaw(self) -> float:
+        # TODO(px4-sim): derive dynamic user yaw once simulator user orientation is available.
+        return 0.0
 
     def get_user_yaw(self) -> float:
         # TODO(px4-sim): derive dynamic user yaw from simulator once a user-state source is available.
@@ -169,6 +201,14 @@ class SimStateProvider(StateProvider):
             self._on_vehicle_status,
             10,
         )
+
+        for msg_type in user_position_msg_types:
+            self._node.create_subscription(
+                msg_type,
+                self._user_position_topic,
+                self._on_user_position,
+                10,
+            )
 
         self._active = True
 
