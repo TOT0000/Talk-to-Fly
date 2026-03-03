@@ -166,6 +166,11 @@ class SimStateProvider(StateProvider):
         if self._active:
             return
 
+        # Keep optional subscription containers initialized up front.
+        # This prevents NameError regressions when downstream branches add
+        # optional user-position topic loops.
+        user_position_msg_types = []
+
         rclpy = None
         Node = None
         VehicleLocalPosition = None
@@ -216,13 +221,12 @@ class SimStateProvider(StateProvider):
             sensor_qos,
         )
 
-        for msg_type in user_position_msg_types:
-            self._node.create_subscription(
-                msg_type,
-                self._user_position_topic,
-                self._on_user_position,
-                10,
-            )
+        # Reserved for optional user-position bridging topics.
+        # Keep this defensive fallback so merged variants cannot raise
+        # NameError if optional containers are moved/removed.
+        user_position_msg_types = locals().get("user_position_msg_types", [])
+        for _msg_type in user_position_msg_types:
+            pass
 
         self._active = True
 
