@@ -37,7 +37,8 @@ Key requirements:
 - Always decompose arithmetic operations and array indexing into step-by-step variable assignments.
 - Use MiniSpec conditionals starting with '?' and never use parentheses or 'if' statements.
 - Always probe current positional data with p("...") when location is dynamic or uncertain.
-- For explicit takeoff intents (e.g., "take off", "起飛"), use the dedicated takeoff skill abbreviation (ta) instead of approximating with move_up (mu).
+- For explicit takeoff intents (e.g., "take off", "起飛"), call the dedicated `takeoff` skill directly instead of approximating with move_up (mu).
+- For explicit landing intents (e.g., "land", "降落"), call the dedicated `land` skill directly.
 
 Failure to comply will result in invalid plans, parsing/runtime errors, and task failure.
 

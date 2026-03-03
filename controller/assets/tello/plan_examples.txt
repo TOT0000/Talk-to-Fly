@@ -21,7 +21,17 @@ Example 3b:
 Scene: []
 Task: [A] Take off.
 Reason: Use the dedicated takeoff skill instead of approximating with move_up.
+<<<<<<< codex/analyze-current-repo-structure-and-data-flow-5vzn1n
+Response: takeoff;
+
+Example 3c:
+Scene: []
+Task: [A] Land now.
+Reason: Use the dedicated land skill directly.
+Response: land;
+=======
 Response: ta;
+>>>>>>> main
 
 Example 4:
 Scene: []
@@ -77,6 +87,5 @@ Scene: []
 Task: [A] Move to the left of the user by 2 meters and stay at the same height.
 Reason: Probe positions, calculate horizontal offset and move only horizontally.
 Response: _1=p('What is the current user position?');_2=p('What is the current drone position?');_3=_1[0]-2;_4=_3-_2[0];?_4>0{mr(_4)}?_4<0{ml(-_4)};_5=_1[1]-_2[1];?_5>0{mf(_5)}?_5<0{mb(-_5)};
-
 
 
