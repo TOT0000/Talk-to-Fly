@@ -21,6 +21,7 @@ from .minispec_interpreter import MiniSpecInterpreter, Statement
 from .abs.robot_wrapper import RobotType
 from .uwb_wrapper import UWBWrapper
 from .state_provider import StateProvider, UwbStateProvider, NullUserProvider
+from .sim_state_provider import SimStateProvider
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -71,11 +72,16 @@ class LLMController():
         # state provider
         self.uwb = UWBWrapper()
         if robot_type == RobotType.PX4_SIM:
-            self.state_provider = NullUserProvider(self.drone)
+            self.state_provider = SimStateProvider()
         elif state_provider is not None:
             self.state_provider = state_provider
         else:
             self.state_provider = UwbStateProvider(self.uwb, self.drone)
+
+
+        # inject provider into PX4 sim wrapper
+        if robot_type == RobotType.PX4_SIM and hasattr(self.drone, "set_state_provider"):
+            self.drone.set_state_provider(self.state_provider)
 
         self.position_update_callback = None
         self.state_provider.register_callback(self.notify_user_position_updated)
@@ -88,6 +94,7 @@ class LLMController():
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_right", self.drone.move_right, "Move right by a distance", args=[SkillArg("distance", float)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_up", self.drone.move_up, "Move up by a distance", args=[SkillArg("distance", float)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_down", self.drone.move_down, "Move down by a distance", args=[SkillArg("distance", float)]))
+        self.low_level_skillset.add_skill(LowLevelSkillItem("takeoff", self.drone.takeoff, "Take off and climb to a safe hover height"))
         self.low_level_skillset.add_skill(LowLevelSkillItem("turn_cw", self.drone.turn_cw, "Rotate clockwise/right by certain degrees", args=[SkillArg("degrees", int)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("turn_ccw", self.drone.turn_ccw, "Rotate counterclockwise/left by certain degrees", args=[SkillArg("degrees", int)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("delay", self.skill_delay, "Wait for specified seconds", args=[SkillArg("seconds", float)]))
@@ -278,12 +285,17 @@ class LLMController():
         print_t("[C] Connecting to robot...")
         self.drone.connect()
         print_t("[C] Starting robot...")
-        self.drone.takeoff()
-        self.drone.move_up(0.25)
+
+        # Start state provider before PX4_SIM takeoff so wrapper has live sim state.
+        self.start_uwb()
+
+        if self.robot_type != RobotType.PX4_SIM:
+            self.drone.takeoff()
+            self.drone.move_up(0.25)
+
         if self.enable_video:
             print_t("[C] Starting stream...")
             self.drone.start_stream()
-        self.start_uwb()
         print_t("[C] Starting virtual position loop...")
         self.start_virtual_position_loop()
         self.controller_wait_takeoff = False

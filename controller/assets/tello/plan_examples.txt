@@ -16,6 +16,13 @@ Task: [A] Move up by 3 meters and tell me your position.
 Reason: Ascend 3 meters then probe the new drone position.
 Response: mu(3);_1=p('What is the current drone position?');l(_1);
 
+
+Example 3b:
+Scene: []
+Task: [A] Take off.
+Reason: Use the dedicated takeoff skill instead of approximating with move_up.
+Response: ta;
+
 Example 4:
 Scene: []
 Task: [Q] Are you above me?
