@@ -169,6 +169,9 @@ class SimStateProvider(StateProvider):
         if self._active:
             return
 
+        # defensive default to avoid NameError across partial import paths
+        user_position_msg_types = []
+
         try:
             from rclpy.node import Node
             from rclpy.qos import qos_profile_sensor_data
