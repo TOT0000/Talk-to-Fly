@@ -72,6 +72,7 @@ class SimStateProvider(StateProvider):
 
         # TODO(px4-sim): user position is currently fixed/env-driven, not dynamic from simulator topics.
         self._fixed_user_position = fixed_user_position or self._load_user_position_from_env()
+        self._user_position: Tuple[float, float, float] = self._fixed_user_position
         self._last_position_ts: float = 0.0
         self._ros_ready: bool = False
 
@@ -102,41 +103,18 @@ class SimStateProvider(StateProvider):
             self._cache.nav_state = int(getattr(msg, "nav_state", 0))
             self._cache.arming_state = int(getattr(msg, "arming_state", 0))
 
-
     def _on_user_position(self, msg):
-        if hasattr(msg, "point"):
-            position = (
-                float(getattr(msg.point, "x", 0.0)),
-                float(getattr(msg.point, "y", 0.0)),
-                float(getattr(msg.point, "z", 0.0)),
-            )
-        elif hasattr(msg, "pose") and hasattr(msg.pose, "position"):
-            position = (
-                float(getattr(msg.pose.position, "x", 0.0)),
-                float(getattr(msg.pose.position, "y", 0.0)),
-                float(getattr(msg.pose.position, "z", 0.0)),
-            )
-        else:
-            return
-
+        # Accept either geometry_msgs/Point or PointStamped-like message.
+        point = getattr(msg, "point", msg)
+        x = float(getattr(point, "x", 0.0))
+        y = float(getattr(point, "y", 0.0))
+        z = float(getattr(point, "z", 0.0))
         with self._lock:
-            self._user_position = position
-            self._last_user_position_ts = time.time()
-
-        if self._callback:
-            self._callback((time.time(), position[0], position[1], position[2]))
+            self._user_position = (x, y, z)
 
     def get_user_position(self) -> Tuple[float, float, float]:
         with self._lock:
             return self._user_position
-
-    def get_user_yaw(self) -> float:
-        # TODO(px4-sim): derive dynamic user yaw once simulator user orientation is available.
-        return 0.0
-
-    def get_user_yaw(self) -> float:
-        # TODO(px4-sim): derive dynamic user yaw from simulator once a user-state source is available.
-        return 0.0
 
     def has_valid_position(self) -> bool:
         with self._lock:
@@ -177,6 +155,8 @@ class SimStateProvider(StateProvider):
         SingleThreadedExecutor = None
         VehicleLocalPosition = None
         VehicleStatus = None
+        Point = None
+        PointStamped = None
         qos_profile_sensor_data = None
         try:
             import rclpy as _rclpy
@@ -184,12 +164,19 @@ class SimStateProvider(StateProvider):
             from rclpy.executors import SingleThreadedExecutor as _SingleThreadedExecutor
             from rclpy.qos import qos_profile_sensor_data as _qos_profile_sensor_data
             from px4_msgs.msg import VehicleLocalPosition as _VehicleLocalPosition, VehicleStatus as _VehicleStatus
+            try:
+                from geometry_msgs.msg import Point as _Point, PointStamped as _PointStamped
+            except ImportError:
+                _Point = None
+                _PointStamped = None
             rclpy = _rclpy
             Node = _Node
             SingleThreadedExecutor = _SingleThreadedExecutor
             qos_profile_sensor_data = _qos_profile_sensor_data
             VehicleLocalPosition = _VehicleLocalPosition
             VehicleStatus = _VehicleStatus
+            Point = _Point
+            PointStamped = _PointStamped
         except ImportError as exc:
             print(f"[WARN] SimStateProvider disabled (ROS2/PX4 messages unavailable): {exc}")
             self._active = True
@@ -227,12 +214,20 @@ class SimStateProvider(StateProvider):
             sensor_qos,
         )
 
-        # Reserved for optional user-position bridging topics.
-        # Keep this defensive fallback so merged variants cannot raise
-        # NameError if optional containers are moved/removed.
-        user_position_msg_types = locals().get("user_position_msg_types", [])
-        for _msg_type in user_position_msg_types:
-            pass
+        # Optional simulated user position topic (keeps fixed default until first message).
+        user_position_msg_types = []
+        if PointStamped is not None:
+            user_position_msg_types.append(PointStamped)
+        if Point is not None:
+            user_position_msg_types.append(Point)
+
+        for msg_type in user_position_msg_types:
+            self._node.create_subscription(
+                msg_type,
+                "/sim/user_position",
+                self._on_user_position,
+                sensor_qos,
+            )
 
         self._active = True
 
