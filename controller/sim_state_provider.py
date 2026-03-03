@@ -16,6 +16,41 @@ class _SimStateCache:
     arming_state: int = 0
 
 
+class _SharedRos2Context:
+    """Process-wide ROS2 context guard with reference counting."""
+
+    _lock = threading.Lock()
+    _ref_count = 0
+    _rclpy = None
+
+    @classmethod
+    def acquire(cls):
+        try:
+            import rclpy
+        except ImportError:
+            return None
+
+        with cls._lock:
+            if not rclpy.ok():
+                rclpy.init(args=None)
+            cls._ref_count += 1
+            cls._rclpy = rclpy
+            return cls._rclpy
+
+    @classmethod
+    def release(cls, rclpy_module):
+        if rclpy_module is None:
+            return
+
+        with cls._lock:
+            if cls._ref_count > 0:
+                cls._ref_count -= 1
+
+            if cls._ref_count == 0 and rclpy_module.ok():
+                rclpy_module.shutdown()
+                cls._rclpy = None
+
+
 class SimStateProvider(StateProvider):
     """State provider for PX4 SITL via ROS2 topics.
 
@@ -35,6 +70,7 @@ class SimStateProvider(StateProvider):
         self._context = None
         self._executor = None
 
+        # TODO(px4-sim): user position is currently fixed/env-driven, not dynamic from simulator topics.
         self._fixed_user_position = fixed_user_position or self._load_user_position_from_env()
         self._user_position: Tuple[float, float, float] = self._fixed_user_position
         self._last_position_ts: float = 0.0
