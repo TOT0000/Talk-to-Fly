@@ -29,7 +29,6 @@ Task: [A] Land now.
 Reason: Use the dedicated land skill directly.
 Response: land;
 
-
 Example 4:
 Scene: []
 Task: [Q] Are you above me?
