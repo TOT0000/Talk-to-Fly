@@ -68,6 +68,7 @@ class SimStateProvider(StateProvider):
         self._node = None
         self._rclpy = None
         self._context = None
+        self._executor = None
 
         # TODO(px4-sim): user position is currently fixed/env-driven, not dynamic from simulator topics.
         self._fixed_user_position = fixed_user_position or self._load_user_position_from_env()
@@ -173,16 +174,19 @@ class SimStateProvider(StateProvider):
 
         rclpy = None
         Node = None
+        SingleThreadedExecutor = None
         VehicleLocalPosition = None
         VehicleStatus = None
         qos_profile_sensor_data = None
         try:
             import rclpy as _rclpy
             from rclpy.node import Node as _Node
+            from rclpy.executors import SingleThreadedExecutor as _SingleThreadedExecutor
             from rclpy.qos import qos_profile_sensor_data as _qos_profile_sensor_data
             from px4_msgs.msg import VehicleLocalPosition as _VehicleLocalPosition, VehicleStatus as _VehicleStatus
             rclpy = _rclpy
             Node = _Node
+            SingleThreadedExecutor = _SingleThreadedExecutor
             qos_profile_sensor_data = _qos_profile_sensor_data
             VehicleLocalPosition = _VehicleLocalPosition
             VehicleStatus = _VehicleStatus
@@ -192,7 +196,7 @@ class SimStateProvider(StateProvider):
             self._ros_ready = False
             return
 
-        if rclpy is None or Node is None or VehicleLocalPosition is None or VehicleStatus is None:
+        if rclpy is None or Node is None or SingleThreadedExecutor is None or VehicleLocalPosition is None or VehicleStatus is None:
             print("[WARN] SimStateProvider disabled: ROS2 symbols not initialized")
             self._active = True
             self._ros_ready = False
@@ -204,6 +208,8 @@ class SimStateProvider(StateProvider):
         self._context = self._rclpy.context.Context()
         self._context.init(args=None)
         self._node = Node("sim_state_provider", context=self._context)
+        self._executor = SingleThreadedExecutor(context=self._context)
+        self._executor.add_node(self._node)
         self._ros_ready = True
 
         sensor_qos = qos_profile_sensor_data if qos_profile_sensor_data is not None else 10
@@ -232,7 +238,7 @@ class SimStateProvider(StateProvider):
 
         def _spin():
             while self._active and self._context is not None and self._context.ok():
-                self._rclpy.spin_once(self._node, timeout_sec=0.1)
+                self._executor.spin_once(timeout_sec=0.1)
 
         self._spin_thread = threading.Thread(target=_spin, daemon=True)
         self._spin_thread.start()
@@ -257,6 +263,10 @@ class SimStateProvider(StateProvider):
         if self._spin_thread and self._spin_thread.is_alive():
             self._spin_thread.join(timeout=1.0)
 
+        if self._executor is not None:
+            self._executor.shutdown(timeout_sec=1.0)
+            self._executor = None
+
         if self._node is not None:
             self._node.destroy_node()
             self._node = None
@@ -264,4 +274,5 @@ class SimStateProvider(StateProvider):
         if self._context is not None and self._context.ok():
             self._context.shutdown()
         self._context = None
+        self._executor = None
         self._ros_ready = False
