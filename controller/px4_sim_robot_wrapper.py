@@ -77,7 +77,12 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
 
     def _spin_once(self):
         if self._rclpy is not None and self._node is not None and self._rclpy.ok():
-            self._rclpy.spin_once(self._node, timeout_sec=0.0)
+            try:
+                self._rclpy.spin_once(self._node, timeout_sec=0.0)
+            except RuntimeError as exc:
+                # SimStateProvider may already be spinning the shared ROS2 context.
+                if "already spinning" not in str(exc):
+                    raise
 
     def _publish_vehicle_command(self, command: int, param1: float = 0.0, param2: float = 0.0, param7: float = 0.0):
         msg = self._msg_VehicleCommand()

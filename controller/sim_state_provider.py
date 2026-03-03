@@ -171,6 +171,7 @@ class SimStateProvider(StateProvider):
 
         try:
             from rclpy.node import Node
+            from rclpy.qos import qos_profile_sensor_data
             from px4_msgs.msg import VehicleLocalPosition, VehicleStatus
         except ImportError as exc:
             print(f"[WARN] SimStateProvider disabled (ROS2/PX4 messages unavailable): {exc}")
@@ -193,13 +194,13 @@ class SimStateProvider(StateProvider):
             VehicleLocalPosition,
             "/fmu/out/vehicle_local_position_v1",
             self._on_vehicle_local_position,
-            10,
+            qos_profile_sensor_data,
         )
         self._node.create_subscription(
             VehicleStatus,
             "/fmu/out/vehicle_status_v2",
             self._on_vehicle_status,
-            10,
+            qos_profile_sensor_data,
         )
 
         for msg_type in user_position_msg_types:
@@ -214,7 +215,13 @@ class SimStateProvider(StateProvider):
 
         def _spin():
             while self._active and self._rclpy.ok():
-                self._rclpy.spin_once(self._node, timeout_sec=0.1)
+                try:
+                    self._rclpy.spin_once(self._node, timeout_sec=0.1)
+                except RuntimeError as exc:
+                    # Shared context can already be spinning in another component.
+                    if "already spinning" not in str(exc):
+                        raise
+                    time.sleep(0.01)
 
         self._spin_thread = threading.Thread(target=_spin, daemon=True)
         self._spin_thread.start()
