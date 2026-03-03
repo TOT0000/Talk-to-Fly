@@ -16,6 +16,41 @@ class _SimStateCache:
     arming_state: int = 0
 
 
+class _SharedRos2Context:
+    """Process-wide ROS2 context guard with reference counting."""
+
+    _lock = threading.Lock()
+    _ref_count = 0
+    _rclpy = None
+
+    @classmethod
+    def acquire(cls):
+        try:
+            import rclpy
+        except ImportError:
+            return None
+
+        with cls._lock:
+            if not rclpy.ok():
+                rclpy.init(args=None)
+            cls._ref_count += 1
+            cls._rclpy = rclpy
+            return cls._rclpy
+
+    @classmethod
+    def release(cls, rclpy_module):
+        if rclpy_module is None:
+            return
+
+        with cls._lock:
+            if cls._ref_count > 0:
+                cls._ref_count -= 1
+
+            if cls._ref_count == 0 and rclpy_module.ok():
+                rclpy_module.shutdown()
+                cls._rclpy = None
+
+
 class SimStateProvider(StateProvider):
     """State provider for PX4 SITL via ROS2 topics.
 
@@ -32,9 +67,13 @@ class SimStateProvider(StateProvider):
         self._spin_thread: Optional[threading.Thread] = None
         self._node = None
         self._rclpy = None
+        self._ros_context_acquired = False
 
         self._fixed_user_position = fixed_user_position or self._load_user_position_from_env()
+        self._user_position = self._fixed_user_position
+        self._user_position_topic = os.getenv("SIM_USER_POSITION_TOPIC", "/sim/user_position")
         self._last_position_ts: float = 0.0
+        self._last_user_position_ts: float = 0.0
         self._ros_ready: bool = False
 
     def _load_user_position_from_env(self) -> Tuple[float, float, float]:
@@ -64,8 +103,37 @@ class SimStateProvider(StateProvider):
             self._cache.nav_state = int(getattr(msg, "nav_state", 0))
             self._cache.arming_state = int(getattr(msg, "arming_state", 0))
 
+
+    def _on_user_position(self, msg):
+        if hasattr(msg, "point"):
+            position = (
+                float(getattr(msg.point, "x", 0.0)),
+                float(getattr(msg.point, "y", 0.0)),
+                float(getattr(msg.point, "z", 0.0)),
+            )
+        elif hasattr(msg, "pose") and hasattr(msg.pose, "position"):
+            position = (
+                float(getattr(msg.pose.position, "x", 0.0)),
+                float(getattr(msg.pose.position, "y", 0.0)),
+                float(getattr(msg.pose.position, "z", 0.0)),
+            )
+        else:
+            return
+
+        with self._lock:
+            self._user_position = position
+            self._last_user_position_ts = time.time()
+
+        if self._callback:
+            self._callback((time.time(), position[0], position[1], position[2]))
+
     def get_user_position(self) -> Tuple[float, float, float]:
-        return self._fixed_user_position
+        with self._lock:
+            return self._user_position
+
+    def get_user_yaw(self) -> float:
+        # TODO(px4-sim): derive dynamic user yaw once simulator user orientation is available.
+        return 0.0
 
     def has_valid_position(self) -> bool:
         with self._lock:
@@ -97,8 +165,8 @@ class SimStateProvider(StateProvider):
             return
 
         try:
-            import rclpy
             from rclpy.node import Node
+            from rclpy.qos import qos_profile_sensor_data
             from px4_msgs.msg import VehicleLocalPosition, VehicleStatus
         except ImportError as exc:
             print(f"[WARN] SimStateProvider disabled (ROS2/PX4 messages unavailable): {exc}")
@@ -106,8 +174,30 @@ class SimStateProvider(StateProvider):
             self._ros_ready = False
             return
 
-        self._rclpy = rclpy
-        self._rclpy.init(args=None)
+        user_position_msg_types = []
+        try:
+            from geometry_msgs.msg import PointStamped
+            user_position_msg_types.append(PointStamped)
+        except ImportError:
+            pass
+
+        try:
+            from geometry_msgs.msg import PoseStamped
+            user_position_msg_types.append(PoseStamped)
+        except ImportError:
+            pass
+
+        if not user_position_msg_types:
+            print("[WARN] SimStateProvider user position topic disabled (geometry_msgs unavailable).")
+
+        self._rclpy = _SharedRos2Context.acquire()
+        if self._rclpy is None:
+            print("[WARN] SimStateProvider disabled (rclpy unavailable).")
+            self._active = True
+            self._ros_ready = False
+            return
+
+        self._ros_context_acquired = True
         self._node = Node("sim_state_provider")
         self._ros_ready = True
 
@@ -115,20 +205,34 @@ class SimStateProvider(StateProvider):
             VehicleLocalPosition,
             "/fmu/out/vehicle_local_position_v1",
             self._on_vehicle_local_position,
-            10,
+            qos_profile_sensor_data,
         )
         self._node.create_subscription(
             VehicleStatus,
             "/fmu/out/vehicle_status_v2",
             self._on_vehicle_status,
-            10,
+            qos_profile_sensor_data,
         )
+
+        for msg_type in user_position_msg_types:
+            self._node.create_subscription(
+                msg_type,
+                self._user_position_topic,
+                self._on_user_position,
+                10,
+            )
 
         self._active = True
 
         def _spin():
             while self._active and self._rclpy.ok():
-                self._rclpy.spin_once(self._node, timeout_sec=0.1)
+                try:
+                    self._rclpy.spin_once(self._node, timeout_sec=0.1)
+                except RuntimeError as exc:
+                    # Shared context can already be spinning in another component.
+                    if "already spinning" not in str(exc):
+                        raise
+                    time.sleep(0.01)
 
         self._spin_thread = threading.Thread(target=_spin, daemon=True)
         self._spin_thread.start()
@@ -157,6 +261,9 @@ class SimStateProvider(StateProvider):
             self._node.destroy_node()
             self._node = None
 
-        if self._rclpy.ok():
-            self._rclpy.shutdown()
+        if self._ros_context_acquired:
+            _SharedRos2Context.release(self._rclpy)
+            self._ros_context_acquired = False
+
+        self._rclpy = None
         self._ros_ready = False
