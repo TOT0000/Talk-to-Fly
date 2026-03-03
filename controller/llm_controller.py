@@ -94,6 +94,7 @@ class LLMController():
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_right", self.drone.move_right, "Move right by a distance", args=[SkillArg("distance", float)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_up", self.drone.move_up, "Move up by a distance", args=[SkillArg("distance", float)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_down", self.drone.move_down, "Move down by a distance", args=[SkillArg("distance", float)]))
+        self.low_level_skillset.add_skill(LowLevelSkillItem("takeoff", self.drone.takeoff, "Take off and climb to a safe hover height"))
         self.low_level_skillset.add_skill(LowLevelSkillItem("turn_cw", self.drone.turn_cw, "Rotate clockwise/right by certain degrees", args=[SkillArg("degrees", int)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("turn_ccw", self.drone.turn_ccw, "Rotate counterclockwise/left by certain degrees", args=[SkillArg("degrees", int)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("delay", self.skill_delay, "Wait for specified seconds", args=[SkillArg("seconds", float)]))
@@ -358,8 +359,11 @@ class LLMController():
         self.drone.connect()
         print_t("[C] Starting robot...")
 
-        self.drone.takeoff()
+        # Start state provider before PX4_SIM takeoff so wrapper has live sim state.
+        self.start_uwb()
+
         if self.robot_type != RobotType.PX4_SIM:
+            self.drone.takeoff()
             self.drone.move_up(0.25)
 
         if self.enable_video:

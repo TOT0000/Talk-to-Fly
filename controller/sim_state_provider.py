@@ -71,10 +71,7 @@ class SimStateProvider(StateProvider):
 
         # TODO(px4-sim): user position is currently fixed/env-driven, not dynamic from simulator topics.
         self._fixed_user_position = fixed_user_position or self._load_user_position_from_env()
-        self._user_position = self._fixed_user_position
-        self._user_position_topic = os.getenv("SIM_USER_POSITION_TOPIC", "/sim/user_position")
         self._last_position_ts: float = 0.0
-        self._last_user_position_ts: float = 0.0
         self._ros_ready: bool = False
 
     def _load_user_position_from_env(self) -> Tuple[float, float, float]:
@@ -182,13 +179,6 @@ class SimStateProvider(StateProvider):
             self._ros_ready = False
             return
 
-        self._rclpy = _SharedRos2Context.acquire()
-        if self._rclpy is None:
-            print("[WARN] SimStateProvider disabled (rclpy unavailable).")
-            self._active = True
-            self._ros_ready = False
-            return
-
         self._ros_context_acquired = True
         self._node = Node("sim_state_provider")
         self._ros_ready = True
@@ -253,9 +243,6 @@ class SimStateProvider(StateProvider):
             self._node.destroy_node()
             self._node = None
 
-        if self._ros_context_acquired:
-            _SharedRos2Context.release(self._rclpy)
-            self._ros_context_acquired = False
-
-        self._rclpy = None
+        if self._rclpy.ok():
+            self._rclpy.shutdown()
         self._ros_ready = False
