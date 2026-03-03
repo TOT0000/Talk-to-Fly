@@ -21,7 +21,6 @@ Example 3b:
 Scene: []
 Task: [A] Take off.
 Reason: Use the dedicated takeoff skill instead of approximating with move_up.
-<<<<<<< codex/analyze-current-repo-structure-and-data-flow-5vzn1n
 Response: takeoff;
 
 Example 3c:
@@ -29,9 +28,7 @@ Scene: []
 Task: [A] Land now.
 Reason: Use the dedicated land skill directly.
 Response: land;
-=======
-Response: ta;
->>>>>>> main
+
 
 Example 4:
 Scene: []

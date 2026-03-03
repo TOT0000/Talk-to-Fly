@@ -170,12 +170,15 @@ class SimStateProvider(StateProvider):
         Node = None
         VehicleLocalPosition = None
         VehicleStatus = None
+        qos_profile_sensor_data = None
         try:
             import rclpy as _rclpy
             from rclpy.node import Node as _Node
+            from rclpy.qos import qos_profile_sensor_data as _qos_profile_sensor_data
             from px4_msgs.msg import VehicleLocalPosition as _VehicleLocalPosition, VehicleStatus as _VehicleStatus
             rclpy = _rclpy
             Node = _Node
+            qos_profile_sensor_data = _qos_profile_sensor_data
             VehicleLocalPosition = _VehicleLocalPosition
             VehicleStatus = _VehicleStatus
         except ImportError as exc:
@@ -198,17 +201,19 @@ class SimStateProvider(StateProvider):
         self._node = Node("sim_state_provider", context=self._context)
         self._ros_ready = True
 
+        sensor_qos = qos_profile_sensor_data if qos_profile_sensor_data is not None else 10
+
         self._node.create_subscription(
             VehicleLocalPosition,
             "/fmu/out/vehicle_local_position_v1",
             self._on_vehicle_local_position,
-            qos_profile_sensor_data,
+            sensor_qos,
         )
         self._node.create_subscription(
             VehicleStatus,
             "/fmu/out/vehicle_status_v2",
             self._on_vehicle_status,
-            qos_profile_sensor_data,
+            sensor_qos,
         )
 
         for msg_type in user_position_msg_types:
