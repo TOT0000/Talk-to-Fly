@@ -166,15 +166,26 @@ class SimStateProvider(StateProvider):
         if self._active:
             return
 
-        # defensive default to avoid NameError across partial import paths
-        user_position_msg_types = []
-
+        rclpy = None
+        Node = None
+        VehicleLocalPosition = None
+        VehicleStatus = None
         try:
-            from rclpy.node import Node
-            from rclpy.qos import qos_profile_sensor_data
-            from px4_msgs.msg import VehicleLocalPosition, VehicleStatus
+            import rclpy as _rclpy
+            from rclpy.node import Node as _Node
+            from px4_msgs.msg import VehicleLocalPosition as _VehicleLocalPosition, VehicleStatus as _VehicleStatus
+            rclpy = _rclpy
+            Node = _Node
+            VehicleLocalPosition = _VehicleLocalPosition
+            VehicleStatus = _VehicleStatus
         except ImportError as exc:
             print(f"[WARN] SimStateProvider disabled (ROS2/PX4 messages unavailable): {exc}")
+            self._active = True
+            self._ros_ready = False
+            return
+
+        if rclpy is None or Node is None or VehicleLocalPosition is None or VehicleStatus is None:
+            print("[WARN] SimStateProvider disabled: ROS2 symbols not initialized")
             self._active = True
             self._ros_ready = False
             return
