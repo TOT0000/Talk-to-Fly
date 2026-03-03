@@ -69,6 +69,7 @@ class SimStateProvider(StateProvider):
         self._rclpy = None
         self._ros_context_acquired = False
 
+        # TODO(px4-sim): user position is currently fixed/env-driven, not dynamic from simulator topics.
         self._fixed_user_position = fixed_user_position or self._load_user_position_from_env()
         self._user_position = self._fixed_user_position
         self._user_position_topic = os.getenv("SIM_USER_POSITION_TOPIC", "/sim/user_position")
@@ -135,6 +136,10 @@ class SimStateProvider(StateProvider):
         # TODO(px4-sim): derive dynamic user yaw once simulator user orientation is available.
         return 0.0
 
+    def get_user_yaw(self) -> float:
+        # TODO(px4-sim): derive dynamic user yaw from simulator once a user-state source is available.
+        return 0.0
+
     def has_valid_position(self) -> bool:
         with self._lock:
             # PX4 local position (0,0,0) 可能是合法原點，故以時間戳判定是否曾收過資料
@@ -173,22 +178,6 @@ class SimStateProvider(StateProvider):
             self._active = True
             self._ros_ready = False
             return
-
-        user_position_msg_types = []
-        try:
-            from geometry_msgs.msg import PointStamped
-            user_position_msg_types.append(PointStamped)
-        except ImportError:
-            pass
-
-        try:
-            from geometry_msgs.msg import PoseStamped
-            user_position_msg_types.append(PoseStamped)
-        except ImportError:
-            pass
-
-        if not user_position_msg_types:
-            print("[WARN] SimStateProvider user position topic disabled (geometry_msgs unavailable).")
 
         self._rclpy = _SharedRos2Context.acquire()
         if self._rclpy is None:

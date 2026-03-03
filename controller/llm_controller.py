@@ -355,7 +355,6 @@ class LLMController():
 
         # Start state provider first so PX4_SIM wrapper can immediately consume live state.
         self.start_uwb()
-        self._start_sim_user_position_publisher_if_needed()
         self.drone.connect()
         print_t("[C] Starting robot...")
 
@@ -379,7 +378,6 @@ class LLMController():
         self.stop_virtual_position_loop()
         print_t("[C] Stopping UWB tracking...")
         self.stop_uwb()
-        self._stop_sim_user_position_publisher()
         if hasattr(self.drone, "close"):
             self.drone.close()
         self.controller_wait_takeoff = True
