@@ -3,6 +3,7 @@ import time
 from typing import Optional, Tuple
 
 from .virtual_robot_wrapper import VirtualRobotWrapper
+from .sim_state_provider import _SharedRos2Context
 
 
 class Px4SimRobotWrapper(VirtualRobotWrapper):
@@ -28,6 +29,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._pub_vehicle_cmd = None
 
         self._offboard_counter = 0
+        self._ros_context_acquired = False
 
     def set_state_provider(self, state_provider):
         self._state_provider = state_provider
@@ -36,17 +38,18 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         if self._node is not None:
             return True
         try:
-            import rclpy
             from rclpy.node import Node
             from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand
         except ImportError as exc:
             print(f"[WARN] Px4SimRobotWrapper ROS2/PX4 unavailable: {exc}")
             return False
 
-        self._rclpy = rclpy
-        if not self._rclpy.ok():
-            self._rclpy.init(args=None)
+        self._rclpy = _SharedRos2Context.acquire()
+        if self._rclpy is None:
+            print("[WARN] Px4SimRobotWrapper ROS2 context unavailable")
+            return False
 
+        self._ros_context_acquired = True
         self._node = Node("px4_sim_robot_wrapper")
         self._msg_OffboardControlMode = OffboardControlMode
         self._msg_TrajectorySetpoint = TrajectorySetpoint
@@ -74,7 +77,12 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
 
     def _spin_once(self):
         if self._rclpy is not None and self._node is not None and self._rclpy.ok():
-            self._rclpy.spin_once(self._node, timeout_sec=0.0)
+            try:
+                self._rclpy.spin_once(self._node, timeout_sec=0.0)
+            except RuntimeError as exc:
+                # SimStateProvider may already be spinning the shared ROS2 context.
+                if "already spinning" not in str(exc):
+                    raise
 
     def _publish_vehicle_command(self, command: int, param1: float = 0.0, param2: float = 0.0, param7: float = 0.0):
         msg = self._msg_VehicleCommand()
@@ -111,6 +119,26 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         pos = self.get_drone_position()
         yaw = self.get_drone_yaw()
         return pos, yaw
+
+    def _normalize_angle(self, angle: float) -> float:
+        return math.atan2(math.sin(angle), math.cos(angle))
+
+    def _wait_for_state(self, timeout_s: float = 2.0) -> bool:
+        if self._state_provider is not None and hasattr(self._state_provider, "wait_for_position"):
+            return bool(self._state_provider.wait_for_position(timeout_s=timeout_s))
+        return True
+
+    def _move_to_target(self, target_x: float, target_y: float, target_z: float, yaw: float, timeout_s: float) -> Tuple[bool, bool]:
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            self._publish_offboard_setpoint(target_x, target_y, target_z, yaw=yaw)
+            self._spin_once()
+            cx, cy, cz = self.get_drone_position()
+            err = math.sqrt((target_x - cx) ** 2 + (target_y - cy) ** 2 + (target_z - cz) ** 2)
+            if err < 0.25:
+                return True, False
+            time.sleep(0.05)
+        return True, False
 
     def get_drone_position(self) -> Tuple[float, float, float]:
         if self._state_provider is not None and hasattr(self._state_provider, "get_drone_position"):
@@ -179,37 +207,87 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
     def move_forward(self, distance: float) -> Tuple[bool, bool]:
         if not self._ensure_ros_publishers():
             return False, False
-
-        if self._state_provider is not None and hasattr(self._state_provider, "wait_for_position"):
-            if not self._state_provider.wait_for_position(timeout_s=2.0):
-                return False, False
+        if not self._wait_for_state(timeout_s=2.0):
+            return False, False
 
         (x, y, z), yaw = self._get_state()
-
-        # Assume local XY frame where yaw rotates heading in plane
         dx = float(distance) * math.cos(yaw)
         dy = float(distance) * math.sin(yaw)
         target_x = x + dx
         target_y = y + dy
         target_z = z
+        return self._move_to_target(target_x, target_y, target_z, yaw=yaw, timeout_s=max(3.0, abs(distance) * 3.0))
 
-        deadline = time.time() + max(3.0, abs(distance) * 3.0)
+    def move_backward(self, distance: float) -> Tuple[bool, bool]:
+        return self.move_forward(-float(distance))
+
+    def move_left(self, distance: float) -> Tuple[bool, bool]:
+        if not self._ensure_ros_publishers():
+            return False, False
+        if not self._wait_for_state(timeout_s=2.0):
+            return False, False
+
+        (x, y, z), yaw = self._get_state()
+        side_yaw = yaw + (math.pi / 2.0)
+        dx = float(distance) * math.cos(side_yaw)
+        dy = float(distance) * math.sin(side_yaw)
+        return self._move_to_target(x + dx, y + dy, z, yaw=yaw, timeout_s=max(3.0, abs(distance) * 3.0))
+
+    def move_right(self, distance: float) -> Tuple[bool, bool]:
+        return self.move_left(-float(distance))
+
+    def move_up(self, distance: float) -> Tuple[bool, bool]:
+        if not self._ensure_ros_publishers():
+            return False, False
+        if not self._wait_for_state(timeout_s=2.0):
+            return False, False
+
+        (x, y, z), yaw = self._get_state()
+        target_z = z - float(distance)
+        return self._move_to_target(x, y, target_z, yaw=yaw, timeout_s=max(3.0, abs(distance) * 3.0))
+
+    def move_down(self, distance: float) -> Tuple[bool, bool]:
+        return self.move_up(-float(distance))
+
+    def turn_cw(self, degree: int) -> Tuple[bool, bool]:
+        if not self._ensure_ros_publishers():
+            return False, False
+        if not self._wait_for_state(timeout_s=2.0):
+            return False, False
+
+        (x, y, z), yaw = self._get_state()
+        target_yaw = self._normalize_angle(yaw - math.radians(float(degree)))
+        deadline = time.time() + max(2.0, abs(float(degree)) / 45.0)
         while time.time() < deadline:
-            self._publish_offboard_setpoint(target_x, target_y, target_z, yaw=yaw)
+            self._publish_offboard_setpoint(x, y, z, yaw=target_yaw)
             self._spin_once()
-            cx, cy, cz = self.get_drone_position()
-            err = math.sqrt((target_x - cx) ** 2 + (target_y - cy) ** 2 + (target_z - cz) ** 2)
-            if err < 0.25:
+            cyaw = self.get_drone_yaw()
+            yaw_err = abs(self._normalize_angle(target_yaw - cyaw))
+            if yaw_err < math.radians(5.0):
                 return True, False
             time.sleep(0.05)
-
         return True, False
+
+    def turn_ccw(self, degree: int) -> Tuple[bool, bool]:
+        return self.turn_cw(-int(degree))
 
     def land(self):
         if not self._ensure_ros_publishers():
             return
         cmd_land = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_NAV_LAND", 21)
         self._publish_vehicle_command(cmd_land)
+
+
+    def close(self):
+        if self._node is not None:
+            self._node.destroy_node()
+            self._node = None
+
+        if self._ros_context_acquired:
+            _SharedRos2Context.release(self._rclpy)
+            self._ros_context_acquired = False
+
+        self._rclpy = None
 
     def stop_stream(self):
         super().stop_stream()
