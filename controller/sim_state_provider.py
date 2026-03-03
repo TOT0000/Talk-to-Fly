@@ -67,7 +67,7 @@ class SimStateProvider(StateProvider):
         self._spin_thread: Optional[threading.Thread] = None
         self._node = None
         self._rclpy = None
-        self._ros_context_acquired = False
+        self._context = None
 
         # TODO(px4-sim): user position is currently fixed/env-driven, not dynamic from simulator topics.
         self._fixed_user_position = fixed_user_position or self._load_user_position_from_env()
@@ -179,8 +179,12 @@ class SimStateProvider(StateProvider):
             self._ros_ready = False
             return
 
-        self._ros_context_acquired = True
-        self._node = Node("sim_state_provider")
+        self._rclpy = rclpy
+        # Use an isolated context so provider startup is robust even when
+        # other components initialize/shutdown the default global context.
+        self._context = self._rclpy.context.Context()
+        self._context.init(args=None)
+        self._node = Node("sim_state_provider", context=self._context)
         self._ros_ready = True
 
         self._node.create_subscription(
@@ -207,14 +211,8 @@ class SimStateProvider(StateProvider):
         self._active = True
 
         def _spin():
-            while self._active and self._rclpy.ok():
-                try:
-                    self._rclpy.spin_once(self._node, timeout_sec=0.1)
-                except RuntimeError as exc:
-                    # Shared context can already be spinning in another component.
-                    if "already spinning" not in str(exc):
-                        raise
-                    time.sleep(0.01)
+            while self._active and self._context is not None and self._context.ok():
+                self._rclpy.spin_once(self._node, timeout_sec=0.1)
 
         self._spin_thread = threading.Thread(target=_spin, daemon=True)
         self._spin_thread.start()
@@ -243,6 +241,7 @@ class SimStateProvider(StateProvider):
             self._node.destroy_node()
             self._node = None
 
-        if self._rclpy.ok():
-            self._rclpy.shutdown()
+        if self._context is not None and self._context.ok():
+            self._context.shutdown()
+        self._context = None
         self._ros_ready = False
