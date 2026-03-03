@@ -3,7 +3,6 @@ import queue, time, os, json
 from typing import Optional, Tuple
 import asyncio
 import uuid
-from enum import Enum
 import threading
 
 from .shared_frame import SharedFrame, Frame
@@ -16,11 +15,12 @@ from .abs.robot_wrapper import RobotWrapper
 from .vision_skill_wrapper import VisionSkillWrapper
 from .llm_planner import LLMPlanner
 from .skillset import SkillSet, LowLevelSkillItem, HighLevelSkillItem, SkillArg
-from .utils import print_t, input_t
+from .utils import print_t
 from .minispec_interpreter import MiniSpecInterpreter, Statement
 from .abs.robot_wrapper import RobotType
 from .uwb_wrapper import UWBWrapper
-from .state_provider import StateProvider, UwbStateProvider, NullUserProvider
+from .state_provider import StateProvider, UwbStateProvider
+from .sim_state_provider import SimStateProvider
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -71,11 +71,16 @@ class LLMController():
         # state provider
         self.uwb = UWBWrapper()
         if robot_type == RobotType.PX4_SIM:
-            self.state_provider = NullUserProvider(self.drone)
+            self.state_provider = SimStateProvider()
         elif state_provider is not None:
             self.state_provider = state_provider
         else:
             self.state_provider = UwbStateProvider(self.uwb, self.drone)
+
+
+        # inject provider into PX4 sim wrapper
+        if robot_type == RobotType.PX4_SIM and hasattr(self.drone, "set_state_provider"):
+            self.drone.set_state_provider(self.state_provider)
 
         self.position_update_callback = None
         self.state_provider.register_callback(self.notify_user_position_updated)
@@ -88,6 +93,8 @@ class LLMController():
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_right", self.drone.move_right, "Move right by a distance", args=[SkillArg("distance", float)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_up", self.drone.move_up, "Move up by a distance", args=[SkillArg("distance", float)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_down", self.drone.move_down, "Move down by a distance", args=[SkillArg("distance", float)]))
+        self.low_level_skillset.add_skill(LowLevelSkillItem("takeoff", self.skill_takeoff, "Take off and climb to a safe hover height"))
+        self.low_level_skillset.add_skill(LowLevelSkillItem("land", self.skill_land, "Land safely at current location"))
         self.low_level_skillset.add_skill(LowLevelSkillItem("turn_cw", self.drone.turn_cw, "Rotate clockwise/right by certain degrees", args=[SkillArg("degrees", int)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("turn_ccw", self.drone.turn_ccw, "Rotate counterclockwise/left by certain degrees", args=[SkillArg("degrees", int)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("delay", self.skill_delay, "Wait for specified seconds", args=[SkillArg("seconds", float)]))
@@ -212,6 +219,16 @@ class LLMController():
     def skill_re_plan(self) -> Tuple[None, bool]:
         return None, True
 
+    def skill_takeoff(self) -> Tuple[None, bool]:
+        ok = self.drone.takeoff()
+        if isinstance(ok, tuple):
+            return ok
+        return (None, not bool(ok))
+
+    def skill_land(self) -> Tuple[None, bool]:
+        self.drone.land()
+        return None, False
+
     def skill_delay(self, s: float) -> Tuple[None, bool]:
         time.sleep(s)
         return None, False
@@ -247,10 +264,10 @@ class LLMController():
             user_pos = self.state_provider.get_user_position() if hasattr(self, "state_provider") else (0.00, 0.00, 0.00)
             drone_pos = self.drone.get_drone_position() if hasattr(self, "drone") else (0.00, 0.00, 0.00)
             
-            location_info = {
-                "user": {"x": round(user_pos[0], 2), "y": round(user_pos[1], 2), "z": round(user_pos[2], 2)},
-                "drone": {"x": round(drone_pos[0], 2), "y": round(drone_pos[1], 2), "z": round(drone_pos[2], 2)},
-            }
+            location_info = (
+                f"Drone position: x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}\n"
+                f"User position: x={user_pos[0]:.2f}, y={user_pos[1]:.2f}, z={user_pos[2]:.2f}"
+            )
 
             scene_description = self.vision.get_obj_list() if self.enable_video else ''
             
@@ -278,14 +295,20 @@ class LLMController():
         print_t("[C] Connecting to robot...")
         self.drone.connect()
         print_t("[C] Starting robot...")
-        self.drone.takeoff()
-        self.drone.move_up(0.25)
+
+        # Start state provider before PX4_SIM takeoff so wrapper has live sim state.
+        self.start_uwb()
+
+        if self.robot_type != RobotType.PX4_SIM:
+            self.drone.takeoff()
+            self.drone.move_up(0.25)
+
         if self.enable_video:
             print_t("[C] Starting stream...")
             self.drone.start_stream()
-        self.start_uwb()
-        print_t("[C] Starting virtual position loop...")
-        self.start_virtual_position_loop()
+        if self.robot_type != RobotType.PX4_SIM:
+            print_t("[C] Starting virtual position loop...")
+            self.start_virtual_position_loop()
         self.controller_wait_takeoff = False
 
     def stop_robot(self):
@@ -295,8 +318,9 @@ class LLMController():
             self.drone.stop_stream()
         print_t("[C] Stopping UWB tracking...")
         self.stop_uwb()
-        print_t("[C] Stopping virtual position loop...")
-        self.stop_virtual_position_loop()
+        if self.robot_type != RobotType.PX4_SIM:
+            print_t("[C] Stopping virtual position loop...")
+            self.stop_virtual_position_loop()
         self.controller_wait_takeoff = True
 
     def capture_loop(self, asyncio_loop):
