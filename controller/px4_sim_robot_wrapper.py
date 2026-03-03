@@ -3,6 +3,7 @@ import time
 from typing import Optional, Tuple
 
 from .virtual_robot_wrapper import VirtualRobotWrapper
+from .sim_state_provider import _SharedRos2Context
 
 
 class Px4SimRobotWrapper(VirtualRobotWrapper):
