@@ -11,7 +11,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
 
     Minimal MVP:
     - get_drone_position() comes from SimStateProvider
-    - takeoff() sends PX4 vehicle commands (arm + takeoff)
+    - takeoff() performs offboard arm + position-setpoint climb
     - move_forward(distance) sends offboard position setpoints on ROS2 topics
 
     TODO:
@@ -237,22 +237,43 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
 
         # 4) Climb by sending a higher setpoint in local NED (z more negative = up).
         takeoff_height_m = 1.0
-        z_tolerance_m = 0.20
+        z_tolerance_m = 0.15
+        settle_time_s = 1.0
+        hold_after_success_s = 1.0
         target_z = z - takeoff_height_m
         print(f"[PX4_SIM] takeoff start_z={z:.2f}, target_z={target_z:.2f} (NED)")
 
-        deadline = time.time() + 8.0
+        stable_since = None
+        deadline = time.time() + 10.0
         while time.time() < deadline:
             self._publish_offboard_setpoint(x, y, target_z, yaw=yaw)
             self._spin_once()
             _, _, cz = self.get_drone_position()
+
             if abs(cz - target_z) <= z_tolerance_m:
-                print(f"[PX4_SIM] takeoff reached target_z={target_z:.2f}, current_z={cz:.2f}")
-                return True
+                if stable_since is None:
+                    stable_since = time.time()
+                elif (time.time() - stable_since) >= settle_time_s:
+                    print(
+                        f"[PX4_SIM] takeoff stabilized at target_z={target_z:.2f}, "
+                        f"current_z={cz:.2f}; holding setpoint"
+                    )
+                    hold_deadline = time.time() + hold_after_success_s
+                    while time.time() < hold_deadline:
+                        self._publish_offboard_setpoint(x, y, target_z, yaw=yaw)
+                        self._spin_once()
+                        time.sleep(0.05)
+                    return True
+            else:
+                stable_since = None
+
             time.sleep(0.05)
 
         _, _, final_z = self.get_drone_position()
-        print(f"[PX4_SIM] takeoff timeout: target_z={target_z:.2f}, current_z={final_z:.2f}")
+        print(
+            f"[PX4_SIM] takeoff timeout: target_z={target_z:.2f}, current_z={final_z:.2f}, "
+            f"tolerance={z_tolerance_m:.2f}"
+        )
         return False
 
     def move_forward(self, distance: float) -> Tuple[bool, bool]:

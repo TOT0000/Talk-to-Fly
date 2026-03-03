@@ -2,7 +2,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Type
 
 from .state_provider import StateProvider
 
@@ -75,6 +75,11 @@ class SimStateProvider(StateProvider):
         self._user_position: Tuple[float, float, float] = self._fixed_user_position
         self._last_position_ts: float = 0.0
         self._ros_ready: bool = False
+        self._user_position_topic: str = os.getenv("SIM_USER_POSITION_TOPIC", "/sim/user_position")
+        self._user_position_msg_type_name: str = os.getenv("SIM_USER_POSITION_MSG_TYPE", "PointStamped")
+        # Support both versioned and unversioned PX4 ROS2 bridge topic names.
+        self._local_position_topics = ("/fmu/out/vehicle_local_position_v1", "/fmu/out/vehicle_local_position")
+        self._vehicle_status_topics = ("/fmu/out/vehicle_status_v2", "/fmu/out/vehicle_status")
 
     def _load_user_position_from_env(self) -> Tuple[float, float, float]:
         raw = os.getenv("SIM_USER_POSITION", "0,0,0")
@@ -103,8 +108,17 @@ class SimStateProvider(StateProvider):
             self._cache.nav_state = int(getattr(msg, "nav_state", 0))
             self._cache.arming_state = int(getattr(msg, "arming_state", 0))
 
+    def _resolve_user_position_msg_type(self, point_cls, point_stamped_cls) -> Optional[Type]:
+        """Resolve a single ROS2 message type for /sim/user_position subscription."""
+        choice = (self._user_position_msg_type_name or "PointStamped").strip().lower()
+        if choice in {"pointstamped", "point_stamped", "stamped"}:
+            return point_stamped_cls
+        if choice in {"point", "geometry_msgs/point"}:
+            return point_cls
+        return point_stamped_cls
+
     def _on_user_position(self, msg):
-        # Accept either geometry_msgs/Point or PointStamped-like message.
+        # Support the configured single subscription type (Point or PointStamped).
         point = getattr(msg, "point", msg)
         x = float(getattr(point, "x", 0.0))
         y = float(getattr(point, "y", 0.0))
@@ -115,6 +129,14 @@ class SimStateProvider(StateProvider):
     def get_user_position(self) -> Tuple[float, float, float]:
         with self._lock:
             return self._user_position
+
+    def get_user_yaw(self) -> float:
+        """Fallback user yaw for simulation.
+
+        PX4_SIM currently has no subscribed user orientation source,
+        so we intentionally return a fixed placeholder yaw (0.0 rad).
+        """
+        return 0.0
 
     def has_valid_position(self) -> bool:
         with self._lock:
@@ -144,11 +166,6 @@ class SimStateProvider(StateProvider):
     def start(self):
         if self._active:
             return
-
-        # Keep optional subscription containers initialized up front.
-        # This prevents NameError regressions when downstream branches add
-        # optional user-position topic loops.
-        user_position_msg_types = []
 
         rclpy = None
         Node = None
@@ -201,32 +218,35 @@ class SimStateProvider(StateProvider):
 
         sensor_qos = qos_profile_sensor_data if qos_profile_sensor_data is not None else 10
 
-        self._node.create_subscription(
-            VehicleLocalPosition,
-            "/fmu/out/vehicle_local_position_v1",
-            self._on_vehicle_local_position,
-            sensor_qos,
-        )
-        self._node.create_subscription(
-            VehicleStatus,
-            "/fmu/out/vehicle_status_v2",
-            self._on_vehicle_status,
-            sensor_qos,
-        )
-
-        # Optional simulated user position topic (keeps fixed default until first message).
-        user_position_msg_types = []
-        if PointStamped is not None:
-            user_position_msg_types.append(PointStamped)
-        if Point is not None:
-            user_position_msg_types.append(Point)
-
-        for msg_type in user_position_msg_types:
+        for topic in self._local_position_topics:
             self._node.create_subscription(
-                msg_type,
-                "/sim/user_position",
+                VehicleLocalPosition,
+                topic,
+                self._on_vehicle_local_position,
+                sensor_qos,
+            )
+
+        for topic in self._vehicle_status_topics:
+            self._node.create_subscription(
+                VehicleStatus,
+                topic,
+                self._on_vehicle_status,
+                sensor_qos,
+            )
+
+        # User position topic uses exactly one configured message type.
+        user_position_msg_type = self._resolve_user_position_msg_type(Point, PointStamped)
+        if user_position_msg_type is not None:
+            self._node.create_subscription(
+                user_position_msg_type,
+                self._user_position_topic,
                 self._on_user_position,
                 sensor_qos,
+            )
+        else:
+            print(
+                f"[WARN] SimStateProvider user-position subscription disabled: "
+                f"message type '{self._user_position_msg_type_name}' unavailable"
             )
 
         self._active = True
