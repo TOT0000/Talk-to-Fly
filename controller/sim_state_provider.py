@@ -116,6 +116,14 @@ class SimStateProvider(StateProvider):
         with self._lock:
             return self._user_position
 
+    def get_user_yaw(self) -> float:
+        """Fallback user yaw for simulation.
+
+        PX4_SIM currently has no subscribed user orientation source,
+        so we intentionally return a fixed placeholder yaw (0.0 rad).
+        """
+        return 0.0
+
     def has_valid_position(self) -> bool:
         with self._lock:
             # PX4 local position (0,0,0) 可能是合法原點，故以時間戳判定是否曾收過資料
