@@ -1,5 +1,5 @@
 from PIL import Image
-import queue, time, os, json
+import queue, time, os, json, sys, subprocess
 from typing import Optional, Tuple
 import asyncio
 import uuid
@@ -130,6 +130,10 @@ class LLMController():
         self.current_plan = None
         self.execution_history = None
         self.execution_time = time.time()
+
+        # PX4_SIM optional managed user-position publisher lifecycle
+        self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
+        self._owns_sim_user_publisher = False
         
     def register_position_callback(self, callback):
         self.position_update_callback = callback
@@ -243,6 +247,71 @@ class LLMController():
         ret_val = interpreter.ret_queue.get()
         return ret_val
 
+    def _has_live_sim_user_position(self) -> bool:
+        if not hasattr(self, "state_provider"):
+            return False
+        last_ts = getattr(self.state_provider, "_last_user_position_ts", 0.0)
+        return bool(last_ts and (time.time() - float(last_ts) < 1.5))
+
+    def _start_sim_user_position_publisher_if_needed(self):
+        if self.robot_type != RobotType.PX4_SIM:
+            return
+
+        autostart = os.getenv("SIM_USER_POSITION_AUTOSTART", "1").strip().lower()
+        if autostart in {"0", "false", "no", "off"}:
+            return
+
+        # If external source already publishes user position, do not start another publisher.
+        deadline = time.time() + 0.6
+        while time.time() < deadline:
+            if self._has_live_sim_user_position():
+                return
+            time.sleep(0.1)
+
+        if self._sim_user_publisher_proc is not None and self._sim_user_publisher_proc.poll() is None:
+            return
+
+        script_path = os.path.join(CURRENT_DIR, "sim_user_position_publisher.py")
+        if not os.path.exists(script_path):
+            print_t(f"[WARN] sim user publisher script not found: {script_path}")
+            return
+
+        topic = os.getenv("SIM_USER_POSITION_TOPIC", "/sim/user_position")
+        x = os.getenv("SIM_USER_POSITION_PUB_X", "0.0")
+        y = os.getenv("SIM_USER_POSITION_PUB_Y", "0.0")
+        z = os.getenv("SIM_USER_POSITION_PUB_Z", "0.0")
+        rate = os.getenv("SIM_USER_POSITION_PUB_RATE", "10.0")
+
+        cmd = [sys.executable, script_path, "--topic", topic, "--x", x, "--y", y, "--z", z, "--rate", rate]
+        try:
+            self._sim_user_publisher_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self._owns_sim_user_publisher = True
+            print_t(f"[C] Started sim user position publisher on {topic}")
+        except Exception as exc:
+            print_t(f"[WARN] Failed to start sim user position publisher: {exc}")
+
+    def _stop_sim_user_position_publisher(self):
+        if not self._owns_sim_user_publisher:
+            return
+        proc = self._sim_user_publisher_proc
+        if proc is None:
+            return
+
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=1.0)
+
+        self._sim_user_publisher_proc = None
+        self._owns_sim_user_publisher = False
+
     def execute_task_description(self, task_description: str):
         if self.controller_wait_takeoff:
             self.append_message("[Warning] Controller is waiting for takeoff...")
@@ -270,6 +339,7 @@ class LLMController():
             self.append_message(f'[Plan]: \\\\')
             try:
                 self.execution_time = time.time()
+
                 ret_val = self.execute_minispec(self.current_plan)
             except Exception as e:
                 print_t(f"[C] Error: {e}")
@@ -282,11 +352,11 @@ class LLMController():
 
     def start_robot(self):
         print_t("[C] Connecting to robot...")
+
+        # Start state provider first so PX4_SIM wrapper can immediately consume live state.
+        self.start_uwb()
         self.drone.connect()
         print_t("[C] Starting robot...")
-
-        # Start state provider before PX4_SIM takeoff so wrapper has live sim state.
-        self.start_uwb()
 
         self.drone.takeoff()
         if self.robot_type != RobotType.PX4_SIM:
@@ -304,10 +374,12 @@ class LLMController():
         self.drone.land()
         if self.enable_video:
             self.drone.stop_stream()
-        print_t("[C] Stopping UWB tracking...")
-        self.stop_uwb()
         print_t("[C] Stopping virtual position loop...")
         self.stop_virtual_position_loop()
+        print_t("[C] Stopping UWB tracking...")
+        self.stop_uwb()
+        if hasattr(self.drone, "close"):
+            self.drone.close()
         self.controller_wait_takeoff = True
 
     def capture_loop(self, asyncio_loop):
