@@ -1,9 +1,9 @@
 import math
+import threading
 import time
 from typing import Optional, Tuple
 
 from .virtual_robot_wrapper import VirtualRobotWrapper
-from .sim_state_provider import _SharedRos2Context
 
 
 class Px4SimRobotWrapper(VirtualRobotWrapper):
@@ -12,7 +12,8 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
     Minimal MVP:
     - get_drone_position() comes from SimStateProvider
     - takeoff() performs offboard arm + position-setpoint climb
-    - move_forward(distance) sends offboard position setpoints on ROS2 topics
+    - move/turn skills update active setpoint targets in local frame
+    - a background loop continuously publishes active offboard setpoints for stable hold
 
     TODO:
     - Replace ad-hoc publishing with dedicated mission_executor adapter/service API.
@@ -29,6 +30,12 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._pub_vehicle_cmd = None
 
         self._offboard_counter = 0
+
+        self._target_lock = threading.Lock()
+        self._active_setpoint: Optional[Tuple[float, float, float, Optional[float]]] = None
+        self._setpoint_stream_active = False
+        self._setpoint_thread: Optional[threading.Thread] = None
+        self._setpoint_thread_running = False
 
     def set_state_provider(self, state_provider):
         self._state_provider = state_provider
@@ -68,7 +75,43 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             "/fmu/in/vehicle_command",
             10,
         )
+
+        self._start_setpoint_loop()
         return True
+
+    def _start_setpoint_loop(self):
+        if self._setpoint_thread is not None and self._setpoint_thread.is_alive():
+            return
+
+        self._setpoint_thread_running = True
+
+        def _loop():
+            while self._setpoint_thread_running:
+                self._spin_once()
+                with self._target_lock:
+                    target = self._active_setpoint if self._setpoint_stream_active else None
+                if target is not None:
+                    tx, ty, tz, tyaw = target
+                    self._publish_offboard_setpoint(tx, ty, tz, yaw=tyaw)
+                time.sleep(0.05)  # 20 Hz offboard stream
+
+        self._setpoint_thread = threading.Thread(target=_loop, daemon=True)
+        self._setpoint_thread.start()
+
+    def _stop_setpoint_loop(self):
+        self._setpoint_thread_running = False
+        if self._setpoint_thread and self._setpoint_thread.is_alive():
+            self._setpoint_thread.join(timeout=1.0)
+        self._setpoint_thread = None
+
+    def _set_active_target(self, x: float, y: float, z: float, yaw: Optional[float]):
+        with self._target_lock:
+            self._active_setpoint = (float(x), float(y), float(z), None if yaw is None else float(yaw))
+            self._setpoint_stream_active = True
+
+    def _clear_active_target(self):
+        with self._target_lock:
+            self._setpoint_stream_active = False
 
     def _now_us(self) -> int:
         return int(time.time() * 1_000_000)
@@ -122,16 +165,22 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
 
     def _move_to_local_target(self, target_x: float, target_y: float, target_z: float, yaw: float,
                               timeout_s: float = 5.0, pos_tol: float = 0.25) -> Tuple[bool, bool]:
+        self._set_active_target(target_x, target_y, target_z, yaw)
         deadline = time.time() + timeout_s
+        stable_since = None
+        settle_s = 0.3
         while time.time() < deadline:
-            self._publish_offboard_setpoint(target_x, target_y, target_z, yaw=yaw)
-            self._spin_once()
             cx, cy, cz = self.get_drone_position()
             err = math.sqrt((target_x - cx) ** 2 + (target_y - cy) ** 2 + (target_z - cz) ** 2)
             if err < pos_tol:
-                return True, False
+                if stable_since is None:
+                    stable_since = time.time()
+                elif (time.time() - stable_since) >= settle_s:
+                    return True, False
+            else:
+                stable_since = None
             time.sleep(0.05)
-        return True, False
+        return False, False
 
     def _move_by_body_offset(self, forward_m: float = 0.0, right_m: float = 0.0, up_m: float = 0.0,
                              timeout_scale: float = 3.0) -> Tuple[bool, bool]:
@@ -164,17 +213,22 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
 
         (x, y, z), yaw = self._get_state()
         target_yaw = self._normalize_angle(yaw + delta_yaw_rad)
+        self._set_active_target(x, y, z, target_yaw)
 
+        stable_since = None
         deadline = time.time() + timeout_s
         while time.time() < deadline:
-            self._publish_offboard_setpoint(x, y, z, yaw=target_yaw)
-            self._spin_once()
             current_yaw = self.get_drone_yaw()
             err = abs(self._normalize_angle(target_yaw - current_yaw))
             if err <= yaw_tol:
-                return True, False
+                if stable_since is None:
+                    stable_since = time.time()
+                elif (time.time() - stable_since) >= 0.3:
+                    return True, False
+            else:
+                stable_since = None
             time.sleep(0.05)
-        return True, False
+        return False, False
 
     def get_drone_position(self) -> Tuple[float, float, float]:
         if self._state_provider is not None and hasattr(self._state_provider, "get_drone_position"):
@@ -222,10 +276,8 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         (x, y, z), yaw = self._get_state()
 
         # 1) Warm-up offboard stream by holding current position.
-        for _ in range(15):
-            self._publish_offboard_setpoint(x, y, z, yaw=yaw)
-            self._spin_once()
-            time.sleep(0.05)
+        self._set_active_target(x, y, z, yaw)
+        time.sleep(0.8)
 
         # 2) Switch to offboard mode (custom main mode = 6 in PX4).
         cmd_mode = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_DO_SET_MODE", 176)
@@ -235,19 +287,17 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         cmd_arm = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_COMPONENT_ARM_DISARM", 400)
         self._publish_vehicle_command(cmd_arm, param1=1.0)
 
-        # 4) Climb by sending a higher setpoint in local NED (z more negative = up).
+        # 4) Climb by setting higher target in local NED (z more negative = up).
         takeoff_height_m = 1.0
         z_tolerance_m = 0.15
         settle_time_s = 1.0
-        hold_after_success_s = 1.0
         target_z = z - takeoff_height_m
+        self._set_active_target(x, y, target_z, yaw)
         print(f"[PX4_SIM] takeoff start_z={z:.2f}, target_z={target_z:.2f} (NED)")
 
         stable_since = None
         deadline = time.time() + 10.0
         while time.time() < deadline:
-            self._publish_offboard_setpoint(x, y, target_z, yaw=yaw)
-            self._spin_once()
             _, _, cz = self.get_drone_position()
 
             if abs(cz - target_z) <= z_tolerance_m:
@@ -255,14 +305,9 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
                     stable_since = time.time()
                 elif (time.time() - stable_since) >= settle_time_s:
                     print(
-                        f"[PX4_SIM] takeoff stabilized at target_z={target_z:.2f}, "
-                        f"current_z={cz:.2f}; holding setpoint"
+                        f"[PX4_SIM] takeoff stabilized at target_z={target_z:.2f}, current_z={cz:.2f}; "
+                        f"keep holding active setpoint"
                     )
-                    hold_deadline = time.time() + hold_after_success_s
-                    while time.time() < hold_deadline:
-                        self._publish_offboard_setpoint(x, y, target_z, yaw=yaw)
-                        self._spin_once()
-                        time.sleep(0.05)
                     return True
             else:
                 stable_since = None
@@ -303,6 +348,8 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
     def land(self):
         if not self._ensure_ros_publishers():
             return
+        # Stop offboard setpoint stream before LAND command to avoid fighting auto-land.
+        self._clear_active_target()
         cmd_land = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_NAV_LAND", 21)
         self._publish_vehicle_command(cmd_land)
 
@@ -310,5 +357,5 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         super().stop_stream()
 
     def keep_active(self):
-        # Maintain offboard stream if needed in future.
+        # Streaming is handled by the internal setpoint thread.
         pass
