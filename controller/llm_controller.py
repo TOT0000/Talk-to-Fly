@@ -433,7 +433,7 @@ class LLMController():
             "safety_context": safety_context,
         }
         print_debug(
-            "[UI-SNAPSHOT] "
+            "[TRACE-UI-SNAPSHOT] "
             f"drone_gt={snapshot['drone_gt']} drone_est={snapshot['drone_est']} "
             f"user_gt={snapshot['user_gt']} user_est={snapshot['user_est']}"
         )
