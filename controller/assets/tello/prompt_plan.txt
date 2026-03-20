@@ -32,6 +32,8 @@ You MUST use the safety context when planning:
 - If safety_level = CAUTION, planning should be balanced and avoid shrinking the envelope gap too aggressively.
 - If safety_level = WARNING or DANGER, planning must be conservative, avoid directly reducing the envelope gap, and prefer maintaining or increasing separation around preferred_standoff_m.
 - Treat preferred_standoff_m as the target distance preference to maintain from the user whenever the task involves approaching, following, hovering near, or aligning with the user.
+- If an example's numeric distance conflicts with the current safety context, always follow the current safety_level, planning_bias, and preferred_standoff_m from the current safety context.
+- Example distances are illustrative style references only; use the live preferred_standoff_m value for the current task instead of copying example numbers blindly.
 - If envelopes_overlap = True or envelope_gap_m is negative, do not generate a plan that immediately pushes the drone closer to the user.
 
 
