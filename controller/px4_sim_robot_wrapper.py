@@ -147,6 +147,24 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             f"param2={param2:.2f} param7={param7:.2f} timestamp_us={msg.timestamp}"
         )
 
+    def _ensure_offboard_control(self, x: float, y: float, z: float, yaw: float, warmup_s: float = 0.8):
+        """Warm the position-setpoint stream, then request OFFBOARD + arm.
+
+        PX4 simulator motion commands rely on the offboard stream being active before
+        mode switching. Re-issuing the commands here keeps movement/rotation skills from
+        depending on takeoff() having been the only code path that armed and entered
+        offboard mode.
+        """
+        self._set_active_target(x, y, z, yaw)
+        time.sleep(warmup_s)
+
+        cmd_mode = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_DO_SET_MODE", 176)
+        self._publish_vehicle_command(cmd_mode, param1=1.0, param2=6.0)
+
+        cmd_arm = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_COMPONENT_ARM_DISARM", 400)
+        self._publish_vehicle_command(cmd_arm, param1=1.0)
+        time.sleep(0.2)
+
     def _publish_offboard_setpoint(self, x: float, y: float, z: float, yaw: Optional[float] = None):
         mode = self._msg_OffboardControlMode()
         mode.timestamp = self._now_us()
@@ -285,6 +303,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._begin_motion_debug(skill_name, command_distance)
 
         (x, y, z), yaw = self._get_state()
+        self._ensure_offboard_control(x, y, z, yaw)
 
         # Local NED frame assumption:
         # +X forward, +Y right, +Z down.
@@ -307,6 +326,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._begin_rotation_debug(skill_name, command_degrees)
 
         (x, y, z), yaw = self._get_state()
+        self._ensure_offboard_control(x, y, z, yaw)
         target_yaw = self._normalize_angle(yaw + delta_yaw_rad)
         self._set_active_target(x, y, z, target_yaw)
         print_debug(
@@ -406,19 +426,10 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
 
         (x, y, z), yaw = self._get_state()
 
-        # 1) Warm-up offboard stream by holding current position.
-        self._set_active_target(x, y, z, yaw)
-        time.sleep(0.8)
+        # 1) Warm-up offboard stream, switch to offboard mode, and arm.
+        self._ensure_offboard_control(x, y, z, yaw)
 
-        # 2) Switch to offboard mode (custom main mode = 6 in PX4).
-        cmd_mode = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_DO_SET_MODE", 176)
-        self._publish_vehicle_command(cmd_mode, param1=1.0, param2=6.0)
-
-        # 3) Arm after mode switch.
-        cmd_arm = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_COMPONENT_ARM_DISARM", 400)
-        self._publish_vehicle_command(cmd_arm, param1=1.0)
-
-        # 4) Climb by setting higher target in local NED (z more negative = up).
+        # 2) Climb by setting higher target in local NED (z more negative = up).
         takeoff_height_m = 1.0
         z_tolerance_m = 0.15
         settle_time_s = 1.0
