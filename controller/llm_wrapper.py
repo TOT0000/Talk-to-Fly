@@ -2,7 +2,7 @@ import os
 import openai
 from openai import Stream, ChatCompletion
 
-from .utils import print_t
+from .utils import print_debug
 
 GPT3 = "gpt-3.5-turbo-16k"
 GPT4 = "gpt-4"
@@ -31,7 +31,7 @@ class LLMWrapper:
 
         with open(chat_log_path, "a") as f:
             f.write(prompt + "\n---\n")
-        print_t(f"[LLM] Prompt written to {chat_log_path}")
+        print_debug(f"[LLM] Prompt written to {chat_log_path}")
         
         response = client.chat.completions.create(
             model=model_name,

@@ -73,6 +73,12 @@ class StateProvider(ABC):
     def flush_due_packets(self, now: Optional[float] = None):
         return []
 
+    def get_latest_gcs_safety_state(self, now: Optional[float] = None):
+        return None
+
+    def get_latest_safety_context(self, now: Optional[float] = None):
+        return None
+
     @abstractmethod
     def has_valid_position(self) -> bool:
         pass

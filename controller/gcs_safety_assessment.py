@@ -15,6 +15,10 @@ class GcsSafetyAssessmentService:
     def build_from_provider(self, state_provider, now: Optional[float] = None) -> Optional[SafetyContext]:
         now = time.time() if now is None else float(now)
         safety_state = GcsSafetyStateService.build_from_provider(state_provider, now=now)
+        return self.build_from_safety_state(safety_state, now=now)
+
+    def build_from_safety_state(self, safety_state, now: Optional[float] = None) -> Optional[SafetyContext]:
+        now = time.time() if now is None else float(now)
         if safety_state is None:
             return SafetyContext(
                 safety_score=0.50,

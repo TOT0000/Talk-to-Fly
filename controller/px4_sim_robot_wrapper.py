@@ -4,7 +4,7 @@ import time
 from typing import Optional, Tuple
 
 from .virtual_robot_wrapper import VirtualRobotWrapper
-from .utils import print_t
+from .utils import print_debug, print_t
 
 
 class Px4SimRobotWrapper(VirtualRobotWrapper):
@@ -142,7 +142,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         msg.source_component = 1
         msg.from_external = True
         self._pub_vehicle_cmd.publish(msg)
-        print_t(
+        print_debug(
             f"[PX4-CMD] vehicle_command={int(command)} param1={param1:.2f} "
             f"param2={param2:.2f} param7={param7:.2f} timestamp_us={msg.timestamp}"
         )
@@ -171,7 +171,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         ):
             self._last_logged_setpoint = current_setpoint
             self._last_setpoint_log_ts = publish_ts
-            print_t(
+            print_debug(
                 f"[PX4-SP] command={self._active_command_name or 'hold'} "
                 f"target=({x:.2f}, {y:.2f}, {z:.2f}) yaw="
                 f"{'None' if yaw is None else f'{yaw:.3f}'} publish_ts={publish_ts:.3f}"
@@ -196,7 +196,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._active_command_name = skill_name
         self._active_command_value = float(command_value)
         self._active_command_start_time = time.time()
-        print_t(
+        print_debug(
             f"[PX4-MOVE] skill={skill_name} command_value={float(command_value):.2f}m "
             f"start_time={self._active_command_start_time:.3f}"
         )
@@ -205,7 +205,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._active_command_name = skill_name
         self._active_command_value = float(command_value_deg)
         self._active_command_start_time = time.time()
-        print_t(
+        print_debug(
             f"[PX4-MOVE] skill={skill_name} command_value={float(command_value_deg):.2f}deg "
             f"start_time={self._active_command_start_time:.3f}"
         )
@@ -237,7 +237,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             message += f" target_yaw={target_yaw:.3f}"
         if yaw_error is not None:
             message += f" yaw_error={yaw_error:.3f}rad"
-        print_t(message)
+        print_debug(message)
 
     def _move_to_local_target(self, target_x: float, target_y: float, target_z: float, yaw: float,
                               timeout_s: float = 5.0, pos_tol: float = 0.25) -> Tuple[bool, bool]:
@@ -245,7 +245,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         deadline = time.time() + timeout_s
         stable_since = None
         settle_s = 0.3
-        print_t(
+        print_debug(
             f"[PX4-MOVE] target_setpoint={self._format_position((target_x, target_y, target_z))} "
             f"yaw={yaw:.3f} completion=position_error<{pos_tol:.2f}m for {settle_s:.2f}s timeout={timeout_s:.2f}s"
         )
@@ -258,7 +258,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
                     stable_since = time.time()
                 elif (time.time() - stable_since) >= settle_s:
                     self._log_tracking_state(target_x, target_y, target_z, err, force=True)
-                    print_t(
+                    print_debug(
                         f"[PX4-MOVE] completed command={self._active_command_name or 'move'} "
                         f"criterion=position_error<{pos_tol:.2f}m for {settle_s:.2f}s"
                     )
@@ -268,7 +268,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             time.sleep(0.05)
         final_pos = self.get_ground_truth_drone_position()
         self._log_tracking_state(target_x, target_y, target_z, err, force=True)
-        print_t(
+        print_debug(
             f"[PX4-MOVE] timeout command={self._active_command_name or 'move'} "
             f"final_gt_position={self._format_position(final_pos)} target={self._format_position((target_x, target_y, target_z))} "
             f"criterion=position_error<{pos_tol:.2f}m for {settle_s:.2f}s"
@@ -309,7 +309,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         (x, y, z), yaw = self._get_state()
         target_yaw = self._normalize_angle(yaw + delta_yaw_rad)
         self._set_active_target(x, y, z, target_yaw)
-        print_t(
+        print_debug(
             f"[PX4-MOVE] target_setpoint={self._format_position((x, y, z))} "
             f"yaw={target_yaw:.3f} completion=yaw_error<{yaw_tol:.2f}rad for 0.30s timeout={timeout_s:.2f}s"
         )
@@ -325,7 +325,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
                     stable_since = time.time()
                 elif (time.time() - stable_since) >= 0.3:
                     self._log_tracking_state(x, y, z, 0.0, target_yaw=target_yaw, yaw_error=err, force=True)
-                    print_t(
+                    print_debug(
                         f"[PX4-MOVE] completed command={self._active_command_name or 'rotate'} "
                         f"criterion=yaw_error<{yaw_tol:.2f}rad for 0.30s"
                     )
@@ -334,7 +334,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
                 stable_since = None
             time.sleep(0.05)
         self._log_tracking_state(x, y, z, 0.0, target_yaw=target_yaw, yaw_error=err, force=True)
-        print_t(
+        print_debug(
             f"[PX4-MOVE] timeout command={self._active_command_name or 'rotate'} "
             f"target_yaw={target_yaw:.3f} criterion=yaw_error<{yaw_tol:.2f}rad for 0.30s"
         )

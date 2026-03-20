@@ -5,7 +5,7 @@ from .safety_context import SafetyContext
 from .skillset import SkillSet
 from .llm_wrapper import LLMWrapper, GPT3, GPT4, chat_log_path
 from .vision_skill_wrapper import VisionSkillWrapper
-from .utils import print_t
+from .utils import print_debug, print_t
 from .minispec_interpreter import MiniSpecValueType, evaluate_value
 from .abs.robot_wrapper import RobotType
 
@@ -95,8 +95,8 @@ class LLMPlanner():
             safety_context=safety_context_block,
         )
         print_t(f"[P] Planning request: {task_description}")
-        print_t(f"[P-SAFETY-CONTEXT]\n{safety_context_block}")
-        print_t(f"[P] Full prompt debug log: {chat_log_path}")
+        print_debug(f"[P-SAFETY-CONTEXT]\n{safety_context_block}")
+        print_debug(f"[P] Full prompt debug log: {chat_log_path}")
         return self.llm.request(prompt, self.model_name, stream=False)
     
     def probe(self, question: str) -> MiniSpecValueType:
@@ -132,4 +132,3 @@ class LLMPlanner():
         prompt = self.prompt_probe.format(scene_description=full_scene, question=question)
         print_t(f"[P] Execution request: {question}")
         return evaluate_value(self.llm.request(prompt, self.model_name)), False
-
