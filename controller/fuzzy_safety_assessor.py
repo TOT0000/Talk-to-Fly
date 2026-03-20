@@ -36,31 +36,31 @@ class FuzzyAssessmentResult:
 
 class FuzzySafetyAssessor:
     GAP_RULES: Dict[Tuple[str, str], float] = {
-        ("OVERLAP_OR_NEGATIVE", "LARGE"): 0.05,
-        ("OVERLAP_OR_NEGATIVE", "MEDIUM"): 0.10,
+        ("OVERLAP_OR_NEGATIVE", "LARGE"): 0.03,
+        ("OVERLAP_OR_NEGATIVE", "MEDIUM"): 0.08,
         ("OVERLAP_OR_NEGATIVE", "SMALL"): 0.18,
-        ("TIGHT", "LARGE"): 0.20,
-        ("TIGHT", "MEDIUM"): 0.38,
-        ("TIGHT", "SMALL"): 0.52,
-        ("CLEAR", "LARGE"): 0.45,
-        ("CLEAR", "MEDIUM"): 0.68,
-        ("CLEAR", "SMALL"): 0.90,
+        ("TIGHT", "LARGE"): 0.16,
+        ("TIGHT", "MEDIUM"): 0.32,
+        ("TIGHT", "SMALL"): 0.56,
+        ("CLEAR", "LARGE"): 0.42,
+        ("CLEAR", "MEDIUM"): 0.76,
+        ("CLEAR", "SMALL"): 0.97,
     }
 
     @staticmethod
     def gap_memberships(envelope_gap_m: float) -> Dict[str, float]:
         return {
-            "OVERLAP_OR_NEGATIVE": trapezoid(envelope_gap_m, -5.0, -0.1, 0.0, 1.0),
-            "TIGHT": triangle(envelope_gap_m, 0.0, 1.0, 2.5),
-            "CLEAR": trapezoid(envelope_gap_m, 1.5, 3.0, 10.0, 12.0),
+            "OVERLAP_OR_NEGATIVE": trapezoid(envelope_gap_m, -5.0, -0.15, 0.15, 0.85),
+            "TIGHT": triangle(envelope_gap_m, 0.2, 1.0, 1.9),
+            "CLEAR": trapezoid(envelope_gap_m, 1.3, 2.1, 5.0, 6.5),
         }
 
     @staticmethod
     def uncertainty_memberships(uncertainty_scale_m: float) -> Dict[str, float]:
         return {
-            "SMALL": trapezoid(uncertainty_scale_m, -1.0, 0.0, 1.0, 2.0),
-            "MEDIUM": triangle(uncertainty_scale_m, 1.0, 2.0, 3.5),
-            "LARGE": trapezoid(uncertainty_scale_m, 2.5, 4.0, 10.0, 12.0),
+            "SMALL": trapezoid(uncertainty_scale_m, -1.0, 0.0, 0.75, 1.0),
+            "MEDIUM": triangle(uncertainty_scale_m, 0.85, 1.2, 1.75),
+            "LARGE": trapezoid(uncertainty_scale_m, 1.45, 1.95, 4.0, 5.0),
         }
 
     @staticmethod
