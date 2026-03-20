@@ -4,6 +4,7 @@ import time
 from typing import Optional, Tuple
 
 from .virtual_robot_wrapper import VirtualRobotWrapper
+from .utils import print_t
 
 
 class Px4SimRobotWrapper(VirtualRobotWrapper):
@@ -36,6 +37,14 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._setpoint_stream_active = False
         self._setpoint_thread: Optional[threading.Thread] = None
         self._setpoint_thread_running = False
+        self._publish_log_interval_s = 1.0
+        self._control_log_interval_s = 0.5
+        self._last_setpoint_log_ts = 0.0
+        self._last_control_log_ts = 0.0
+        self._last_logged_setpoint: Optional[Tuple[float, float, float, Optional[float]]] = None
+        self._active_command_name: Optional[str] = None
+        self._active_command_value: Optional[float] = None
+        self._active_command_start_time: Optional[float] = None
 
     def set_state_provider(self, state_provider):
         self._state_provider = state_provider
@@ -133,6 +142,10 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         msg.source_component = 1
         msg.from_external = True
         self._pub_vehicle_cmd.publish(msg)
+        print_t(
+            f"[PX4-CMD] vehicle_command={int(command)} param1={param1:.2f} "
+            f"param2={param2:.2f} param7={param7:.2f} timestamp_us={msg.timestamp}"
+        )
 
     def _publish_offboard_setpoint(self, x: float, y: float, z: float, yaw: Optional[float] = None):
         mode = self._msg_OffboardControlMode()
@@ -150,6 +163,19 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         if yaw is not None:
             sp.yaw = float(yaw)
         self._pub_traj_sp.publish(sp)
+        publish_ts = time.time()
+        current_setpoint = (float(x), float(y), float(z), None if yaw is None else float(yaw))
+        if (
+            self._last_logged_setpoint != current_setpoint
+            or (publish_ts - self._last_setpoint_log_ts) >= self._publish_log_interval_s
+        ):
+            self._last_logged_setpoint = current_setpoint
+            self._last_setpoint_log_ts = publish_ts
+            print_t(
+                f"[PX4-SP] command={self._active_command_name or 'hold'} "
+                f"target=({x:.2f}, {y:.2f}, {z:.2f}) yaw="
+                f"{'None' if yaw is None else f'{yaw:.3f}'} publish_ts={publish_ts:.3f}"
+            )
 
     def _get_state(self) -> Tuple[Tuple[float, float, float], float]:
         pos = self.get_drone_position()
@@ -163,32 +189,100 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             angle += 2 * math.pi
         return angle
 
+    def _format_position(self, position: Tuple[float, float, float]) -> str:
+        return f"({position[0]:.2f}, {position[1]:.2f}, {position[2]:.2f})"
+
+    def _begin_motion_debug(self, skill_name: str, command_value: float):
+        self._active_command_name = skill_name
+        self._active_command_value = float(command_value)
+        self._active_command_start_time = time.time()
+        print_t(
+            f"[PX4-MOVE] skill={skill_name} command_value={float(command_value):.2f}m "
+            f"start_time={self._active_command_start_time:.3f}"
+        )
+
+    def _begin_rotation_debug(self, skill_name: str, command_value_deg: float):
+        self._active_command_name = skill_name
+        self._active_command_value = float(command_value_deg)
+        self._active_command_start_time = time.time()
+        print_t(
+            f"[PX4-MOVE] skill={skill_name} command_value={float(command_value_deg):.2f}deg "
+            f"start_time={self._active_command_start_time:.3f}"
+        )
+
+    def _log_tracking_state(
+        self,
+        target_x: float,
+        target_y: float,
+        target_z: float,
+        scalar_error: float,
+        target_yaw: Optional[float] = None,
+        yaw_error: Optional[float] = None,
+        force: bool = False,
+    ):
+        now = time.time()
+        if not force and (now - self._last_control_log_ts) < self._control_log_interval_s:
+            return
+        self._last_control_log_ts = now
+        gt_position = self.get_ground_truth_drone_position()
+        nav_state = self.get_navigation_state()
+        arming_state = self.get_arming_state()
+        message = (
+            f"[PX4-STATE] command={self._active_command_name or 'hold'} "
+            f"gt_position={self._format_position(gt_position)} "
+            f"target={self._format_position((target_x, target_y, target_z))} "
+            f"position_error={scalar_error:.3f}m nav_state={nav_state} arming_state={arming_state}"
+        )
+        if target_yaw is not None:
+            message += f" target_yaw={target_yaw:.3f}"
+        if yaw_error is not None:
+            message += f" yaw_error={yaw_error:.3f}rad"
+        print_t(message)
+
     def _move_to_local_target(self, target_x: float, target_y: float, target_z: float, yaw: float,
                               timeout_s: float = 5.0, pos_tol: float = 0.25) -> Tuple[bool, bool]:
         self._set_active_target(target_x, target_y, target_z, yaw)
         deadline = time.time() + timeout_s
         stable_since = None
         settle_s = 0.3
+        print_t(
+            f"[PX4-MOVE] target_setpoint={self._format_position((target_x, target_y, target_z))} "
+            f"yaw={yaw:.3f} completion=position_error<{pos_tol:.2f}m for {settle_s:.2f}s timeout={timeout_s:.2f}s"
+        )
         while time.time() < deadline:
             cx, cy, cz = self.get_drone_position()
             err = math.sqrt((target_x - cx) ** 2 + (target_y - cy) ** 2 + (target_z - cz) ** 2)
+            self._log_tracking_state(target_x, target_y, target_z, err)
             if err < pos_tol:
                 if stable_since is None:
                     stable_since = time.time()
                 elif (time.time() - stable_since) >= settle_s:
+                    self._log_tracking_state(target_x, target_y, target_z, err, force=True)
+                    print_t(
+                        f"[PX4-MOVE] completed command={self._active_command_name or 'move'} "
+                        f"criterion=position_error<{pos_tol:.2f}m for {settle_s:.2f}s"
+                    )
                     return True, False
             else:
                 stable_since = None
             time.sleep(0.05)
+        final_pos = self.get_ground_truth_drone_position()
+        self._log_tracking_state(target_x, target_y, target_z, err, force=True)
+        print_t(
+            f"[PX4-MOVE] timeout command={self._active_command_name or 'move'} "
+            f"final_gt_position={self._format_position(final_pos)} target={self._format_position((target_x, target_y, target_z))} "
+            f"criterion=position_error<{pos_tol:.2f}m for {settle_s:.2f}s"
+        )
         return False, False
 
-    def _move_by_body_offset(self, forward_m: float = 0.0, right_m: float = 0.0, up_m: float = 0.0,
+    def _move_by_body_offset(self, skill_name: str, command_distance: float, forward_m: float = 0.0, right_m: float = 0.0, up_m: float = 0.0,
                              timeout_scale: float = 3.0) -> Tuple[bool, bool]:
         if not self._ensure_ros_publishers():
             return False, False
         if self._state_provider is not None and hasattr(self._state_provider, "wait_for_position"):
             if not self._state_provider.wait_for_position(timeout_s=2.0):
                 return False, False
+        self._begin_motion_debug(skill_name, command_distance)
 
         (x, y, z), yaw = self._get_state()
 
@@ -204,36 +298,72 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         timeout_s = max(3.0, (abs(forward_m) + abs(right_m) + abs(up_m)) * timeout_scale)
         return self._move_to_local_target(target_x, target_y, target_z, yaw=yaw, timeout_s=timeout_s)
 
-    def _rotate_by(self, delta_yaw_rad: float, timeout_s: float = 4.0, yaw_tol: float = 0.12) -> Tuple[bool, bool]:
+    def _rotate_by(self, skill_name: str, delta_yaw_rad: float, command_degrees: float, timeout_s: float = 4.0, yaw_tol: float = 0.12) -> Tuple[bool, bool]:
         if not self._ensure_ros_publishers():
             return False, False
         if self._state_provider is not None and hasattr(self._state_provider, "wait_for_position"):
             if not self._state_provider.wait_for_position(timeout_s=2.0):
                 return False, False
+        self._begin_rotation_debug(skill_name, command_degrees)
 
         (x, y, z), yaw = self._get_state()
         target_yaw = self._normalize_angle(yaw + delta_yaw_rad)
         self._set_active_target(x, y, z, target_yaw)
+        print_t(
+            f"[PX4-MOVE] target_setpoint={self._format_position((x, y, z))} "
+            f"yaw={target_yaw:.3f} completion=yaw_error<{yaw_tol:.2f}rad for 0.30s timeout={timeout_s:.2f}s"
+        )
 
         stable_since = None
         deadline = time.time() + timeout_s
         while time.time() < deadline:
             current_yaw = self.get_drone_yaw()
             err = abs(self._normalize_angle(target_yaw - current_yaw))
+            self._log_tracking_state(x, y, z, 0.0, target_yaw=target_yaw, yaw_error=err)
             if err <= yaw_tol:
                 if stable_since is None:
                     stable_since = time.time()
                 elif (time.time() - stable_since) >= 0.3:
+                    self._log_tracking_state(x, y, z, 0.0, target_yaw=target_yaw, yaw_error=err, force=True)
+                    print_t(
+                        f"[PX4-MOVE] completed command={self._active_command_name or 'rotate'} "
+                        f"criterion=yaw_error<{yaw_tol:.2f}rad for 0.30s"
+                    )
                     return True, False
             else:
                 stable_since = None
             time.sleep(0.05)
+        self._log_tracking_state(x, y, z, 0.0, target_yaw=target_yaw, yaw_error=err, force=True)
+        print_t(
+            f"[PX4-MOVE] timeout command={self._active_command_name or 'rotate'} "
+            f"target_yaw={target_yaw:.3f} criterion=yaw_error<{yaw_tol:.2f}rad for 0.30s"
+        )
         return False, False
 
     def get_drone_position(self) -> Tuple[float, float, float]:
         if self._state_provider is not None and hasattr(self._state_provider, "get_drone_position"):
             return self._state_provider.get_drone_position()
         return super().get_drone_position()
+
+    def get_ground_truth_drone_position(self) -> Tuple[float, float, float]:
+        if self._state_provider is not None and hasattr(self._state_provider, "get_ground_truth_drone_position"):
+            return self._state_provider.get_ground_truth_drone_position()
+        return self.get_drone_position()
+
+    def get_estimated_drone_position(self) -> Tuple[float, float, float]:
+        if self._state_provider is not None and hasattr(self._state_provider, "get_estimated_drone_position"):
+            return self._state_provider.get_estimated_drone_position()
+        return self.get_drone_position()
+
+    def get_latest_localization_packet(self):
+        if self._state_provider is not None and hasattr(self._state_provider, "get_latest_received_state_packet"):
+            return self._state_provider.get_latest_received_state_packet()
+        return None
+
+    def get_latest_user_localization_packet(self):
+        if self._state_provider is not None and hasattr(self._state_provider, "get_latest_received_user_packet"):
+            return self._state_provider.get_latest_received_user_packet()
+        return None
 
     def get_drone_velocity(self) -> Tuple[float, float, float]:
         if self._state_provider is not None and hasattr(self._state_provider, "get_drone_velocity"):
@@ -267,6 +397,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         """
         if not self._ensure_ros_publishers():
             return False
+        self._begin_motion_debug("takeoff", 1.0)
 
         if self._state_provider is not None and hasattr(self._state_provider, "wait_for_position"):
             if not self._state_provider.wait_for_position(timeout_s=3.0):
@@ -322,28 +453,28 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         return False
 
     def move_forward(self, distance: float) -> Tuple[bool, bool]:
-        return self._move_by_body_offset(forward_m=float(distance))
+        return self._move_by_body_offset("move_forward", float(distance), forward_m=float(distance))
 
     def move_backward(self, distance: float) -> Tuple[bool, bool]:
-        return self._move_by_body_offset(forward_m=-float(distance))
+        return self._move_by_body_offset("move_backward", float(distance), forward_m=-float(distance))
 
     def move_left(self, distance: float) -> Tuple[bool, bool]:
-        return self._move_by_body_offset(right_m=-float(distance))
+        return self._move_by_body_offset("move_left", float(distance), right_m=-float(distance))
 
     def move_right(self, distance: float) -> Tuple[bool, bool]:
-        return self._move_by_body_offset(right_m=float(distance))
+        return self._move_by_body_offset("move_right", float(distance), right_m=float(distance))
 
     def move_up(self, distance: float) -> Tuple[bool, bool]:
-        return self._move_by_body_offset(up_m=float(distance))
+        return self._move_by_body_offset("move_up", float(distance), up_m=float(distance))
 
     def move_down(self, distance: float) -> Tuple[bool, bool]:
-        return self._move_by_body_offset(up_m=-float(distance))
+        return self._move_by_body_offset("move_down", float(distance), up_m=-float(distance))
 
     def turn_ccw(self, degree: int) -> Tuple[bool, bool]:
-        return self._rotate_by(math.radians(float(degree)))
+        return self._rotate_by("turn_ccw", math.radians(float(degree)), float(degree))
 
     def turn_cw(self, degree: int) -> Tuple[bool, bool]:
-        return self._rotate_by(-math.radians(float(degree)))
+        return self._rotate_by("turn_cw", -math.radians(float(degree)), float(degree))
 
     def land(self):
         if not self._ensure_ros_publishers():
