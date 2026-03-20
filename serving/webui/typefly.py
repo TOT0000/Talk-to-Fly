@@ -513,7 +513,7 @@ class TypeFly:
     def _fmt_vec(self, value):
         if value is None:
             return "(n/a)"
-        return f"({value[0]:.3f}, {value[1]:.3f}, {value[2]:.3f})"
+        return f"({value[0]:.4f}, {value[1]:.4f}, {value[2]:.4f})"
 
     def _fmt_float(self, value, suffix=""):
         if value is None:
@@ -527,6 +527,7 @@ class TypeFly:
             value = snapshot.get(key)
             if value is not None:
                 self.position_history[key].append(tuple(float(v) for v in value))
+                print_debug(f"[UI-HISTORY] key={key} appended={self.position_history[key][-1]}")
         for key in ("drone_aoi_s", "user_aoi_s", "drone_delay_s", "user_delay_s"):
             value = snapshot.get(key)
             if value is not None:
@@ -535,6 +536,11 @@ class TypeFly:
     def render_coordinate_markdown(self, snapshot):
         if not snapshot:
             return "### Coordinates\nWaiting for live data..."
+        print_debug(
+            "[UI-MARKDOWN] "
+            f"drone_gt={snapshot.get('drone_gt')} drone_est={snapshot.get('drone_est')} "
+            f"user_gt={snapshot.get('user_gt')} user_est={snapshot.get('user_est')}"
+        )
         return (
             "### Coordinates\n"
             f"**Drone (Blue)**\n"
@@ -652,6 +658,13 @@ class TypeFly:
     def update_position_plot(self, snapshot):
         xlim, ylim = self._axis_limits_from_snapshot(snapshot)
         fig_xy, ax_xy = plt.subplots(figsize=(5, 4))
+        print_debug(
+            "[UI-PLOT] "
+            f"drone_gt={None if not snapshot else snapshot.get('drone_gt')} "
+            f"drone_est={None if not snapshot else snapshot.get('drone_est')} "
+            f"user_gt={None if not snapshot else snapshot.get('user_gt')} "
+            f"user_est={None if not snapshot else snapshot.get('user_est')}"
+        )
 
         point_specs = [
             ("drone_gt", "Drone GT", self.plot_style["drone"]["main"], "o", True),
@@ -671,7 +684,7 @@ class TypeFly:
                 continue
             facecolors = color if filled else "none"
             ax_xy.scatter([value[0]], [value[1]], edgecolors=color, facecolors=facecolors, marker=marker, s=70, linewidths=1.8, label=label)
-            ax_xy.text(value[0] + 0.03, value[1] + 0.03, f"{label}: ({value[0]:.2f}, {value[1]:.2f})", fontsize=8, color=color)
+            ax_xy.text(value[0] + 0.03, value[1] + 0.03, f"{label}: ({value[0]:.4f}, {value[1]:.4f})", fontsize=8, color=color)
 
         if snapshot and snapshot.get("drone_gt") is not None and snapshot.get("drone_est") is not None:
             ax_xy.plot(

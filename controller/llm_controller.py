@@ -420,7 +420,7 @@ class LLMController():
         drone_aoi_s, drone_delay_s = _timing(drone_packet)
         user_aoi_s, user_delay_s = _timing(user_packet)
 
-        return {
+        snapshot = {
             "drone_gt": tuple(float(v) for v in drone_gt),
             "drone_est": None if drone_est is None else tuple(float(v) for v in drone_est),
             "user_gt": tuple(float(v) for v in user_gt),
@@ -432,6 +432,12 @@ class LLMController():
             "safety_state": safety_state,
             "safety_context": safety_context,
         }
+        print_debug(
+            "[UI-SNAPSHOT] "
+            f"drone_gt={snapshot['drone_gt']} drone_est={snapshot['drone_est']} "
+            f"user_gt={snapshot['user_gt']} user_est={snapshot['user_est']}"
+        )
+        return snapshot
 
     def start_robot(self):
         print_t("[C] Connecting to robot...")
