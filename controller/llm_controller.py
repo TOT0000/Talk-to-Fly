@@ -349,23 +349,24 @@ class LLMController():
                 safety_context = self.safety_assessor.build_from_provider(self.state_provider)
             self._debug_log_safety_context(safety_context)
             
-            self.current_plan = self.planner.plan(
-                task_description=task_description,
-                scene_description=scene_description,
-                location_info=location_info,
-                execution_history=self.execution_history,
-                safety_context=safety_context,
-            )
-            self.latest_safety_context = safety_context
-            
-            self.append_message(f'[Plan]: \\\\')
             try:
-                self.execution_time = time.time()
+                self.current_plan = self.planner.plan(
+                    task_description=task_description,
+                    scene_description=scene_description,
+                    location_info=location_info,
+                    execution_history=self.execution_history,
+                    safety_context=safety_context,
+                )
+                self.latest_safety_context = safety_context
 
+                self.append_message(f'[Plan]: \\\\')
+                self.execution_time = time.time()
                 ret_val = self.execute_minispec(self.current_plan)
             except Exception as e:
-                print_t(f"[C] Error: {e}")
-            
+                error_message = f"[C] Error: {e}"
+                print_t(error_message)
+                self.append_message(error_message)
+
             break
         self.append_message(f'\n[Task ended]')
         self.append_message('end')

@@ -43,9 +43,7 @@ class TypeFly:
         self.llm_controller.register_position_callback(self.receive_position)
         
         self.system_stop = False
-        self.ui = gr.Blocks(
-            title="TypeFly",
-            css="""
+        self.ui_css = """
             .gradio-container, .gr-markdown, .gr-image, .gr-image img, .prose {
                 opacity: 1 !important;
                 filter: none !important;
@@ -53,7 +51,7 @@ class TypeFly:
                 animation: none !important;
             }
             """
-        )
+        self.ui = gr.Blocks(title="TypeFly")
         self.asyncio_loop = asyncio.get_event_loop()
         self.use_llama3 = False
         self.robot_type = controller_robot_type
@@ -445,7 +443,7 @@ class TypeFly:
             flask_thread = None
 
         self.chat.queue()
-        self.ui.launch(server_port=50001, prevent_thread_lock=True)
+        self.ui.launch(server_port=50001, prevent_thread_lock=True, css=self.ui_css)
 
         while not self.system_stop:
             time.sleep(1)
