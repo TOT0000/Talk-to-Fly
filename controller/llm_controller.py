@@ -422,9 +422,9 @@ class LLMController():
 
         return {
             "drone_gt": tuple(float(v) for v in drone_gt),
-            "drone_est": tuple(float(v) for v in drone_est),
+            "drone_est": None if drone_est is None else tuple(float(v) for v in drone_est),
             "user_gt": tuple(float(v) for v in user_gt),
-            "user_est": tuple(float(v) for v in user_est),
+            "user_est": None if user_est is None else tuple(float(v) for v in user_est),
             "drone_aoi_s": drone_aoi_s,
             "drone_delay_s": drone_delay_s,
             "user_aoi_s": user_aoi_s,

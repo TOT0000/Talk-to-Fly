@@ -43,7 +43,17 @@ class TypeFly:
         self.llm_controller.register_position_callback(self.receive_position)
         
         self.system_stop = False
-        self.ui = gr.Blocks(title="TypeFly")
+        self.ui = gr.Blocks(
+            title="TypeFly",
+            css="""
+            .gradio-container, .gr-markdown, .gr-image, .gr-image img, .prose {
+                opacity: 1 !important;
+                filter: none !important;
+                transition: none !important;
+                animation: none !important;
+            }
+            """
+        )
         self.asyncio_loop = asyncio.get_event_loop()
         self.use_llama3 = False
         self.robot_type = controller_robot_type
@@ -56,6 +66,12 @@ class TypeFly:
             "drone_est": deque(maxlen=50),
             "user_gt": deque(maxlen=50),
             "user_est": deque(maxlen=50),
+        }
+        self.timing_history = {
+            "drone_aoi_s": deque(maxlen=50),
+            "user_aoi_s": deque(maxlen=50),
+            "drone_delay_s": deque(maxlen=50),
+            "user_delay_s": deque(maxlen=50),
         }
         self.plot_style = {
             "drone": {"main": "#0B57D0", "light": "#8AB4F8"},
@@ -183,6 +199,15 @@ class TypeFly:
                         label="Y in Sequence"
                     )
             with gr.Row():
+                self.aoi_plot = gr.Image(
+                    value=self.create_sequence_plot("AoI Trend", "Sample", "AoI (s)", xlim=(0, 1), ylim=(0, 1)),
+                    label="AoI Trend"
+                )
+                self.delay_plot = gr.Image(
+                    value=self.create_sequence_plot("Delay Trend", "Sample", "Delay (s)", xlim=(0, 1), ylim=(0, 1)),
+                    label="Delay Trend"
+                )
+            with gr.Row():
                 self.coordinate_markdown = gr.Markdown(value="### Coordinates\nWaiting for live data...")
                 self.safety_markdown = gr.Markdown(value="### Safety / Risk\nWaiting for safety state...")
                 self.delay_markdown = gr.Markdown(value="### AoI / Delay\nWaiting for packets...")
@@ -197,6 +222,8 @@ class TypeFly:
                     self.x_plot,
                     self.y_plot,
                     self.z_plot,
+                    self.aoi_plot,
+                    self.delay_plot,
                     self.counter,
                     self.coordinate_markdown,
                     self.safety_markdown,
@@ -476,16 +503,17 @@ class TypeFly:
         snapshot = self.llm_controller.get_live_ui_snapshot()
         self._append_history(snapshot)
         xy, x, y, z = self.update_position_plot(snapshot)
+        aoi_img, delay_img = self.update_timing_plots()
         coordinate_md = self.render_coordinate_markdown(snapshot)
         safety_md = self.render_safety_markdown(snapshot)
         delay_md = self.render_delay_markdown(snapshot)
         counter += 1
-        return xy, x, y, z, counter, coordinate_md, safety_md, delay_md
+        return xy, x, y, z, aoi_img, delay_img, counter, coordinate_md, safety_md, delay_md
 
     def _fmt_vec(self, value):
         if value is None:
             return "(n/a)"
-        return f"({value[0]:.2f}, {value[1]:.2f}, {value[2]:.2f})"
+        return f"({value[0]:.3f}, {value[1]:.3f}, {value[2]:.3f})"
 
     def _fmt_float(self, value, suffix=""):
         if value is None:
@@ -499,18 +527,20 @@ class TypeFly:
             value = snapshot.get(key)
             if value is not None:
                 self.position_history[key].append(tuple(float(v) for v in value))
+        for key in ("drone_aoi_s", "user_aoi_s", "drone_delay_s", "user_delay_s"):
+            value = snapshot.get(key)
+            if value is not None:
+                self.timing_history[key].append(float(value))
 
     def render_coordinate_markdown(self, snapshot):
         if not snapshot:
             return "### Coordinates\nWaiting for live data..."
-        drone_color = self.plot_style["drone"]["main"]
-        user_color = self.plot_style["user"]["main"]
         return (
             "### Coordinates\n"
-            f"<span style='color:{drone_color}; font-weight:600;'>Drone</span>\n"
+            f"**Drone (Blue)**\n"
             f"- GT position: {self._fmt_vec(snapshot.get('drone_gt'))}\n"
             f"- EST position: {self._fmt_vec(snapshot.get('drone_est'))}\n\n"
-            f"<span style='color:{user_color}; font-weight:600;'>User</span>\n"
+            f"**User (Red)**\n"
             f"- GT position: {self._fmt_vec(snapshot.get('user_gt'))}\n"
             f"- EST position: {self._fmt_vec(snapshot.get('user_est'))}"
         )
@@ -520,8 +550,6 @@ class TypeFly:
         safety_state = snapshot.get("safety_state") if snapshot else None
         if safety_context is None:
             return "### Safety / Risk\nWaiting for safety state..."
-        drone_color = self.plot_style["drone"]["main"]
-        user_color = self.plot_style["user"]["main"]
         lines = [
             "### Safety / Risk",
             f"- safety_score: {safety_context.safety_score:.3f}",
@@ -535,10 +563,10 @@ class TypeFly:
         ]
         if safety_state is not None:
             lines.extend([
-                f"- <span style='color:{drone_color}; font-weight:600;'>drone envelope</span>: center=({safety_state.drone_envelope.center_xy[0]:.2f}, {safety_state.drone_envelope.center_xy[1]:.2f}), "
+                f"- drone envelope (blue dashed): center=({safety_state.drone_envelope.center_xy[0]:.2f}, {safety_state.drone_envelope.center_xy[1]:.2f}), "
                 f"major={safety_state.drone_envelope.major_axis_radius:.2f}, minor={safety_state.drone_envelope.minor_axis_radius:.2f}, "
                 f"orientation={safety_state.drone_envelope.orientation_deg:.1f}°",
-                f"- <span style='color:{user_color}; font-weight:600;'>user envelope</span>: center=({safety_state.user_envelope.center_xy[0]:.2f}, {safety_state.user_envelope.center_xy[1]:.2f}), "
+                f"- user envelope (red dashed): center=({safety_state.user_envelope.center_xy[0]:.2f}, {safety_state.user_envelope.center_xy[1]:.2f}), "
                 f"major={safety_state.user_envelope.major_axis_radius:.2f}, minor={safety_state.user_envelope.minor_axis_radius:.2f}, "
                 f"orientation={safety_state.user_envelope.orientation_deg:.1f}°",
             ])
@@ -547,14 +575,12 @@ class TypeFly:
     def render_delay_markdown(self, snapshot):
         if not snapshot:
             return "### AoI / Delay\nWaiting for packets..."
-        drone_color = self.plot_style["drone"]["main"]
-        user_color = self.plot_style["user"]["main"]
         return (
             "### AoI / Delay\n"
-            f"- <span style='color:{drone_color}; font-weight:600;'>drone AoI</span>: {self._fmt_float(snapshot.get('drone_aoi_s'), ' s')}\n"
-            f"- <span style='color:{drone_color}; font-weight:600;'>drone observed uplink delay</span>: {self._fmt_float(snapshot.get('drone_delay_s'), ' s')}\n"
-            f"- <span style='color:{user_color}; font-weight:600;'>user AoI</span>: {self._fmt_float(snapshot.get('user_aoi_s'), ' s')}\n"
-            f"- <span style='color:{user_color}; font-weight:600;'>user observed uplink delay</span>: {self._fmt_float(snapshot.get('user_delay_s'), ' s')}"
+            f"- drone AoI (blue): {self._fmt_float(snapshot.get('drone_aoi_s'), ' s')}\n"
+            f"- drone observed uplink delay (blue): {self._fmt_float(snapshot.get('drone_delay_s'), ' s')}\n"
+            f"- user AoI (red): {self._fmt_float(snapshot.get('user_aoi_s'), ' s')}\n"
+            f"- user observed uplink delay (red): {self._fmt_float(snapshot.get('user_delay_s'), ' s')}"
         )
 
     def _axis_limits_from_snapshot(self, snapshot):
@@ -579,6 +605,49 @@ class TypeFly:
             return (0.0, 5.0), (0.0, 5.0)
         pad = 0.5
         return (min(xs) - pad, max(xs) + pad), (min(ys) - pad, max(ys) + pad)
+
+    def _render_timing_plot(self, history_keys, title, ylabel):
+        fig, ax = plt.subplots(figsize=(5, 4))
+        values = []
+        series_specs = [
+            (history_keys[0], "Drone", self.plot_style["drone"]["main"]),
+            (history_keys[1], "User", self.plot_style["user"]["main"]),
+        ]
+        for key, label, color in series_specs:
+            history = list(self.timing_history[key])
+            if not history:
+                ax.plot([], [], color=color, label=label)
+                continue
+            x_vals = list(range(len(history)))
+            values.extend(history)
+            ax.plot(x_vals, history, color=color, linestyle="-", marker="o", markersize=3, label=label)
+
+        max_len = max((len(self.timing_history[key]) for key, _, _ in series_specs), default=1)
+        ax.set_xlim(0, max(max_len - 1, 1))
+        if values:
+            ymin = max(0.0, min(values) - 0.05)
+            ymax = max(values) + 0.05
+        else:
+            ymin, ymax = 0.0, 1.0
+        if ymax <= ymin:
+            ymax = ymin + 1.0
+        ax.set_ylim(ymin, ymax)
+        ax.set_title(title)
+        ax.set_xlabel("Sample")
+        ax.set_ylabel(ylabel)
+        ax.grid(True, linestyle='--', linewidth=0.5)
+        ax.legend(fontsize=8)
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', bbox_inches='tight')
+        buf.seek(0)
+        plt.close(fig)
+        return Image.open(buf)
+
+    def update_timing_plots(self):
+        aoi_img = self._render_timing_plot(("drone_aoi_s", "user_aoi_s"), "AoI Trend", "AoI (s)")
+        delay_img = self._render_timing_plot(("drone_delay_s", "user_delay_s"), "Delay Trend", "Delay (s)")
+        return aoi_img, delay_img
 
     def update_position_plot(self, snapshot):
         xlim, ylim = self._axis_limits_from_snapshot(snapshot)
