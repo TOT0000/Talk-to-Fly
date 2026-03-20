@@ -289,6 +289,9 @@ class SimStateProvider(StateProvider):
     def get_drone_position(self) -> Tuple[float, float, float]:
         self.flush_due_packets(now=time.time())
         with self._lock:
+            packet = self._latest_received_packets["drone"]
+            if packet is not None:
+                return tuple(float(v) for v in packet.estimated_position_3d)
             return self._cache.position
 
     def get_ground_truth_drone_position(self) -> Tuple[float, float, float]:
