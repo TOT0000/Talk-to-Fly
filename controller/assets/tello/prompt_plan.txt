@@ -25,6 +25,15 @@ Please carefully reason about the 'task description', you should interpret it an
 
 The 'execution history' is the actions have been taken from previous response. When they are provided, that means the robot is doing replanning, and the user wants to continue the task based on the task and history. You should reason about the 'execution history' and generate a new response accordingly.
 
+The 'safety context' is a structured assessment computed from the delayed drone/user safety-envelope geometry at the GCS side. The safety target for this task is always the user. It includes safety_score, safety_level, planning_bias, preferred_standoff_m, reason_tags, drone_to_user_distance_xy, envelope_gap_m, uncertainty_scale_m, envelopes_overlap, and optional timing freshness metadata.
+
+You MUST use the safety context when planning:
+- If safety_level = SAFE, planning may bias toward efficiency and allow more direct approach behavior.
+- If safety_level = CAUTION, planning should be balanced and avoid shrinking the envelope gap too aggressively.
+- If safety_level = WARNING or DANGER, planning must be conservative, avoid directly reducing the envelope gap, and prefer maintaining or increasing separation around preferred_standoff_m.
+- Treat preferred_standoff_m as the target distance preference to maintain from the user whenever the task involves approaching, following, hovering near, or aligning with the user.
+- If envelopes_overlap = True or envelope_gap_m is negative, do not generate a plan that immediately pushes the drone closer to the user.
+
 
 Before generating any response, you MUST read and strictly follow the rules in guides.txt and plan_examples.txt:
 
@@ -57,6 +66,9 @@ Here is the 'task description':
 
 Here is the 'execution history' (has value if replanning):
 {execution_history}
+
+Here is the 'safety context':
+{safety_context}
 
 Please generate the response only with a single sentence of MiniSpec program, strictly following the above rules.
 

@@ -1,6 +1,7 @@
 import os, ast
 from typing import Optional
 
+from .safety_context import SafetyContext
 from .skillset import SkillSet
 from .llm_wrapper import LLMWrapper, GPT3, GPT4
 from .vision_skill_wrapper import VisionSkillWrapper
@@ -41,7 +42,7 @@ class LLMPlanner():
         self.low_level_skillset = low_level_skillset
         self.vision_skill = vision_skill
 
-    def plan(self, task_description: str, scene_description: Optional[str] = None, location_info: Optional[str] = None, error_message: Optional[str] = None, execution_history: Optional[str] = None):
+    def plan(self, task_description: str, scene_description: Optional[str] = None, location_info: Optional[str] = None, error_message: Optional[str] = None, execution_history: Optional[str] = None, safety_context: Optional[SafetyContext] = None):
     
         # by default, the task_description is an action
         if not task_description.startswith("["):
@@ -76,6 +77,11 @@ class LLMPlanner():
             )
 
         full_scene = f"{scene_description}\n{location_info}".strip()
+        safety_context_block = (
+            safety_context.to_prompt_block()
+            if safety_context is not None
+            else "safety_score: 0.500\nsafety_level: CAUTION\nplanning_bias: balanced\npreferred_standoff_m: 1.50\nreason_tags: ['safety_context_unavailable']\ndrone_to_user_distance_xy: 0.00\nenvelope_gap_m: 0.00\nuncertainty_scale_m: 1.00\nenvelopes_overlap: False\nlatest_generation_timestamp: unknown\nlatest_receive_timestamp: unknown\ntiming_freshness_s: unknown"
+        )
 
         prompt = self.prompt_plan.format(
             system_skill_description_high=self.high_level_skillset,
@@ -85,7 +91,8 @@ class LLMPlanner():
             error_message=error_message,
             scene_description=full_scene,
             task_description=task_description,
-            execution_history=execution_history
+            execution_history=execution_history,
+            safety_context=safety_context_block,
         )
         print_t(f"[P] Planning request: {task_description}")
         return self.llm.request(prompt, self.model_name, stream=False)
@@ -123,6 +130,5 @@ class LLMPlanner():
         prompt = self.prompt_probe.format(scene_description=full_scene, question=question)
         print_t(f"[P] Execution request: {question}")
         return evaluate_value(self.llm.request(prompt, self.model_name)), False
-
 
 
