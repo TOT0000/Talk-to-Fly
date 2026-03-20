@@ -342,7 +342,10 @@ class LLMController():
             )
 
             scene_description = self.vision.get_obj_list() if self.enable_video else ''
+            if hasattr(self.state_provider, "debug_log_latest_localization_snapshot"):
+                self.state_provider.debug_log_latest_localization_snapshot(reason="pre-plan")
             safety_context = self.safety_assessor.build_from_provider(self.state_provider)
+            self._debug_log_safety_context(safety_context)
             
             self.current_plan = self.planner.plan(
                 task_description=task_description,
@@ -366,6 +369,23 @@ class LLMController():
         self.append_message('end')
         self.current_plan = None
         self.execution_history = None
+
+    def _debug_log_safety_context(self, safety_context):
+        if safety_context is None:
+            print_t("[SAFETY] unavailable")
+            return
+        print_t(
+            "[SAFETY]\n"
+            f"  distance_xy={safety_context.drone_to_user_distance_xy:.3f}\n"
+            f"  gap={safety_context.envelope_gap_m:.3f}\n"
+            f"  uncertainty={safety_context.uncertainty_scale_m:.3f}\n"
+            f"  overlap={safety_context.envelopes_overlap}\n"
+            f"  score={safety_context.safety_score:.3f}\n"
+            f"  level={safety_context.safety_level}\n"
+            f"  bias={safety_context.planning_bias}\n"
+            f"  standoff={safety_context.preferred_standoff_m:.3f}\n"
+            f"  reasons={safety_context.reason_tags}"
+        )
 
     def start_robot(self):
         print_t("[C] Connecting to robot...")
