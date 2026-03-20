@@ -45,13 +45,13 @@ class LocalizationErrorModel:
 
     def __init__(self):
         self._temporal_states: dict[str, _TemporalRangeState] = {}
-        self._drift_tau_s = 3.0
-        self._drift_sigma_scale = 0.75
-        self._drift_clip_sigma_scale = 2.5
-        self._burst_trigger_rate_hz = 0.08
-        self._burst_duration_range_s = (0.6, 2.0)
-        self._burst_bias_sigma_scale = 3.5
-        self._burst_noise_sigma_scale = 2.5
+        self._drift_tau_s = 6.0
+        self._drift_sigma_scale = 1.35
+        self._drift_clip_sigma_scale = 4.0
+        self._burst_trigger_rate_hz = 0.18
+        self._burst_duration_range_s = (1.2, 3.0)
+        self._burst_bias_sigma_scale = 5.5
+        self._burst_noise_sigma_scale = 4.0
 
     def _get_temporal_state(self, entity_key: str, num_anchors: int) -> _TemporalRangeState:
         state = self._temporal_states.get(entity_key)

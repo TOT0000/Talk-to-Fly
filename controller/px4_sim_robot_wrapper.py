@@ -334,6 +334,16 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         )
         return False, False
 
+
+    def _ensure_airborne_for_translation(self) -> bool:
+        x, y, z = self.get_ground_truth_drone_position()
+        if z <= -0.35:
+            return True
+        print_debug(
+            f"[PX4-MOVE] auto_takeoff_before_translation current_gt={self._format_position((x, y, z))}"
+        )
+        return bool(self.takeoff())
+
     def _move_by_body_offset(self, skill_name: str, command_distance: float, forward_m: float = 0.0, right_m: float = 0.0, up_m: float = 0.0,
                              timeout_scale: float = 6.0) -> Tuple[bool, bool]:
         if not self._ensure_ros_publishers():
@@ -342,6 +352,10 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             if not self._state_provider.wait_for_position(timeout_s=2.0):
                 return False, False
         self._begin_motion_debug(skill_name, command_distance)
+
+        if (abs(forward_m) > 1e-6 or abs(right_m) > 1e-6) and not self._ensure_airborne_for_translation():
+            print_debug(f"[PX4-MOVE] abort command={skill_name} reason=auto_takeoff_failed")
+            return False, False
 
         (x, y, z), yaw = self._get_state()
         if not self._ensure_offboard_control(x, y, z, yaw):
