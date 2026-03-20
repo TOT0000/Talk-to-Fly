@@ -7,6 +7,7 @@ from typing import Optional, Tuple, Type
 import numpy as np
 
 from .anchor_provider import AnchorGeometryProvider
+from .gcs_safety_state import GcsSafetyStateService
 from .localization_error_model import LocalizationErrorModel
 from .localization_estimator import IterativeLeastSquaresEstimator3D
 from .state_packet import LocalizedStatePacket
@@ -91,15 +92,18 @@ class SimStateProvider(StateProvider):
         self._anchor_provider = AnchorGeometryProvider()
         self._localization_error_model = LocalizationErrorModel()
         self._localization_estimator = IterativeLeastSquaresEstimator3D()
-        self._uplink_delay_model = UplinkDelayModel()
+        self._uplink_delay_models = {
+            "drone": UplinkDelayModel(),
+            "user": UplinkDelayModel(),
+        }
         seed = int(os.getenv("SIM_LOCALIZATION_RNG_SEED", "12345"))
         self._rng = np.random.default_rng(seed)
         self._confidence_alpha = float(os.getenv("SIM_LOCALIZATION_CONFIDENCE_ALPHA", "0.95"))
-        self._sequence_number = 0
-        self._latest_generated_packet: Optional[LocalizedStatePacket] = None
-        self._latest_received_packet: Optional[LocalizedStatePacket] = None
-        self._latest_packet_generation_timestamp: Optional[float] = None
-        self._latest_packet_receive_timestamp: Optional[float] = None
+        self._sequence_numbers = {"drone": 0, "user": 0}
+        self._latest_generated_packets: dict[str, Optional[LocalizedStatePacket]] = {"drone": None, "user": None}
+        self._latest_received_packets: dict[str, Optional[LocalizedStatePacket]] = {"drone": None, "user": None}
+        self._latest_packet_generation_timestamps: dict[str, Optional[float]] = {"drone": None, "user": None}
+        self._latest_packet_receive_timestamps: dict[str, Optional[float]] = {"drone": None, "user": None}
 
     def _load_user_position_from_env(self) -> Tuple[float, float, float]:
         raw = os.getenv("SIM_USER_POSITION", "0,0,0")
@@ -120,9 +124,11 @@ class SimStateProvider(StateProvider):
             self._cache.velocity = velocity
             self._cache.yaw = yaw
             self._last_position_ts = timestamp_now
+            current_user_position = np.asarray(self._user_position, dtype=float)
 
-        self._generate_and_queue_state_packet(timestamp_now)
-        self._deliver_due_packets(timestamp_now)
+        self._generate_and_queue_entity_state_packet("drone", np.asarray(position, dtype=float), timestamp_now)
+        self._generate_and_queue_entity_state_packet("user", current_user_position, timestamp_now)
+        self.flush_due_packets(now=timestamp_now)
 
         if self._callback:
             self._callback((timestamp_now, position[0], position[1], position[2]))
@@ -149,10 +155,13 @@ class SimStateProvider(StateProvider):
         z = float(getattr(point, "z", 0.0))
         with self._lock:
             self._user_position = (x, y, z)
-            self._last_user_position_ts = time.time()
+            timestamp_now = time.time()
+            self._last_user_position_ts = timestamp_now
+        self._generate_and_queue_entity_state_packet("user", np.asarray((x, y, z), dtype=float), timestamp_now)
+        self.flush_due_packets(now=timestamp_now)
 
     def get_user_position(self) -> Tuple[float, float, float]:
-        self._deliver_due_packets(time.time())
+        self.flush_due_packets(now=time.time())
         with self._lock:
             return self._user_position
 
@@ -170,7 +179,7 @@ class SimStateProvider(StateProvider):
             return (time.time() - self._last_position_ts) < 1.0 and self._last_position_ts > 0.0
 
     def get_drone_position(self) -> Tuple[float, float, float]:
-        self._deliver_due_packets(time.time())
+        self.flush_due_packets(now=time.time())
         with self._lock:
             return self._cache.position
 
@@ -178,19 +187,22 @@ class SimStateProvider(StateProvider):
         return self.get_drone_position()
 
     def get_estimated_drone_position(self) -> Tuple[float, float, float]:
-        self._deliver_due_packets(time.time())
+        self.flush_due_packets(now=time.time())
         with self._lock:
-            if self._latest_received_packet is not None:
-                return tuple(float(v) for v in self._latest_received_packet.estimated_position_3d)
+            packet = self._latest_received_packets["drone"]
+            if packet is not None:
+                return tuple(float(v) for v in packet.estimated_position_3d)
             return self._cache.position
 
     def get_ground_truth_user_position(self) -> Tuple[float, float, float]:
         return self.get_user_position()
 
     def get_estimated_user_position(self) -> Tuple[float, float, float]:
+        self.flush_due_packets(now=time.time())
         with self._lock:
-            if self._latest_received_packet is not None and self._latest_received_packet.est_user_position_3d is not None:
-                return tuple(float(v) for v in self._latest_received_packet.est_user_position_3d)
+            packet = self._latest_received_packets["user"]
+            if packet is not None:
+                return tuple(float(v) for v in packet.estimated_position_3d)
             return self._user_position
 
     def get_anchor_positions(self):
@@ -200,37 +212,65 @@ class SimStateProvider(StateProvider):
         return self._anchor_provider.get_workspace_bounds()
 
     def get_latest_state_packet(self) -> Optional[LocalizedStatePacket]:
-        self._deliver_due_packets(time.time())
+        self.flush_due_packets(now=time.time())
         with self._lock:
-            return None if self._latest_generated_packet is None else self._latest_generated_packet.copy()
+            packet = self._latest_generated_packets["drone"]
+            return None if packet is None else packet.copy()
 
     def get_latest_received_state_packet(self) -> Optional[LocalizedStatePacket]:
-        self._deliver_due_packets(time.time())
+        return self.get_latest_received_drone_packet()
+
+    def get_latest_drone_state_packet(self) -> Optional[LocalizedStatePacket]:
+        return self.get_latest_state_packet()
+
+    def get_latest_user_state_packet(self) -> Optional[LocalizedStatePacket]:
+        self.flush_due_packets(now=time.time())
         with self._lock:
-            return None if self._latest_received_packet is None else self._latest_received_packet.copy()
+            packet = self._latest_generated_packets["user"]
+            return None if packet is None else packet.copy()
+
+    def get_latest_received_drone_packet(self) -> Optional[LocalizedStatePacket]:
+        self.flush_due_packets(now=time.time())
+        with self._lock:
+            packet = self._latest_received_packets["drone"]
+            return None if packet is None else packet.copy()
+
+    def get_latest_received_user_packet(self) -> Optional[LocalizedStatePacket]:
+        self.flush_due_packets(now=time.time())
+        with self._lock:
+            packet = self._latest_received_packets["user"]
+            return None if packet is None else packet.copy()
 
     def get_latest_packet_generation_timestamp(self) -> Optional[float]:
-        self._deliver_due_packets(time.time())
+        self.flush_due_packets(now=time.time())
         with self._lock:
-            return self._latest_packet_generation_timestamp
+            return self._latest_packet_generation_timestamps["drone"]
 
     def get_latest_packet_receive_timestamp(self) -> Optional[float]:
-        self._deliver_due_packets(time.time())
+        self.flush_due_packets(now=time.time())
         with self._lock:
-            return self._latest_packet_receive_timestamp
+            return self._latest_packet_receive_timestamps["drone"]
 
     def compute_aoi(self, now: Optional[float] = None) -> Optional[float]:
         now = time.time() if now is None else float(now)
-        self._deliver_due_packets(now)
+        self.flush_due_packets(now)
         with self._lock:
-            if self._latest_received_packet is None:
+            packet = self._latest_received_packets["drone"]
+            if packet is None:
                 return None
-            return now - float(self._latest_received_packet.state_generation_timestamp)
+            return now - float(packet.state_generation_timestamp)
 
-    def _generate_and_queue_state_packet(self, generation_timestamp: float):
+    def flush_due_packets(self, now: Optional[float] = None):
+        now = time.time() if now is None else float(now)
+        delivered = []
+        for entity_type in ("drone", "user"):
+            delivered.extend(self._deliver_due_packets(entity_type, now))
+        return delivered
+
+    def _generate_and_queue_entity_state_packet(self, entity_type: str, gt_position: np.ndarray, generation_timestamp: float):
         with self._lock:
-            gt_position = np.asarray(self._cache.position, dtype=float)
             gt_user_position = np.asarray(self._user_position, dtype=float)
+            latest_received_user = self._latest_received_packets["user"]
 
         anchors = self._anchor_provider.get_anchor_positions()
         true_ranges = np.linalg.norm(gt_position[None, :] - anchors, axis=1)
@@ -266,13 +306,22 @@ class SimStateProvider(StateProvider):
 
         localization_error_vector = est_position - gt_position
         packet = LocalizedStatePacket(
-            sequence_number=self._sequence_number,
+            entity_type=entity_type,
+            sequence_number=self._sequence_numbers[entity_type],
             state_generation_timestamp=float(generation_timestamp),
             gt_position_3d=gt_position.copy(),
             estimated_position_3d=np.asarray(est_position, dtype=float).copy(),
             localization_error_vector_3d=np.asarray(localization_error_vector, dtype=float).copy(),
             gt_user_position_3d=gt_user_position.copy(),
-            est_user_position_3d=None,
+            est_user_position_3d=(
+                np.asarray(est_position, dtype=float).copy()
+                if entity_type == "user"
+                else (
+                    None
+                    if latest_received_user is None
+                    else latest_received_user.estimated_position_3d.copy()
+                )
+            ),
             anchor_positions_3d=anchors.copy(),
             true_ranges=range_result.true_ranges.copy(),
             measured_ranges=range_result.measured_ranges.copy(),
@@ -289,46 +338,52 @@ class SimStateProvider(StateProvider):
             confidence_alpha=self._confidence_alpha,
             est_position_timestamp=float(generation_timestamp),
         )
-        arrival_timestamp = self._uplink_delay_model.enqueue(
+        arrival_timestamp = self._uplink_delay_models[entity_type].enqueue(
             packet=packet,
             generation_timestamp=generation_timestamp,
-            sequence_number=self._sequence_number,
+            sequence_number=self._sequence_numbers[entity_type],
             rng=self._rng,
         )
         with self._lock:
-            self._latest_generated_packet = packet.copy()
-            self._latest_packet_generation_timestamp = generation_timestamp
-        self._sequence_number += 1
+            self._latest_generated_packets[entity_type] = packet.copy()
+            self._latest_packet_generation_timestamps[entity_type] = generation_timestamp
+        self._sequence_numbers[entity_type] += 1
         return arrival_timestamp
 
-    def _deliver_due_packets(self, now: float):
-        ready_packets = self._uplink_delay_model.pop_ready(now)
+    def _deliver_due_packets(self, entity_type: str, now: float):
+        ready_packets = self._uplink_delay_models[entity_type].pop_ready(now)
         if not ready_packets:
-            return
+            return []
+        delivered = []
         with self._lock:
             for arrival_timestamp, _, packet in ready_packets:
                 delivered_packet = packet.copy()
                 delivered_packet.received_packet_timestamp = float(arrival_timestamp)
-                self._latest_received_packet = delivered_packet
-                self._latest_packet_receive_timestamp = float(arrival_timestamp)
+                self._latest_received_packets[entity_type] = delivered_packet
+                self._latest_packet_receive_timestamps[entity_type] = float(arrival_timestamp)
+                delivered.append(delivered_packet.copy())
+        return delivered
+
+    def get_latest_gcs_safety_state(self, now: Optional[float] = None):
+        return GcsSafetyStateService.build_from_provider(self, now=now)
 
     def get_drone_velocity(self) -> Tuple[float, float, float]:
-        self._deliver_due_packets(time.time())
+        self.flush_due_packets(now=time.time())
         with self._lock:
             return self._cache.velocity
 
     def get_drone_yaw(self) -> float:
-        self._deliver_due_packets(time.time())
+        self.flush_due_packets(now=time.time())
         with self._lock:
             return self._cache.yaw
 
     def get_navigation_state(self) -> int:
-        self._deliver_due_packets(time.time())
+        self.flush_due_packets(now=time.time())
         with self._lock:
             return self._cache.nav_state
 
     def get_arming_state(self) -> int:
-        self._deliver_due_packets(time.time())
+        self.flush_due_packets(now=time.time())
         with self._lock:
             return self._cache.arming_state
 

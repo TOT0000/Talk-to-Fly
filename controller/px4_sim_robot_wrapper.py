@@ -250,6 +250,11 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             return self._state_provider.get_latest_received_state_packet()
         return None
 
+    def get_latest_user_localization_packet(self):
+        if self._state_provider is not None and hasattr(self._state_provider, "get_latest_received_user_packet"):
+            return self._state_provider.get_latest_received_user_packet()
+        return None
+
     def get_drone_velocity(self) -> Tuple[float, float, float]:
         if self._state_provider is not None and hasattr(self._state_provider, "get_drone_velocity"):
             return self._state_provider.get_drone_velocity()

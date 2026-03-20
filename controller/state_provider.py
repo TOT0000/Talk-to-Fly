@@ -49,6 +49,18 @@ class StateProvider(ABC):
     def get_latest_received_state_packet(self):
         return None
 
+    def get_latest_drone_state_packet(self):
+        return self.get_latest_state_packet()
+
+    def get_latest_user_state_packet(self):
+        return None
+
+    def get_latest_received_drone_packet(self):
+        return self.get_latest_received_state_packet()
+
+    def get_latest_received_user_packet(self):
+        return None
+
     def get_latest_packet_generation_timestamp(self) -> Optional[float]:
         return None
 
@@ -57,6 +69,9 @@ class StateProvider(ABC):
 
     def compute_aoi(self, now: Optional[float] = None) -> Optional[float]:
         return None
+
+    def flush_due_packets(self, now: Optional[float] = None):
+        return []
 
     @abstractmethod
     def has_valid_position(self) -> bool:

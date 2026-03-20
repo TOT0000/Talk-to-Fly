@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -8,6 +8,7 @@ import numpy as np
 
 @dataclass
 class LocalizedStatePacket:
+    entity_type: str
     sequence_number: int
     state_generation_timestamp: float
     gt_position_3d: np.ndarray
@@ -34,6 +35,7 @@ class LocalizedStatePacket:
 
     def copy(self) -> "LocalizedStatePacket":
         return LocalizedStatePacket(
+            entity_type=str(self.entity_type),
             sequence_number=int(self.sequence_number),
             state_generation_timestamp=float(self.state_generation_timestamp),
             gt_position_3d=self.gt_position_3d.copy(),
