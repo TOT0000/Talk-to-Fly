@@ -395,16 +395,18 @@ class LLMController():
             return {}
 
         now = time.time()
+        if hasattr(provider, "flush_due_packets"):
+            provider.flush_due_packets(now=now)
         safety_state = provider.get_latest_gcs_safety_state(now=now) if hasattr(provider, "get_latest_gcs_safety_state") else None
         safety_context = provider.get_latest_safety_context(now=now) if hasattr(provider, "get_latest_safety_context") else self.latest_safety_context
 
         drone_gt = provider.get_ground_truth_drone_position() if hasattr(provider, "get_ground_truth_drone_position") else self.drone.get_drone_position()
-        drone_est = provider.get_estimated_drone_position() if hasattr(provider, "get_estimated_drone_position") else drone_gt
         user_gt = provider.get_ground_truth_user_position() if hasattr(provider, "get_ground_truth_user_position") else provider.get_user_position()
-        user_est = provider.get_estimated_user_position() if hasattr(provider, "get_estimated_user_position") else user_gt
 
         drone_packet = provider.get_latest_received_drone_packet() if hasattr(provider, "get_latest_received_drone_packet") else None
         user_packet = provider.get_latest_received_user_packet() if hasattr(provider, "get_latest_received_user_packet") else None
+        drone_est = None if drone_packet is None else tuple(float(v) for v in drone_packet.estimated_position_3d)
+        user_est = None if user_packet is None else tuple(float(v) for v in user_packet.estimated_position_3d)
 
         def _timing(packet):
             if packet is None:

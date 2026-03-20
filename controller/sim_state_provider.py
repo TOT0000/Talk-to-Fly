@@ -301,6 +301,8 @@ class SimStateProvider(StateProvider):
         self.flush_due_packets(now=time.time())
         with self._lock:
             packet = self._latest_received_packets["drone"]
+            if packet is None:
+                packet = self._latest_generated_packets["drone"]
             if packet is not None:
                 return tuple(float(v) for v in packet.estimated_position_3d)
             return self._cache.position
@@ -312,6 +314,8 @@ class SimStateProvider(StateProvider):
         self.flush_due_packets(now=time.time())
         with self._lock:
             packet = self._latest_received_packets["user"]
+            if packet is None:
+                packet = self._latest_generated_packets["user"]
             if packet is not None:
                 return tuple(float(v) for v in packet.estimated_position_3d)
             return self._user_position
