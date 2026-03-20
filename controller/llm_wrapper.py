@@ -2,6 +2,8 @@ import os
 import openai
 from openai import Stream, ChatCompletion
 
+from .utils import print_debug
+
 GPT3 = "gpt-3.5-turbo-16k"
 GPT4 = "gpt-4"
 LLAMA3 = "meta-llama/Meta-Llama-3-8B-Instruct"
@@ -26,6 +28,10 @@ class LLMWrapper:
             client = self.llama_client
         else:
             client = self.gpt_client
+
+        with open(chat_log_path, "a") as f:
+            f.write(prompt + "\n---\n")
+        print_debug(f"[LLM] Prompt written to {chat_log_path}")
         
         response = client.chat.completions.create(
             model=model_name,
@@ -36,7 +42,6 @@ class LLMWrapper:
 
         # save the message in a txt
         with open(chat_log_path, "a") as f:
-            f.write(prompt + "\n---\n")
             if not stream:
                 f.write(response.model_dump_json(indent=2) + "\n---\n")
 
