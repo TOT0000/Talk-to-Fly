@@ -590,7 +590,12 @@ class TypeFly:
             ("user_gt", "User GT", self.plot_style["user"]["main"], "o", True),
             ("user_est", "User EST", self.plot_style["user"]["main"], "o", False),
         ]
-        for key, label, color, marker, filled in point_specs:
+        for spec in point_specs:
+            key = spec[0]
+            label = spec[1]
+            color = spec[2]
+            marker = spec[3] if len(spec) > 3 else "o"
+            filled = spec[4] if len(spec) > 4 else True
             value = snapshot.get(key) if snapshot else None
             if value is None:
                 ax_xy.scatter([], [], c=color, marker=marker, label=label)
@@ -667,7 +672,11 @@ class TypeFly:
             fig, ax = plt.subplots(figsize=(5, 4))
             values = []
             axis_idx = axis_map[axis]
-            for key, label, color, linestyle in series_specs:
+            for spec in series_specs:
+                key = spec[0]
+                label = spec[1]
+                color = spec[2]
+                linestyle = spec[3] if len(spec) > 3 else "-"
                 history = list(self.position_history[key])
                 if not history:
                     ax.plot([], [], color=color, label=label)
@@ -687,7 +696,7 @@ class TypeFly:
                     markeredgecolor=color,
                     label=label,
                 )
-            max_len = max((len(self.position_history[key]) for key, _, _ in series_specs), default=1)
+            max_len = max((len(self.position_history[spec[0]]) for spec in series_specs), default=1)
             ax.set_xlim(0, max(max_len - 1, 1))
             if values:
                 ymin = min(values) - 0.5
