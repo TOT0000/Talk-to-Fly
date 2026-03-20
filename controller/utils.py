@@ -1,5 +1,6 @@
-from typing import Union
 import datetime
+import os
+from typing import Union
 
 def print_t(*args, **kwargs):
     # Get the current timestamp
@@ -7,6 +8,19 @@ def print_t(*args, **kwargs):
     
     # Use built-in print to display the timestamp followed by the message
     print(f"[{current_time}]", *args, **kwargs)
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on", "debug", "verbose"}
+
+
+def print_debug(*args, **kwargs):
+    env_var = kwargs.pop("env_var", "TYPEFLY_DEBUG")
+    if env_flag(env_var, default=False):
+        print_t(*args, **kwargs)
 
 def input_t(literal):
     # Get the current timestamp
@@ -62,4 +76,3 @@ def split_args(arg_str: str) -> list[str]:
         args.append(current_arg.strip())
 
     return args
-
