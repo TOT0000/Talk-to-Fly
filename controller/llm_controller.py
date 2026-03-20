@@ -6,6 +6,7 @@ import uuid
 import threading
 
 from .shared_frame import SharedFrame, Frame
+from .gcs_safety_assessment import GcsSafetyAssessmentService
 from .yolo_client import YoloClient
 from .yolo_grpc_client import YoloGRPCClient
 from .tello_wrapper import TelloWrapper
@@ -67,6 +68,7 @@ class LLMController():
         
         self.planner = LLMPlanner(robot_type)
         self.planner.controller = self
+        self.safety_assessor = GcsSafetyAssessmentService()
 
         # state provider
         self.uwb = UWBWrapper()
@@ -131,6 +133,7 @@ class LLMController():
         self.current_plan = None
         self.execution_history = None
         self.execution_time = time.time()
+        self.latest_safety_context = None
 
         # PX4_SIM optional managed user-position publisher lifecycle
         self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
@@ -339,13 +342,16 @@ class LLMController():
             )
 
             scene_description = self.vision.get_obj_list() if self.enable_video else ''
+            safety_context = self.safety_assessor.build_from_provider(self.state_provider)
             
             self.current_plan = self.planner.plan(
                 task_description=task_description,
                 scene_description=scene_description,
                 location_info=location_info,
-                execution_history=self.execution_history
+                execution_history=self.execution_history,
+                safety_context=safety_context,
             )
+            self.latest_safety_context = safety_context
             
             self.append_message(f'[Plan]: \\\\')
             try:
