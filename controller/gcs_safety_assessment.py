@@ -33,8 +33,13 @@ class GcsSafetyAssessmentService:
                 latest_generation_timestamp=None,
                 latest_receive_timestamp=None,
                 timing_freshness_s=None,
+                max_aoi_s=None,
             )
 
+        max_aoi_s = max(
+            now - float(safety_state.drone_packet.state_generation_timestamp),
+            now - float(safety_state.user_packet.state_generation_timestamp),
+        )
         result = self.assessor.assess(
             envelope_gap_m=safety_state.envelope_gap_m,
             uncertainty_scale_m=(
@@ -42,6 +47,7 @@ class GcsSafetyAssessmentService:
                 + safety_state.user_radius_along_drone_direction
             ),
             envelopes_overlap=safety_state.envelopes_overlap,
+            freshness_aoi_s=max_aoi_s,
         )
 
         freshness = None
@@ -64,4 +70,5 @@ class GcsSafetyAssessmentService:
             latest_generation_timestamp=safety_state.latest_generation_timestamp,
             latest_receive_timestamp=safety_state.latest_receive_timestamp,
             timing_freshness_s=freshness,
+            max_aoi_s=max_aoi_s,
         )
