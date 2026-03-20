@@ -509,7 +509,7 @@ class TypeFly:
         delay_md = self.render_delay_markdown(snapshot)
         counter += 1
         print_debug(
-            "[TRACE-UI-RETURN] "
+            "[UI-CALLBACK] "
             "outputs=[xy_plot,x_plot,y_plot,z_plot,aoi_plot,delay_plot,counter,coordinate_markdown,safety_markdown,delay_markdown] "
             f"drone_gt={None if not snapshot else snapshot.get('drone_gt')} "
             f"drone_est={None if not snapshot else snapshot.get('drone_est')} "
@@ -529,14 +529,25 @@ class TypeFly:
             return "n/a"
         return f"{value:.3f}{suffix}"
 
+    def _extract_ui_positions(self, snapshot):
+        if not snapshot:
+            return {
+                "drone_gt": None,
+                "drone_est": None,
+                "user_gt": None,
+                "user_est": None,
+            }
+        positions = {key: snapshot.get(key) for key in ("drone_gt", "drone_est", "user_gt", "user_est")}
+        return positions
+
     def _append_history(self, snapshot):
+        positions = self._extract_ui_positions(snapshot)
         if not snapshot:
             return
-        for key in ("drone_gt", "drone_est", "user_gt", "user_est"):
-            value = snapshot.get(key)
+        for key, value in positions.items():
             if value is not None:
                 self.position_history[key].append(tuple(float(v) for v in value))
-                print_debug(f"[TRACE-UI-HISTORY] key={key} appended={self.position_history[key][-1]}")
+                print_debug(f"[UI-HISTORY] key={key} appended={self.position_history[key][-1]}")
         for key in ("drone_aoi_s", "user_aoi_s", "drone_delay_s", "user_delay_s"):
             value = snapshot.get(key)
             if value is not None:
@@ -545,19 +556,20 @@ class TypeFly:
     def render_coordinate_markdown(self, snapshot):
         if not snapshot:
             return "### Coordinates\nWaiting for live data..."
+        positions = self._extract_ui_positions(snapshot)
         print_debug(
-            "[TRACE-UI-MARKDOWN] "
-            f"drone_gt={snapshot.get('drone_gt')} drone_est={snapshot.get('drone_est')} "
-            f"user_gt={snapshot.get('user_gt')} user_est={snapshot.get('user_est')}"
+            "[UI-MARKDOWN] "
+            f"drone_gt={positions['drone_gt']} drone_est={positions['drone_est']} "
+            f"user_gt={positions['user_gt']} user_est={positions['user_est']}"
         )
         return (
             "### Coordinates\n"
             f"**Drone (Blue)**\n"
-            f"- GT position: {self._fmt_vec(snapshot.get('drone_gt'))}\n"
-            f"- EST position: {self._fmt_vec(snapshot.get('drone_est'))}\n\n"
+            f"- GT position: {self._fmt_vec(positions['drone_gt'])}\n"
+            f"- EST position: {self._fmt_vec(positions['drone_est'])}\n\n"
             f"**User (Red)**\n"
-            f"- GT position: {self._fmt_vec(snapshot.get('user_gt'))}\n"
-            f"- EST position: {self._fmt_vec(snapshot.get('user_est'))}"
+            f"- GT position: {self._fmt_vec(positions['user_gt'])}\n"
+            f"- EST position: {self._fmt_vec(positions['user_est'])}"
         )
 
     def render_safety_markdown(self, snapshot):
@@ -599,9 +611,10 @@ class TypeFly:
         )
 
     def _axis_limits_from_snapshot(self, snapshot):
+        positions = self._extract_ui_positions(snapshot)
         xs, ys = [], []
         for key in ("drone_gt", "drone_est", "user_gt", "user_est"):
-            value = snapshot.get(key) if snapshot else None
+            value = positions.get(key)
             if value is not None:
                 xs.append(float(value[0]))
                 ys.append(float(value[1]))
@@ -665,21 +678,22 @@ class TypeFly:
         return aoi_img, delay_img
 
     def update_position_plot(self, snapshot):
-        xlim, ylim = self._axis_limits_from_snapshot(snapshot)
+        positions = self._extract_ui_positions(snapshot)
+        xlim, ylim = self._axis_limits_from_snapshot(positions)
         fig_xy, ax_xy = plt.subplots(figsize=(5, 4))
         print_debug(
-            "[TRACE-UI-PLOT] "
-            f"drone_gt={None if not snapshot else snapshot.get('drone_gt')} "
-            f"drone_est={None if not snapshot else snapshot.get('drone_est')} "
-            f"user_gt={None if not snapshot else snapshot.get('user_gt')} "
-            f"user_est={None if not snapshot else snapshot.get('user_est')}"
+            "[UI-PLOT] "
+            f"drone_gt={positions['drone_gt']} "
+            f"drone_est={positions['drone_est']} "
+            f"user_gt={positions['user_gt']} "
+            f"user_est={positions['user_est']}"
         )
 
         point_specs = [
             ("drone_gt", "Drone GT", self.plot_style["drone"]["main"], "o", True),
-            ("drone_est", "Drone EST", self.plot_style["drone"]["main"], "o", False),
+            ("drone_est", "Drone EST", self.plot_style["drone"]["light"], "X", True),
             ("user_gt", "User GT", self.plot_style["user"]["main"], "o", True),
-            ("user_est", "User EST", self.plot_style["user"]["main"], "o", False),
+            ("user_est", "User EST", self.plot_style["user"]["light"], "X", True),
         ]
         for spec in point_specs:
             key = spec[0]
@@ -687,7 +701,7 @@ class TypeFly:
             color = spec[2]
             marker = spec[3] if len(spec) > 3 else "o"
             filled = spec[4] if len(spec) > 4 else True
-            value = snapshot.get(key) if snapshot else None
+            value = positions.get(key)
             if value is None:
                 ax_xy.scatter([], [], c=color, marker=marker, label=label)
                 continue
@@ -695,20 +709,20 @@ class TypeFly:
             ax_xy.scatter([value[0]], [value[1]], edgecolors=color, facecolors=facecolors, marker=marker, s=70, linewidths=1.8, label=label)
             ax_xy.text(value[0] + 0.03, value[1] + 0.03, f"{label}: ({value[0]:.3f}, {value[1]:.3f})", fontsize=8, color=color)
 
-        if snapshot and snapshot.get("drone_gt") is not None and snapshot.get("drone_est") is not None:
+        if positions.get("drone_gt") is not None and positions.get("drone_est") is not None:
             ax_xy.plot(
-                [snapshot["drone_gt"][0], snapshot["drone_est"][0]],
-                [snapshot["drone_gt"][1], snapshot["drone_est"][1]],
+                [positions["drone_gt"][0], positions["drone_est"][0]],
+                [positions["drone_gt"][1], positions["drone_est"][1]],
                 color=self.plot_style["drone"]["main"],
                 linestyle="--",
                 linewidth=1.0,
                 alpha=0.8,
                 label="Drone GT→EST",
             )
-        if snapshot and snapshot.get("user_gt") is not None and snapshot.get("user_est") is not None:
+        if positions.get("user_gt") is not None and positions.get("user_est") is not None:
             ax_xy.plot(
-                [snapshot["user_gt"][0], snapshot["user_est"][0]],
-                [snapshot["user_gt"][1], snapshot["user_est"][1]],
+                [positions["user_gt"][0], positions["user_est"][0]],
+                [positions["user_gt"][1], positions["user_est"][1]],
                 color=self.plot_style["user"]["main"],
                 linestyle="--",
                 linewidth=1.0,

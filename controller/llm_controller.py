@@ -394,19 +394,53 @@ class LLMController():
         if provider is None:
             return {}
 
+        def _as_position_tuple(value):
+            if value is None:
+                return None
+            return tuple(float(v) for v in value)
+
+        def _call_position(source, attr):
+            fn = getattr(source, attr, None)
+            if callable(fn):
+                value = fn()
+                if value is not None:
+                    return _as_position_tuple(value)
+            return None
+
         now = time.time()
         if hasattr(provider, "flush_due_packets"):
             provider.flush_due_packets(now=now)
         safety_state = provider.get_latest_gcs_safety_state(now=now) if hasattr(provider, "get_latest_gcs_safety_state") else None
         safety_context = provider.get_latest_safety_context(now=now) if hasattr(provider, "get_latest_safety_context") else self.latest_safety_context
 
-        drone_gt = provider.get_ground_truth_drone_position() if hasattr(provider, "get_ground_truth_drone_position") else self.drone.get_drone_position()
-        user_gt = provider.get_ground_truth_user_position() if hasattr(provider, "get_ground_truth_user_position") else provider.get_user_position()
+        drone_gt = (
+            _as_position_tuple(getattr(getattr(provider, "_cache", None), "position", None))
+            or _call_position(self.drone, "get_ground_truth_drone_position")
+            or _call_position(provider, "get_ground_truth_drone_position")
+            or _call_position(self.drone, "get_drone_position")
+            or _call_position(provider, "get_drone_position")
+            or (0.0, 0.0, 0.0)
+        )
+        user_gt = (
+            _call_position(provider, "get_user_position")
+            or _as_position_tuple(getattr(provider, "_user_position", None))
+            or _call_position(provider, "get_ground_truth_user_position")
+            or (0.0, 0.0, 0.0)
+        )
 
-        drone_packet = provider.get_latest_received_drone_packet() if hasattr(provider, "get_latest_received_drone_packet") else None
-        user_packet = provider.get_latest_received_user_packet() if hasattr(provider, "get_latest_received_user_packet") else None
-        drone_est = None if drone_packet is None else tuple(float(v) for v in drone_packet.estimated_position_3d)
-        user_est = None if user_packet is None else tuple(float(v) for v in user_packet.estimated_position_3d)
+        drone_est = _call_position(self.drone, "get_estimated_drone_position")
+        if drone_est is None:
+            drone_packet = provider.get_latest_received_drone_packet() if hasattr(provider, "get_latest_received_drone_packet") else None
+            drone_est = None if drone_packet is None else _as_position_tuple(drone_packet.estimated_position_3d)
+        else:
+            drone_packet = provider.get_latest_received_drone_packet() if hasattr(provider, "get_latest_received_drone_packet") else None
+
+        user_est = _call_position(provider, "get_estimated_user_position")
+        if user_est is None:
+            user_packet = provider.get_latest_received_user_packet() if hasattr(provider, "get_latest_received_user_packet") else None
+            user_est = None if user_packet is None else _as_position_tuple(user_packet.estimated_position_3d)
+        else:
+            user_packet = provider.get_latest_received_user_packet() if hasattr(provider, "get_latest_received_user_packet") else None
 
         def _timing(packet):
             if packet is None:
@@ -421,10 +455,10 @@ class LLMController():
         user_aoi_s, user_delay_s = _timing(user_packet)
 
         snapshot = {
-            "drone_gt": tuple(float(v) for v in drone_gt),
-            "drone_est": None if drone_est is None else tuple(float(v) for v in drone_est),
-            "user_gt": tuple(float(v) for v in user_gt),
-            "user_est": None if user_est is None else tuple(float(v) for v in user_est),
+            "drone_gt": drone_gt,
+            "drone_est": drone_est,
+            "user_gt": user_gt,
+            "user_est": user_est,
             "drone_aoi_s": drone_aoi_s,
             "drone_delay_s": drone_delay_s,
             "user_aoi_s": user_aoi_s,
@@ -433,7 +467,7 @@ class LLMController():
             "safety_context": safety_context,
         }
         print_debug(
-            "[TRACE-UI-SNAPSHOT] "
+            "[UI-SNAPSHOT] "
             f"drone_gt={snapshot['drone_gt']} drone_est={snapshot['drone_est']} "
             f"user_gt={snapshot['user_gt']} user_est={snapshot['user_est']}"
         )
