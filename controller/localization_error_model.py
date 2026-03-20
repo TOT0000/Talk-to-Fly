@@ -19,17 +19,7 @@ class RangeMeasurementResult:
 
 
 class LocalizationErrorModel:
-    sigma_r_table: LookupTable = (
-        (1.0, 0.046),
-        (3.0, 0.039),
-        (5.0, 0.032),
-        (8.0, 0.034),
-        (10.0, 0.036),
-        (13.0, 0.041),
-        (15.0, 0.037),
-        (18.0, 0.034),
-        (20.0, 0.033),
-    )
+    sigma_r_const: float = 0.04
 
     mu_bias_table: LookupTable = (
         (1.0, 0.40),
@@ -51,7 +41,8 @@ class LocalizationErrorModel:
         return float(np.interp(d, xs, ys))
 
     def sigma_r(self, distance: float) -> float:
-        return self._interp_table(distance, self.sigma_r_table)
+        _ = distance
+        return float(self.sigma_r_const)
 
     def mu_bias(self, distance: float) -> float:
         return self._interp_table(distance, self.mu_bias_table)
