@@ -28,6 +28,36 @@ class StateProvider(ABC):
     def get_drone_yaw(self) -> float:
         return 0.0
 
+    def get_ground_truth_drone_position(self) -> Tuple[float, float, float]:
+        return self.get_drone_position()
+
+    def get_estimated_drone_position(self) -> Tuple[float, float, float]:
+        return self.get_drone_position()
+
+    def get_ground_truth_user_position(self) -> Tuple[float, float, float]:
+        return self.get_user_position()
+
+    def get_estimated_user_position(self) -> Tuple[float, float, float]:
+        return self.get_user_position()
+
+    def get_anchor_positions(self):
+        return []
+
+    def get_latest_state_packet(self):
+        return None
+
+    def get_latest_received_state_packet(self):
+        return None
+
+    def get_latest_packet_generation_timestamp(self) -> Optional[float]:
+        return None
+
+    def get_latest_packet_receive_timestamp(self) -> Optional[float]:
+        return None
+
+    def compute_aoi(self, now: Optional[float] = None) -> Optional[float]:
+        return None
+
     @abstractmethod
     def has_valid_position(self) -> bool:
         pass

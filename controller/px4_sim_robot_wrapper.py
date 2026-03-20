@@ -235,6 +235,21 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             return self._state_provider.get_drone_position()
         return super().get_drone_position()
 
+    def get_ground_truth_drone_position(self) -> Tuple[float, float, float]:
+        if self._state_provider is not None and hasattr(self._state_provider, "get_ground_truth_drone_position"):
+            return self._state_provider.get_ground_truth_drone_position()
+        return self.get_drone_position()
+
+    def get_estimated_drone_position(self) -> Tuple[float, float, float]:
+        if self._state_provider is not None and hasattr(self._state_provider, "get_estimated_drone_position"):
+            return self._state_provider.get_estimated_drone_position()
+        return self.get_drone_position()
+
+    def get_latest_localization_packet(self):
+        if self._state_provider is not None and hasattr(self._state_provider, "get_latest_received_state_packet"):
+            return self._state_provider.get_latest_received_state_packet()
+        return None
+
     def get_drone_velocity(self) -> Tuple[float, float, float]:
         if self._state_provider is not None and hasattr(self._state_provider, "get_drone_velocity"):
             return self._state_provider.get_drone_velocity()
