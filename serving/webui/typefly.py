@@ -3,12 +3,14 @@ import time
 import sys, os
 import asyncio
 import io, time
+from collections import deque
 import gradio as gr
 import argparse
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')  # 非互動後端避免開啟GUI視窗
 import matplotlib.pyplot as plt
+from matplotlib.patches import Ellipse
 from PIL import Image
 from threading import Thread
 from flask import Flask, Response, request
@@ -17,7 +19,7 @@ PARENT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 sys.path.append(PARENT_DIR)
 
 from controller.llm_controller import LLMController
-from controller.utils import print_t
+from controller.utils import print_debug, print_t
 from controller.llm_wrapper import GPT4, LLAMA3
 from controller.abs.robot_wrapper import RobotType
 from controller.uwb_wrapper import UWBWrapper
@@ -49,6 +51,16 @@ class TypeFly:
         # 狀態資料
         self.anchor_count = 0
         self.anchor_input_history = ""
+        self.position_history = {
+            "drone_gt": deque(maxlen=50),
+            "drone_est": deque(maxlen=50),
+            "user_gt": deque(maxlen=50),
+            "user_est": deque(maxlen=50),
+        }
+        self.plot_style = {
+            "drone": {"main": "#0B57D0", "light": "#8AB4F8"},
+            "user": {"main": "#C5221F", "light": "#F28B82"},
+        }
 
         # 浮動提示 internal state
         self._temp_message = ""
@@ -154,29 +166,42 @@ class TypeFly:
             with gr.Row():
                 with gr.Column(scale=2):
                     self.xy_plot = gr.Image(
-                        value=self.create_blank_plot("UWB & Virtual Drone Position (XY view)", "X (m)", "Y (m)", xlim=(0, 5), ylim=(0, 5)),
+                        value=self.create_blank_plot("Drone / User Localization & Safety Envelope (XY view)", "X (m)", "Y (m)", xlim=(0, 12), ylim=(0, 12)),
                         label="XY Plot"
                     )
                     self.x_plot = gr.Image(
-                        value=self.create_sequence_plot("X in Sequence", "Index", "X (m)", xlim=(0, 1), ylim=(0, 5)),
+                        value=self.create_sequence_plot("X in Sequence", "Index", "X (m)", xlim=(0, 1), ylim=(0, 12)),
                         label="X in Sequence"
                     )
                 with gr.Column(scale=2):
                     self.z_plot = gr.Image(
-                        value=self.create_sequence_plot("Z in Sequence", "Index", "Z (m)", xlim=(0, 1), ylim=(0, 5)),
+                        value=self.create_sequence_plot("Z in Sequence", "Index", "Z (m)", xlim=(0, 1), ylim=(0, 6)),
                         label="Z in Sequence"
                     )
                     self.y_plot = gr.Image(
-                        value=self.create_sequence_plot("Y in Sequence", "Index", "Y (m)", xlim=(0, 1), ylim=(0, 5)),
+                        value=self.create_sequence_plot("Y in Sequence", "Index", "Y (m)", xlim=(0, 1), ylim=(0, 12)),
                         label="Y in Sequence"
                     )
+            with gr.Row():
+                self.coordinate_markdown = gr.Markdown(value="### Coordinates\nWaiting for live data...")
+                self.safety_markdown = gr.Markdown(value="### Safety / Risk\nWaiting for safety state...")
+                self.delay_markdown = gr.Markdown(value="### AoI / Delay\nWaiting for packets...")
 
             self.counter = gr.State(0)
             self.timer = Timer(value=0.2)
             self.timer.tick(
                 fn=self.update_and_step,
                 inputs=[self.counter],
-                outputs=[self.xy_plot, self.x_plot, self.y_plot, self.z_plot, self.counter]
+                outputs=[
+                    self.xy_plot,
+                    self.x_plot,
+                    self.y_plot,
+                    self.z_plot,
+                    self.counter,
+                    self.coordinate_markdown,
+                    self.safety_markdown,
+                    self.delay_markdown,
+                ]
             )
 
             self.chat = gr.ChatInterface(self.process_message, fill_height=False)
@@ -212,7 +237,7 @@ class TypeFly:
             return
 
         timestamp = time.time()
-        tag = "[VirtualPos]" if source == "virtual" else "[UWBPos]" if source == "uwb" else "[SimPos]" if source == "sim" else "[Pos]"
+        tag = "[DronePos]" if source == "drone" else "[UserPos]" if source == "user" else "[Pos]"
 
         # 初始化紀錄字典
         if not hasattr(self, '_last_position_map'):
@@ -224,16 +249,15 @@ class TypeFly:
         if current_pos != last_pos:
             # 有改變才放入 queue
             try:
-                if source == "uwb":
-                    print(f"[receive_position] UWB pos: {x}, {y}, {z}") # 確認 callback 有進資料
+                if source == "user":
                     self.uwb_queue.put_nowait((timestamp, x, y, z))
-                else:
+                elif source == "drone":
                     self.virtual_queue.put_nowait((timestamp, x, y, z))
             except queue.Full:
-                if source == "uwb":
+                if source == "user":
                     self.uwb_queue.get()
                     self.uwb_queue.put_nowait((timestamp, x, y, z))
-                else:
+                elif source == "drone":
                     self.virtual_queue.get()
                     self.virtual_queue.put_nowait((timestamp, x, y, z))
 
@@ -243,7 +267,7 @@ class TypeFly:
 
             last_print_time = self._last_print_position_map.get(source, 0)
             if timestamp - last_print_time > 5:
-                print_t(f"{tag} x={x:.2f}, y={y:.2f}, z={z:.2f}")
+                print_debug(f"{tag} x={x:.2f}, y={y:.2f}, z={z:.2f}")
                 self._last_print_position_map[source] = timestamp
 
             # 更新最後位置
@@ -449,94 +473,245 @@ class TypeFly:
         return Image.open(buf)
 
     def update_and_step(self, counter):
-        xy, x, y, z = self.update_position_plot()
+        snapshot = self.llm_controller.get_live_ui_snapshot()
+        self._append_history(snapshot)
+        xy, x, y, z = self.update_position_plot(snapshot)
+        coordinate_md = self.render_coordinate_markdown(snapshot)
+        safety_md = self.render_safety_markdown(snapshot)
+        delay_md = self.render_delay_markdown(snapshot)
         counter += 1
-        return xy, x, y, z, counter
+        return xy, x, y, z, counter, coordinate_md, safety_md, delay_md
 
-    def update_position_plot(self):  
-        uwb_data = list(self.uwb_queue.queue)[-1:]
-        virtual_data = list(self.virtual_queue.queue)[-1:]
+    def _fmt_vec(self, value):
+        if value is None:
+            return "(n/a)"
+        return f"({value[0]:.2f}, {value[1]:.2f}, {value[2]:.2f})"
 
-        df_uwb = pd.DataFrame(uwb_data, columns=["t", "x", "y", "z"]) if uwb_data else pd.DataFrame()
-        df_virt = pd.DataFrame(virtual_data, columns=["t", "x", "y", "z"]) if virtual_data else pd.DataFrame()
+    def _fmt_float(self, value, suffix=""):
+        if value is None:
+            return "n/a"
+        return f"{value:.3f}{suffix}"
 
-        plot_df = pd.DataFrame()
-        if not df_uwb.empty:
-            df_uwb["type"] = "UWB"
-            plot_df = pd.concat([plot_df, df_uwb])
-        if not df_virt.empty:
-            df_virt["type"] = "Virtual"
-            plot_df = pd.concat([plot_df, df_virt])
+    def _append_history(self, snapshot):
+        if not snapshot:
+            return
+        for key in ("drone_gt", "drone_est", "user_gt", "user_est"):
+            value = snapshot.get(key)
+            if value is not None:
+                self.position_history[key].append(tuple(float(v) for v in value))
 
-        if plot_df.empty:
-            return (
-                self.create_blank_plot("XY Plot", "X", "Y", (0, 5), (0, 5)),
-                self.create_sequence_plot("X in Sequence", "Index", "X (m)", (0, 1), (0, 5)),
-                self.create_sequence_plot("Y in Sequence", "Index", "Y (m)", (0, 1), (0, 5)),
-                self.create_sequence_plot("Z in Sequence", "Index", "Z (m)", (0, 1), (0, 5)),
+    def render_coordinate_markdown(self, snapshot):
+        if not snapshot:
+            return "### Coordinates\nWaiting for live data..."
+        drone_color = self.plot_style["drone"]["main"]
+        user_color = self.plot_style["user"]["main"]
+        return (
+            "### Coordinates\n"
+            f"<span style='color:{drone_color}; font-weight:600;'>Drone</span>\n"
+            f"- GT position: {self._fmt_vec(snapshot.get('drone_gt'))}\n"
+            f"- EST position: {self._fmt_vec(snapshot.get('drone_est'))}\n\n"
+            f"<span style='color:{user_color}; font-weight:600;'>User</span>\n"
+            f"- GT position: {self._fmt_vec(snapshot.get('user_gt'))}\n"
+            f"- EST position: {self._fmt_vec(snapshot.get('user_est'))}"
+        )
+
+    def render_safety_markdown(self, snapshot):
+        safety_context = snapshot.get("safety_context") if snapshot else None
+        safety_state = snapshot.get("safety_state") if snapshot else None
+        if safety_context is None:
+            return "### Safety / Risk\nWaiting for safety state..."
+        drone_color = self.plot_style["drone"]["main"]
+        user_color = self.plot_style["user"]["main"]
+        lines = [
+            "### Safety / Risk",
+            f"- safety_score: {safety_context.safety_score:.3f}",
+            f"- safety_level: {safety_context.safety_level}",
+            f"- planning_bias: {safety_context.planning_bias}",
+            f"- preferred_standoff_m: {safety_context.preferred_standoff_m:.3f} m",
+            f"- envelope_gap_m: {safety_context.envelope_gap_m:.3f} m",
+            f"- uncertainty_scale_m: {safety_context.uncertainty_scale_m:.3f} m",
+            f"- envelopes_overlap: {safety_context.envelopes_overlap}",
+            f"- reason_tags: {safety_context.reason_tags}",
+        ]
+        if safety_state is not None:
+            lines.extend([
+                f"- <span style='color:{drone_color}; font-weight:600;'>drone envelope</span>: center=({safety_state.drone_envelope.center_xy[0]:.2f}, {safety_state.drone_envelope.center_xy[1]:.2f}), "
+                f"major={safety_state.drone_envelope.major_axis_radius:.2f}, minor={safety_state.drone_envelope.minor_axis_radius:.2f}, "
+                f"orientation={safety_state.drone_envelope.orientation_deg:.1f}°",
+                f"- <span style='color:{user_color}; font-weight:600;'>user envelope</span>: center=({safety_state.user_envelope.center_xy[0]:.2f}, {safety_state.user_envelope.center_xy[1]:.2f}), "
+                f"major={safety_state.user_envelope.major_axis_radius:.2f}, minor={safety_state.user_envelope.minor_axis_radius:.2f}, "
+                f"orientation={safety_state.user_envelope.orientation_deg:.1f}°",
+            ])
+        return "\n".join(lines)
+
+    def render_delay_markdown(self, snapshot):
+        if not snapshot:
+            return "### AoI / Delay\nWaiting for packets..."
+        drone_color = self.plot_style["drone"]["main"]
+        user_color = self.plot_style["user"]["main"]
+        return (
+            "### AoI / Delay\n"
+            f"- <span style='color:{drone_color}; font-weight:600;'>drone AoI</span>: {self._fmt_float(snapshot.get('drone_aoi_s'), ' s')}\n"
+            f"- <span style='color:{drone_color}; font-weight:600;'>drone observed uplink delay</span>: {self._fmt_float(snapshot.get('drone_delay_s'), ' s')}\n"
+            f"- <span style='color:{user_color}; font-weight:600;'>user AoI</span>: {self._fmt_float(snapshot.get('user_aoi_s'), ' s')}\n"
+            f"- <span style='color:{user_color}; font-weight:600;'>user observed uplink delay</span>: {self._fmt_float(snapshot.get('user_delay_s'), ' s')}"
+        )
+
+    def _axis_limits_from_snapshot(self, snapshot):
+        xs, ys = [], []
+        for key in ("drone_gt", "drone_est", "user_gt", "user_est"):
+            value = snapshot.get(key) if snapshot else None
+            if value is not None:
+                xs.append(float(value[0]))
+                ys.append(float(value[1]))
+        safety_state = snapshot.get("safety_state") if snapshot else None
+        if safety_state is not None:
+            for envelope in (safety_state.drone_envelope, safety_state.user_envelope):
+                xs.extend([
+                    float(envelope.center_xy[0] - envelope.major_axis_radius),
+                    float(envelope.center_xy[0] + envelope.major_axis_radius),
+                ])
+                ys.extend([
+                    float(envelope.center_xy[1] - envelope.major_axis_radius),
+                    float(envelope.center_xy[1] + envelope.major_axis_radius),
+                ])
+        if not xs or not ys:
+            return (0.0, 5.0), (0.0, 5.0)
+        pad = 0.5
+        return (min(xs) - pad, max(xs) + pad), (min(ys) - pad, max(ys) + pad)
+
+    def update_position_plot(self, snapshot):
+        xlim, ylim = self._axis_limits_from_snapshot(snapshot)
+        fig_xy, ax_xy = plt.subplots(figsize=(5, 4))
+
+        point_specs = [
+            ("drone_gt", "Drone GT", self.plot_style["drone"]["main"], "o", True),
+            ("drone_est", "Drone EST", self.plot_style["drone"]["main"], "o", False),
+            ("user_gt", "User GT", self.plot_style["user"]["main"], "o", True),
+            ("user_est", "User EST", self.plot_style["user"]["main"], "o", False),
+        ]
+        for spec in point_specs:
+            key = spec[0]
+            label = spec[1]
+            color = spec[2]
+            marker = spec[3] if len(spec) > 3 else "o"
+            filled = spec[4] if len(spec) > 4 else True
+            value = snapshot.get(key) if snapshot else None
+            if value is None:
+                ax_xy.scatter([], [], c=color, marker=marker, label=label)
+                continue
+            facecolors = color if filled else "none"
+            ax_xy.scatter([value[0]], [value[1]], edgecolors=color, facecolors=facecolors, marker=marker, s=70, linewidths=1.8, label=label)
+            ax_xy.text(value[0] + 0.03, value[1] + 0.03, f"{label}: ({value[0]:.2f}, {value[1]:.2f})", fontsize=8, color=color)
+
+        if snapshot and snapshot.get("drone_gt") is not None and snapshot.get("drone_est") is not None:
+            ax_xy.plot(
+                [snapshot["drone_gt"][0], snapshot["drone_est"][0]],
+                [snapshot["drone_gt"][1], snapshot["drone_est"][1]],
+                color=self.plot_style["drone"]["main"],
+                linestyle="--",
+                linewidth=1.0,
+                alpha=0.8,
+                label="Drone GT→EST",
+            )
+        if snapshot and snapshot.get("user_gt") is not None and snapshot.get("user_est") is not None:
+            ax_xy.plot(
+                [snapshot["user_gt"][0], snapshot["user_est"][0]],
+                [snapshot["user_gt"][1], snapshot["user_est"][1]],
+                color=self.plot_style["user"]["main"],
+                linestyle="--",
+                linewidth=1.0,
+                alpha=0.8,
+                label="User GT→EST",
             )
 
-        colors_map = {"UWB": "red", "Virtual": "blue"}
-
-        fig_xy, ax_xy = plt.subplots(figsize=(5, 4))
-        for dtype, color in colors_map.items():
-            subset = plot_df[plot_df["type"] == dtype]
-            if not subset.empty:
-                ax_xy.scatter(subset["x"], subset["y"], c=color, label=dtype, marker='o')
-                latest = subset.iloc[-1]
-                ax_xy.text(
-                    latest["x"] + 0.05,
-                    latest["y"] + 0.05,
-                    f"({latest['x']:.2f}, {latest['y']:.2f})",
-                    fontsize=8,
-                    color=color,
-                    ha='left',
-                    va='bottom'
+        safety_state = snapshot.get("safety_state") if snapshot else None
+        if safety_state is not None:
+            for label, envelope, color in (
+                ("Drone envelope", safety_state.drone_envelope, self.plot_style["drone"]["light"]),
+                ("User envelope", safety_state.user_envelope, self.plot_style["user"]["light"]),
+            ):
+                ellipse = Ellipse(
+                    xy=(float(envelope.center_xy[0]), float(envelope.center_xy[1])),
+                    width=2.0 * float(envelope.major_axis_radius),
+                    height=2.0 * float(envelope.minor_axis_radius),
+                    angle=float(envelope.orientation_deg),
+                    edgecolor=color,
+                    facecolor="none",
+                    linewidth=1.5,
+                    linestyle="--",
+                    label=label,
                 )
-            else:
-                ax_xy.scatter([], [], c=color, label=dtype, marker='o')
-        ax_xy.set_xlim(0, 5)
-        ax_xy.set_ylim(0, 5)
-        ax_xy.set_xticks([i * 0.5 for i in range(11)])
-        ax_xy.set_yticks([i * 0.5 for i in range(11)])
+                ax_xy.add_patch(ellipse)
+
+        ax_xy.set_xlim(*xlim)
+        ax_xy.set_ylim(*ylim)
         ax_xy.set_xlabel("X (m)")
         ax_xy.set_ylabel("Y (m)")
-        ax_xy.set_title("UWB & Virtual Drone Position (XY view)")
+        ax_xy.set_title("Drone / User Localization & Safety Envelope (XY view)")
         ax_xy.grid(True, linestyle='--', linewidth=0.5)
-        ax_xy.legend()
+        handles, labels = ax_xy.get_legend_handles_labels()
+        dedup = dict(zip(labels, handles))
+        ax_xy.legend(dedup.values(), dedup.keys(), fontsize=8)
 
         buf_xy = io.BytesIO()
-        fig_xy.savefig(buf_xy, format='png')
+        fig_xy.savefig(buf_xy, format='png', bbox_inches='tight')
         buf_xy.seek(0)
         plt.close(fig_xy)
         img_xy = Image.open(buf_xy)
 
+        series_specs = [
+            ("drone_gt", "Drone GT", self.plot_style["drone"]["main"], "-"),
+            ("drone_est", "Drone EST", self.plot_style["drone"]["main"], "--"),
+            ("user_gt", "User GT", self.plot_style["user"]["main"], "-"),
+            ("user_est", "User EST", self.plot_style["user"]["main"], "--"),
+        ]
         imgs = []
+        axis_map = {"x": 0, "y": 1, "z": 2}
         for axis in ["x", "y", "z"]:
             fig, ax = plt.subplots(figsize=(5, 4))
-            for label, color in colors_map.items():
-                ax.scatter([], [], color=color, label=label, marker='o')
-            for label, group in plot_df.groupby("type"):
-                if len(group) >= 1:
-                    x_vals = group.index / max(len(group.index) - 1, 1)
-                    y_vals = group[axis]
-                    ax.scatter(x_vals, y_vals, color=colors_map[label], marker='o')
-                    latest_x = x_vals.iloc[-1] if isinstance(x_vals, pd.Series) else x_vals[-1]
-                    latest_y = y_vals.iloc[-1] if isinstance(y_vals, pd.Series) else y_vals[-1]
-                    ax.text(latest_x + 0.01, latest_y + 0.05, f"{axis}={latest_y:.2f}",
-                            fontsize=8, color=colors_map[label], ha='left', va='bottom')
-            ax.set_xlim(0, 1)
-            ax.set_xticks([i * 0.2 for i in range(6)])
-            ax.set_ylim(0, 5)
-            ax.set_yticks([i * 0.5 for i in range(11)])
-            ax.set_title(f"{axis.upper()} in Sequence")
-            ax.set_xlabel("Index")
+            values = []
+            axis_idx = axis_map[axis]
+            for spec in series_specs:
+                key = spec[0]
+                label = spec[1]
+                color = spec[2]
+                linestyle = spec[3] if len(spec) > 3 else "-"
+                history = list(self.position_history[key])
+                if not history:
+                    ax.plot([], [], color=color, label=label)
+                    continue
+                x_vals = list(range(len(history)))
+                y_vals = [point[axis_idx] for point in history]
+                values.extend(y_vals)
+                markerfacecolor = color if linestyle == "-" else "none"
+                ax.plot(
+                    x_vals,
+                    y_vals,
+                    color=color,
+                    linestyle=linestyle,
+                    marker='o',
+                    markersize=3,
+                    markerfacecolor=markerfacecolor,
+                    markeredgecolor=color,
+                    label=label,
+                )
+            max_len = max((len(self.position_history[spec[0]]) for spec in series_specs), default=1)
+            ax.set_xlim(0, max(max_len - 1, 1))
+            if values:
+                ymin = min(values) - 0.5
+                ymax = max(values) + 0.5
+            else:
+                ymin, ymax = 0.0, 5.0
+            ax.set_ylim(ymin, ymax)
+            ax.set_title(f"{axis.upper()} History")
+            ax.set_xlabel("Sample")
             ax.set_ylabel(f"{axis.upper()} (m)")
             ax.grid(True, linestyle='--', linewidth=0.5)
-            ax.legend()
+            ax.legend(fontsize=8)
 
             buf = io.BytesIO()
-            fig.savefig(buf, format='png')
+            fig.savefig(buf, format='png', bbox_inches='tight')
             buf.seek(0)
             plt.close(fig)
             imgs.append(Image.open(buf))

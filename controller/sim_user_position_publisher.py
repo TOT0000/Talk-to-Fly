@@ -10,8 +10,8 @@ import argparse
 def parse_args():
     parser = argparse.ArgumentParser(description="Publish simulated user position to ROS2 topic")
     parser.add_argument("--topic", default="/sim/user_position", help="ROS2 topic name")
-    parser.add_argument("--x", type=float, default=0.0, help="User X position")
-    parser.add_argument("--y", type=float, default=0.0, help="User Y position")
+    parser.add_argument("--x", type=float, default=8.0, help="User X position")
+    parser.add_argument("--y", type=float, default=8.0, help="User Y position")
     parser.add_argument("--z", type=float, default=0.0, help="User Z position")
     parser.add_argument("--rate", type=float, default=10.0, help="Publish rate in Hz")
     return parser.parse_args()
