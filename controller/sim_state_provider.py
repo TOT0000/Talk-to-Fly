@@ -287,15 +287,12 @@ class SimStateProvider(StateProvider):
             return (time.time() - self._last_position_ts) < 1.0 and self._last_position_ts > 0.0
 
     def get_drone_position(self) -> Tuple[float, float, float]:
-        self.flush_due_packets(now=time.time())
         with self._lock:
-            packet = self._latest_received_packets["drone"]
-            if packet is not None:
-                return tuple(float(v) for v in packet.estimated_position_3d)
             return self._cache.position
 
     def get_ground_truth_drone_position(self) -> Tuple[float, float, float]:
-        return self.get_drone_position()
+        with self._lock:
+            return self._cache.position
 
     def get_estimated_drone_position(self) -> Tuple[float, float, float]:
         self.flush_due_packets(now=time.time())
@@ -435,6 +432,9 @@ class SimStateProvider(StateProvider):
             P_xy = estimate.P_xy
             b_xy = estimate.b_xy
             M_xy = estimate.M_xy
+            range_residuals = estimate.range_residuals
+            range_residual_rms_m = estimate.range_residual_rms_m
+            normalized_range_residual_rms = estimate.normalized_range_residual_rms
         except Exception:
             est_position = gt_position.copy()
             jacobian_h_3d = np.zeros((anchors.shape[0], 3), dtype=float)
@@ -444,6 +444,9 @@ class SimStateProvider(StateProvider):
             P_xy = P_3d[0:2, 0:2].copy()
             b_xy = b_3d[0:2].copy()
             M_xy = P_xy.copy()
+            range_residuals = np.zeros(anchors.shape[0], dtype=float)
+            range_residual_rms_m = 0.0
+            normalized_range_residual_rms = 0.0
 
         localization_error_vector = est_position - gt_position
         packet = LocalizedStatePacket(
@@ -453,6 +456,9 @@ class SimStateProvider(StateProvider):
             gt_position_3d=gt_position.copy(),
             estimated_position_3d=np.asarray(est_position, dtype=float).copy(),
             localization_error_vector_3d=np.asarray(localization_error_vector, dtype=float).copy(),
+            range_residuals=np.asarray(range_residuals, dtype=float).copy(),
+            range_residual_rms_m=float(range_residual_rms_m),
+            normalized_range_residual_rms=float(normalized_range_residual_rms),
             gt_user_position_3d=gt_user_position.copy(),
             est_user_position_3d=(
                 np.asarray(est_position, dtype=float).copy()
