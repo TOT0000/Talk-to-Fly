@@ -616,6 +616,10 @@ class TypeFly:
             if value is not None:
                 xs.append(float(value[0]))
                 ys.append(float(value[1]))
+            history = self.position_history.get(key)
+            if history:
+                xs.extend(float(point[0]) for point in history)
+                ys.extend(float(point[1]) for point in history)
         safety_state = snapshot.get("safety_state") if snapshot else None
         if safety_state is not None:
             for envelope in (safety_state.drone_envelope, safety_state.user_envelope):
@@ -677,7 +681,7 @@ class TypeFly:
 
     def update_position_plot(self, snapshot):
         positions = self._extract_ui_positions(snapshot)
-        xlim, ylim = self._axis_limits_from_snapshot(positions)
+        xlim, ylim = self._axis_limits_from_snapshot(snapshot)
         fig_xy, ax_xy = plt.subplots(figsize=(5, 4))
         print_debug(
             "[UI-PLOT] "

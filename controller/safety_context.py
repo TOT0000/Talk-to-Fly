@@ -18,9 +18,11 @@ class SafetyContext:
     latest_generation_timestamp: Optional[float] = None
     latest_receive_timestamp: Optional[float] = None
     timing_freshness_s: Optional[float] = None
+    max_aoi_s: Optional[float] = None
 
     def to_prompt_block(self) -> str:
         freshness = "unknown" if self.timing_freshness_s is None else f"{self.timing_freshness_s:.2f} s"
+        max_aoi = "unknown" if self.max_aoi_s is None else f"{self.max_aoi_s:.2f} s"
         latest_gen = "unknown" if self.latest_generation_timestamp is None else f"{self.latest_generation_timestamp:.3f}"
         latest_recv = "unknown" if self.latest_receive_timestamp is None else f"{self.latest_receive_timestamp:.3f}"
         return (
@@ -35,5 +37,6 @@ class SafetyContext:
             f"envelopes_overlap: {self.envelopes_overlap}\n"
             f"latest_generation_timestamp: {latest_gen}\n"
             f"latest_receive_timestamp: {latest_recv}\n"
-            f"timing_freshness_s: {freshness}"
+            f"timing_freshness_s: {freshness}\n"
+            f"max_aoi_s: {max_aoi}"
         )
