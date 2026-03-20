@@ -51,8 +51,8 @@ class FuzzySafetyAssessor:
 
     FRESHNESS_FACTORS: Dict[str, float] = {
         "FRESH": 1.00,
-        "MODERATE": 0.82,
-        "STALE": 0.58,
+        "MODERATE": 0.90,
+        "STALE": 0.72,
     }
 
     @staticmethod
