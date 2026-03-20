@@ -291,8 +291,8 @@ class LLMController():
             return
 
         topic = os.getenv("SIM_USER_POSITION_TOPIC", "/sim/user_position")
-        x = os.getenv("SIM_USER_POSITION_PUB_X", "0.0")
-        y = os.getenv("SIM_USER_POSITION_PUB_Y", "0.0")
+        x = os.getenv("SIM_USER_POSITION_PUB_X", "8.0")
+        y = os.getenv("SIM_USER_POSITION_PUB_Y", "8.0")
         z = os.getenv("SIM_USER_POSITION_PUB_Z", "0.0")
         rate = os.getenv("SIM_USER_POSITION_PUB_RATE", "10.0")
 

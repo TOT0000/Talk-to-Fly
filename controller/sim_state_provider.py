@@ -118,7 +118,7 @@ class SimStateProvider(StateProvider):
         self._last_receive_summary_log_ts = {"drone": 0.0, "user": 0.0}
 
     def _load_user_position_from_env(self) -> Tuple[float, float, float]:
-        raw = os.getenv("SIM_USER_POSITION", "0,0,0")
+        raw = os.getenv("SIM_USER_POSITION", "8,8,0")
         try:
             x, y, z = [float(v.strip()) for v in raw.split(",")]
             return (x, y, z)

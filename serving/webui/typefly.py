@@ -57,6 +57,10 @@ class TypeFly:
             "user_gt": deque(maxlen=50),
             "user_est": deque(maxlen=50),
         }
+        self.plot_style = {
+            "drone": {"main": "#0B57D0", "light": "#8AB4F8"},
+            "user": {"main": "#C5221F", "light": "#F28B82"},
+        }
 
         # 浮動提示 internal state
         self._temp_message = ""
@@ -162,20 +166,20 @@ class TypeFly:
             with gr.Row():
                 with gr.Column(scale=2):
                     self.xy_plot = gr.Image(
-                        value=self.create_blank_plot("Drone / User Localization & Safety Envelope (XY view)", "X (m)", "Y (m)", xlim=(0, 5), ylim=(0, 5)),
+                        value=self.create_blank_plot("Drone / User Localization & Safety Envelope (XY view)", "X (m)", "Y (m)", xlim=(0, 12), ylim=(0, 12)),
                         label="XY Plot"
                     )
                     self.x_plot = gr.Image(
-                        value=self.create_sequence_plot("X in Sequence", "Index", "X (m)", xlim=(0, 1), ylim=(0, 5)),
+                        value=self.create_sequence_plot("X in Sequence", "Index", "X (m)", xlim=(0, 1), ylim=(0, 12)),
                         label="X in Sequence"
                     )
                 with gr.Column(scale=2):
                     self.z_plot = gr.Image(
-                        value=self.create_sequence_plot("Z in Sequence", "Index", "Z (m)", xlim=(0, 1), ylim=(0, 5)),
+                        value=self.create_sequence_plot("Z in Sequence", "Index", "Z (m)", xlim=(0, 1), ylim=(0, 6)),
                         label="Z in Sequence"
                     )
                     self.y_plot = gr.Image(
-                        value=self.create_sequence_plot("Y in Sequence", "Index", "Y (m)", xlim=(0, 1), ylim=(0, 5)),
+                        value=self.create_sequence_plot("Y in Sequence", "Index", "Y (m)", xlim=(0, 1), ylim=(0, 12)),
                         label="Y in Sequence"
                     )
             with gr.Row():
@@ -499,12 +503,14 @@ class TypeFly:
     def render_coordinate_markdown(self, snapshot):
         if not snapshot:
             return "### Coordinates\nWaiting for live data..."
+        drone_color = self.plot_style["drone"]["main"]
+        user_color = self.plot_style["user"]["main"]
         return (
             "### Coordinates\n"
-            f"**Drone**\n"
+            f"<span style='color:{drone_color}; font-weight:600;'>Drone</span>\n"
             f"- GT position: {self._fmt_vec(snapshot.get('drone_gt'))}\n"
             f"- EST position: {self._fmt_vec(snapshot.get('drone_est'))}\n\n"
-            f"**User**\n"
+            f"<span style='color:{user_color}; font-weight:600;'>User</span>\n"
             f"- GT position: {self._fmt_vec(snapshot.get('user_gt'))}\n"
             f"- EST position: {self._fmt_vec(snapshot.get('user_est'))}"
         )
@@ -514,6 +520,8 @@ class TypeFly:
         safety_state = snapshot.get("safety_state") if snapshot else None
         if safety_context is None:
             return "### Safety / Risk\nWaiting for safety state..."
+        drone_color = self.plot_style["drone"]["main"]
+        user_color = self.plot_style["user"]["main"]
         lines = [
             "### Safety / Risk",
             f"- safety_score: {safety_context.safety_score:.3f}",
@@ -527,10 +535,10 @@ class TypeFly:
         ]
         if safety_state is not None:
             lines.extend([
-                f"- drone envelope: center=({safety_state.drone_envelope.center_xy[0]:.2f}, {safety_state.drone_envelope.center_xy[1]:.2f}), "
+                f"- <span style='color:{drone_color}; font-weight:600;'>drone envelope</span>: center=({safety_state.drone_envelope.center_xy[0]:.2f}, {safety_state.drone_envelope.center_xy[1]:.2f}), "
                 f"major={safety_state.drone_envelope.major_axis_radius:.2f}, minor={safety_state.drone_envelope.minor_axis_radius:.2f}, "
                 f"orientation={safety_state.drone_envelope.orientation_deg:.1f}°",
-                f"- user envelope: center=({safety_state.user_envelope.center_xy[0]:.2f}, {safety_state.user_envelope.center_xy[1]:.2f}), "
+                f"- <span style='color:{user_color}; font-weight:600;'>user envelope</span>: center=({safety_state.user_envelope.center_xy[0]:.2f}, {safety_state.user_envelope.center_xy[1]:.2f}), "
                 f"major={safety_state.user_envelope.major_axis_radius:.2f}, minor={safety_state.user_envelope.minor_axis_radius:.2f}, "
                 f"orientation={safety_state.user_envelope.orientation_deg:.1f}°",
             ])
@@ -539,12 +547,14 @@ class TypeFly:
     def render_delay_markdown(self, snapshot):
         if not snapshot:
             return "### AoI / Delay\nWaiting for packets..."
+        drone_color = self.plot_style["drone"]["main"]
+        user_color = self.plot_style["user"]["main"]
         return (
             "### AoI / Delay\n"
-            f"- drone AoI: {self._fmt_float(snapshot.get('drone_aoi_s'), ' s')}\n"
-            f"- drone observed uplink delay: {self._fmt_float(snapshot.get('drone_delay_s'), ' s')}\n"
-            f"- user AoI: {self._fmt_float(snapshot.get('user_aoi_s'), ' s')}\n"
-            f"- user observed uplink delay: {self._fmt_float(snapshot.get('user_delay_s'), ' s')}"
+            f"- <span style='color:{drone_color}; font-weight:600;'>drone AoI</span>: {self._fmt_float(snapshot.get('drone_aoi_s'), ' s')}\n"
+            f"- <span style='color:{drone_color}; font-weight:600;'>drone observed uplink delay</span>: {self._fmt_float(snapshot.get('drone_delay_s'), ' s')}\n"
+            f"- <span style='color:{user_color}; font-weight:600;'>user AoI</span>: {self._fmt_float(snapshot.get('user_aoi_s'), ' s')}\n"
+            f"- <span style='color:{user_color}; font-weight:600;'>user observed uplink delay</span>: {self._fmt_float(snapshot.get('user_delay_s'), ' s')}"
         )
 
     def _axis_limits_from_snapshot(self, snapshot):
@@ -575,24 +585,46 @@ class TypeFly:
         fig_xy, ax_xy = plt.subplots(figsize=(5, 4))
 
         point_specs = [
-            ("drone_gt", "Drone GT", "tab:blue", "o"),
-            ("drone_est", "Drone EST", "tab:cyan", "x"),
-            ("user_gt", "User GT", "tab:red", "o"),
-            ("user_est", "User EST", "tab:orange", "x"),
+            ("drone_gt", "Drone GT", self.plot_style["drone"]["main"], "o", True),
+            ("drone_est", "Drone EST", self.plot_style["drone"]["main"], "o", False),
+            ("user_gt", "User GT", self.plot_style["user"]["main"], "o", True),
+            ("user_est", "User EST", self.plot_style["user"]["main"], "o", False),
         ]
-        for key, label, color, marker in point_specs:
+        for key, label, color, marker, filled in point_specs:
             value = snapshot.get(key) if snapshot else None
             if value is None:
                 ax_xy.scatter([], [], c=color, marker=marker, label=label)
                 continue
-            ax_xy.scatter([value[0]], [value[1]], c=color, marker=marker, label=label)
+            facecolors = color if filled else "none"
+            ax_xy.scatter([value[0]], [value[1]], edgecolors=color, facecolors=facecolors, marker=marker, s=70, linewidths=1.8, label=label)
             ax_xy.text(value[0] + 0.03, value[1] + 0.03, f"{label}: ({value[0]:.2f}, {value[1]:.2f})", fontsize=8, color=color)
+
+        if snapshot and snapshot.get("drone_gt") is not None and snapshot.get("drone_est") is not None:
+            ax_xy.plot(
+                [snapshot["drone_gt"][0], snapshot["drone_est"][0]],
+                [snapshot["drone_gt"][1], snapshot["drone_est"][1]],
+                color=self.plot_style["drone"]["main"],
+                linestyle="--",
+                linewidth=1.0,
+                alpha=0.8,
+                label="Drone GT→EST",
+            )
+        if snapshot and snapshot.get("user_gt") is not None and snapshot.get("user_est") is not None:
+            ax_xy.plot(
+                [snapshot["user_gt"][0], snapshot["user_est"][0]],
+                [snapshot["user_gt"][1], snapshot["user_est"][1]],
+                color=self.plot_style["user"]["main"],
+                linestyle="--",
+                linewidth=1.0,
+                alpha=0.8,
+                label="User GT→EST",
+            )
 
         safety_state = snapshot.get("safety_state") if snapshot else None
         if safety_state is not None:
             for label, envelope, color in (
-                ("Drone envelope", safety_state.drone_envelope, "tab:blue"),
-                ("User envelope", safety_state.user_envelope, "tab:red"),
+                ("Drone envelope", safety_state.drone_envelope, self.plot_style["drone"]["light"]),
+                ("User envelope", safety_state.user_envelope, self.plot_style["user"]["light"]),
             ):
                 ellipse = Ellipse(
                     xy=(float(envelope.center_xy[0]), float(envelope.center_xy[1])),
@@ -624,10 +656,10 @@ class TypeFly:
         img_xy = Image.open(buf_xy)
 
         series_specs = [
-            ("drone_gt", "Drone GT", "tab:blue"),
-            ("drone_est", "Drone EST", "tab:cyan"),
-            ("user_gt", "User GT", "tab:red"),
-            ("user_est", "User EST", "tab:orange"),
+            ("drone_gt", "Drone GT", self.plot_style["drone"]["main"], "-"),
+            ("drone_est", "Drone EST", self.plot_style["drone"]["main"], "--"),
+            ("user_gt", "User GT", self.plot_style["user"]["main"], "-"),
+            ("user_est", "User EST", self.plot_style["user"]["main"], "--"),
         ]
         imgs = []
         axis_map = {"x": 0, "y": 1, "z": 2}
@@ -635,7 +667,7 @@ class TypeFly:
             fig, ax = plt.subplots(figsize=(5, 4))
             values = []
             axis_idx = axis_map[axis]
-            for key, label, color in series_specs:
+            for key, label, color, linestyle in series_specs:
                 history = list(self.position_history[key])
                 if not history:
                     ax.plot([], [], color=color, label=label)
@@ -643,7 +675,18 @@ class TypeFly:
                 x_vals = list(range(len(history)))
                 y_vals = [point[axis_idx] for point in history]
                 values.extend(y_vals)
-                ax.plot(x_vals, y_vals, color=color, marker='o', markersize=2, label=label)
+                markerfacecolor = color if linestyle == "-" else "none"
+                ax.plot(
+                    x_vals,
+                    y_vals,
+                    color=color,
+                    linestyle=linestyle,
+                    marker='o',
+                    markersize=3,
+                    markerfacecolor=markerfacecolor,
+                    markeredgecolor=color,
+                    label=label,
+                )
             max_len = max((len(self.position_history[key]) for key, _, _ in series_specs), default=1)
             ax.set_xlim(0, max(max_len - 1, 1))
             if values:
