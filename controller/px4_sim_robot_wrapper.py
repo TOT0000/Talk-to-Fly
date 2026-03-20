@@ -23,6 +23,8 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
 
     def __init__(self, enable_video: bool = False):
         super().__init__(enable_video=enable_video)
+        self._nav_state_offboard = 14
+        self._arming_state_armed = 2
         self._state_provider = None
         self._rclpy = None
         self._node = None
@@ -147,6 +149,56 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             f"param2={param2:.2f} param7={param7:.2f} timestamp_us={msg.timestamp}"
         )
 
+    def _is_offboard_ready(self) -> bool:
+        return (
+            int(self.get_navigation_state()) == int(self._nav_state_offboard)
+            and int(self.get_arming_state()) == int(self._arming_state_armed)
+        )
+
+    def _wait_for_offboard_ready(self, timeout_s: float = 2.0) -> bool:
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if self._is_offboard_ready():
+                return True
+            time.sleep(0.05)
+        return self._is_offboard_ready()
+
+    def _ensure_offboard_control(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        yaw: float,
+        warmup_s: float = 1.0,
+        confirm_timeout_s: float = 2.0,
+        max_attempts: int = 3,
+    ) -> bool:
+        """Warm the position-setpoint stream, then request OFFBOARD + arm.
+
+        PX4 simulator motion commands rely on the offboard stream being active before
+        mode switching. Re-issuing the commands here keeps movement/rotation skills from
+        depending on takeoff() having been the only code path that armed and entered
+        offboard mode.
+        """
+        cmd_mode = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_DO_SET_MODE", 176)
+        cmd_arm = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_COMPONENT_ARM_DISARM", 400)
+        for attempt in range(1, max_attempts + 1):
+            self._set_active_target(x, y, z, yaw)
+            time.sleep(warmup_s)
+            self._publish_vehicle_command(cmd_mode, param1=1.0, param2=6.0)
+            self._publish_vehicle_command(cmd_arm, param1=1.0)
+            if self._wait_for_offboard_ready(timeout_s=confirm_timeout_s):
+                print_debug(
+                    f"[PX4-OFFBOARD] ready attempt={attempt} "
+                    f"nav_state={self.get_navigation_state()} arming_state={self.get_arming_state()}"
+                )
+                return True
+            print_debug(
+                f"[PX4-OFFBOARD] retry attempt={attempt} "
+                f"nav_state={self.get_navigation_state()} arming_state={self.get_arming_state()}"
+            )
+        return False
+
     def _publish_offboard_setpoint(self, x: float, y: float, z: float, yaw: Optional[float] = None):
         mode = self._msg_OffboardControlMode()
         mode.timestamp = self._now_us()
@@ -245,6 +297,8 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         deadline = time.time() + timeout_s
         stable_since = None
         settle_s = 0.3
+        best_error = float("inf")
+        last_progress_ts = time.time()
         print_debug(
             f"[PX4-MOVE] target_setpoint={self._format_position((target_x, target_y, target_z))} "
             f"yaw={yaw:.3f} completion=position_error<{pos_tol:.2f}m for {settle_s:.2f}s timeout={timeout_s:.2f}s"
@@ -253,6 +307,11 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             cx, cy, cz = self.get_drone_position()
             err = math.sqrt((target_x - cx) ** 2 + (target_y - cy) ** 2 + (target_z - cz) ** 2)
             self._log_tracking_state(target_x, target_y, target_z, err)
+            if err + 0.05 < best_error:
+                best_error = err
+                last_progress_ts = time.time()
+            elif err > pos_tol and (time.time() - last_progress_ts) < 1.0:
+                deadline = max(deadline, time.time() + 0.75)
             if err < pos_tol:
                 if stable_since is None:
                     stable_since = time.time()
@@ -276,7 +335,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         return False, False
 
     def _move_by_body_offset(self, skill_name: str, command_distance: float, forward_m: float = 0.0, right_m: float = 0.0, up_m: float = 0.0,
-                             timeout_scale: float = 3.0) -> Tuple[bool, bool]:
+                             timeout_scale: float = 6.0) -> Tuple[bool, bool]:
         if not self._ensure_ros_publishers():
             return False, False
         if self._state_provider is not None and hasattr(self._state_provider, "wait_for_position"):
@@ -285,6 +344,9 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._begin_motion_debug(skill_name, command_distance)
 
         (x, y, z), yaw = self._get_state()
+        if not self._ensure_offboard_control(x, y, z, yaw):
+            print_debug(f"[PX4-MOVE] abort command={skill_name} reason=offboard_not_ready")
+            return False, False
 
         # Local NED frame assumption:
         # +X forward, +Y right, +Z down.
@@ -307,6 +369,9 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._begin_rotation_debug(skill_name, command_degrees)
 
         (x, y, z), yaw = self._get_state()
+        if not self._ensure_offboard_control(x, y, z, yaw):
+            print_debug(f"[PX4-MOVE] abort command={skill_name} reason=offboard_not_ready")
+            return False, False
         target_yaw = self._normalize_angle(yaw + delta_yaw_rad)
         self._set_active_target(x, y, z, target_yaw)
         print_debug(
@@ -406,19 +471,12 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
 
         (x, y, z), yaw = self._get_state()
 
-        # 1) Warm-up offboard stream by holding current position.
-        self._set_active_target(x, y, z, yaw)
-        time.sleep(0.8)
+        # 1) Warm-up offboard stream, switch to offboard mode, and arm.
+        if not self._ensure_offboard_control(x, y, z, yaw):
+            print("[PX4_SIM] takeoff aborted: failed to enter offboard+armed state")
+            return False
 
-        # 2) Switch to offboard mode (custom main mode = 6 in PX4).
-        cmd_mode = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_DO_SET_MODE", 176)
-        self._publish_vehicle_command(cmd_mode, param1=1.0, param2=6.0)
-
-        # 3) Arm after mode switch.
-        cmd_arm = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_COMPONENT_ARM_DISARM", 400)
-        self._publish_vehicle_command(cmd_arm, param1=1.0)
-
-        # 4) Climb by setting higher target in local NED (z more negative = up).
+        # 2) Climb by setting higher target in local NED (z more negative = up).
         takeoff_height_m = 1.0
         z_tolerance_m = 0.15
         settle_time_s = 1.0

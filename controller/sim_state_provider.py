@@ -153,6 +153,8 @@ class SimStateProvider(StateProvider):
                 f"  true_ranges={self._fmt_arr(packet.true_ranges)}\n"
                 f"  measured_ranges={self._fmt_arr(packet.measured_ranges)}\n"
                 f"  bias_values={self._fmt_arr(packet.bias_values)}\n"
+                f"  drift_values={self._fmt_arr(packet.drift_values)}\n"
+                f"  burst_values={self._fmt_arr(packet.burst_values)}\n"
                 f"  random_noise_values={self._fmt_arr(packet.random_noise_values)}"
             )
         if (now - self._last_generation_summary_log_ts[entity_type]) >= self._localization_summary_log_interval_s:
@@ -287,6 +289,9 @@ class SimStateProvider(StateProvider):
     def get_drone_position(self) -> Tuple[float, float, float]:
         self.flush_due_packets(now=time.time())
         with self._lock:
+            packet = self._latest_received_packets["drone"]
+            if packet is not None:
+                return tuple(float(v) for v in packet.estimated_position_3d)
             return self._cache.position
 
     def get_ground_truth_drone_position(self) -> Tuple[float, float, float]:
@@ -401,7 +406,12 @@ class SimStateProvider(StateProvider):
 
         anchors = self._anchor_provider.get_anchor_positions()
         true_ranges = np.linalg.norm(gt_position[None, :] - anchors, axis=1)
-        range_result = self._localization_error_model.perturb_ranges(true_ranges, self._rng)
+        range_result = self._localization_error_model.perturb_ranges(
+            true_ranges,
+            self._rng,
+            entity_key=entity_type,
+            timestamp=generation_timestamp,
+        )
         initial_guess = self._anchor_provider.get_workspace_center()
 
         try:
@@ -454,6 +464,8 @@ class SimStateProvider(StateProvider):
             measured_ranges=range_result.measured_ranges.copy(),
             bias_values=range_result.bias_values.copy(),
             sigma_values=range_result.sigma_values.copy(),
+            drift_values=range_result.drift_values.copy(),
+            burst_values=range_result.burst_values.copy(),
             random_noise_values=range_result.random_noise_values.copy(),
             jacobian_h_3d=np.asarray(jacobian_h_3d, dtype=float).copy(),
             P_3d=np.asarray(P_3d, dtype=float).copy(),

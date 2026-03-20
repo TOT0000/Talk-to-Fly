@@ -21,6 +21,8 @@ class LocalizedStatePacket:
     measured_ranges: np.ndarray
     bias_values: np.ndarray
     sigma_values: np.ndarray
+    drift_values: np.ndarray
+    burst_values: np.ndarray
     random_noise_values: np.ndarray
     jacobian_h_3d: np.ndarray
     P_3d: np.ndarray
@@ -48,6 +50,8 @@ class LocalizedStatePacket:
             measured_ranges=self.measured_ranges.copy(),
             bias_values=self.bias_values.copy(),
             sigma_values=self.sigma_values.copy(),
+            drift_values=self.drift_values.copy(),
+            burst_values=self.burst_values.copy(),
             random_noise_values=self.random_noise_values.copy(),
             jacobian_h_3d=self.jacobian_h_3d.copy(),
             P_3d=self.P_3d.copy(),
