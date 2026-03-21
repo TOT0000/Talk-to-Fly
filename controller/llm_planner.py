@@ -61,20 +61,33 @@ class LLMPlanner():
 
         # 自動處理 location_info
         if location_info is None:
-            user_pos = (0.00, 0.00, 0.00)
-            drone_pos = (0.00, 0.00, 0.00)
             try:
-                if self.controller:
-                    if hasattr(self.controller, 'drone'):
-                        drone_pos = self.controller.drone.get_drone_position()
-                    if hasattr(self.controller, 'state_provider') and self.controller.state_provider.has_valid_position():
-                        user_pos = self.controller.state_provider.get_user_position()
+                if self.controller and hasattr(self.controller, '_format_planner_location_info'):
+                    location_info = self.controller._format_planner_location_info()
             except Exception:
-                pass
-            location_info = (
-                f"Drone position: x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}\n"
-                f"User position: x={user_pos[0]:.2f}, y={user_pos[1]:.2f}, z={user_pos[2]:.2f}"
-            )
+                location_info = None
+            if location_info is None:
+                user_pos = (0.00, 0.00, 0.00)
+                drone_pos = (0.00, 0.00, 0.00)
+                try:
+                    if self.controller:
+                        if hasattr(self.controller, 'state_provider'):
+                            get_est_drone = getattr(self.controller.state_provider, 'get_estimated_drone_position', None)
+                            get_est_user = getattr(self.controller.state_provider, 'get_estimated_user_position', None)
+                            if callable(get_est_drone):
+                                value = get_est_drone()
+                                if value is not None:
+                                    drone_pos = value
+                            if callable(get_est_user):
+                                value = get_est_user()
+                                if value is not None:
+                                    user_pos = value
+                except Exception:
+                    pass
+                location_info = (
+                    f"Drone estimated position: x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}\n"
+                    f"User estimated position: x={user_pos[0]:.2f}, y={user_pos[1]:.2f}, z={user_pos[2]:.2f}"
+                )
 
         full_scene = f"{scene_description}\n{location_info}".strip()
         safety_context_block = (
@@ -100,23 +113,36 @@ class LLMPlanner():
         return self.llm.request(prompt, self.model_name, stream=False)
     
     def probe(self, question: str) -> MiniSpecValueType:
-        # 預設定位值
-        person_pos = (0.00, 0.00, 0.00)
-        drone_pos = (0.00, 0.00, 0.00)
-
+        location_info = None
         try:
-            if self.controller:
-                if hasattr(self.controller, 'drone'):
-                    drone_pos = self.controller.drone.get_drone_position()
-                if hasattr(self.controller, 'state_provider') and self.controller.state_provider.has_valid_position():
-                    person_pos = self.controller.state_provider.get_user_position()
+            if self.controller and hasattr(self.controller, '_format_planner_location_info'):
+                location_info = self.controller._format_planner_location_info()
         except Exception:
-            pass
+            location_info = None
 
-        location_info = (
-            f"Drone position: x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}\n"
-            f"User position: x={person_pos[0]:.2f}, y={person_pos[1]:.2f}, z={person_pos[2]:.2f}"
-        )
+        if location_info is None:
+            person_pos = (0.00, 0.00, 0.00)
+            drone_pos = (0.00, 0.00, 0.00)
+
+            try:
+                if self.controller and hasattr(self.controller, 'state_provider'):
+                    get_est_drone = getattr(self.controller.state_provider, 'get_estimated_drone_position', None)
+                    get_est_user = getattr(self.controller.state_provider, 'get_estimated_user_position', None)
+                    if callable(get_est_drone):
+                        value = get_est_drone()
+                        if value is not None:
+                            drone_pos = value
+                    if callable(get_est_user):
+                        value = get_est_user()
+                        if value is not None:
+                            person_pos = value
+            except Exception:
+                pass
+
+            location_info = (
+                f"Drone estimated position: x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}\n"
+                f"User estimated position: x={person_pos[0]:.2f}, y={person_pos[1]:.2f}, z={person_pos[2]:.2f}"
+            )
 
         # 是否啟用影像辨識
         try:
