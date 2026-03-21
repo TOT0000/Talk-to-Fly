@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
+
 def trapezoid(x: float, a: float, b: float, c: float, d: float) -> float:
     if x <= a or x >= d:
         return 0.0
@@ -37,46 +38,45 @@ class FuzzyAssessmentResult:
 
 class FuzzySafetyAssessor:
     GAP_RULES: Dict[Tuple[str, str], float] = {
-        ("OVERLAP_OR_NEGATIVE", "LARGE"): 0.03,
-        ("OVERLAP_OR_NEGATIVE", "MEDIUM"): 0.08,
-        ("OVERLAP_OR_NEGATIVE", "SMALL"): 0.18,
-        ("TIGHT", "LARGE"): 0.16,
-        ("TIGHT", "MEDIUM"): 0.32,
-        ("TIGHT", "SMALL"): 0.56,
-        ("CLEAR", "LARGE"): 0.42,
-        ("CLEAR", "MEDIUM"): 0.76,
-        ("CLEAR", "SMALL"): 0.97,
+        ("OVERLAP_OR_NEGATIVE", "LARGE"): 0.02,
+        ("OVERLAP_OR_NEGATIVE", "MEDIUM"): 0.06,
+        ("OVERLAP_OR_NEGATIVE", "SMALL"): 0.14,
+        ("TIGHT", "LARGE"): 0.12,
+        ("TIGHT", "MEDIUM"): 0.30,
+        ("TIGHT", "SMALL"): 0.52,
+        ("CLEAR", "LARGE"): 0.34,
+        ("CLEAR", "MEDIUM"): 0.66,
+        ("CLEAR", "SMALL"): 0.94,
     }
-
 
     FRESHNESS_FACTORS: Dict[str, float] = {
         "FRESH": 1.00,
-        "MODERATE": 0.90,
-        "STALE": 0.72,
+        "MODERATE": 0.82,
+        "STALE": 0.58,
     }
 
     @staticmethod
     def gap_memberships(envelope_gap_m: float) -> Dict[str, float]:
         return {
-            "OVERLAP_OR_NEGATIVE": trapezoid(envelope_gap_m, -5.0, -0.15, 0.15, 0.85),
-            "TIGHT": triangle(envelope_gap_m, 0.2, 1.0, 1.9),
-            "CLEAR": trapezoid(envelope_gap_m, 1.3, 2.1, 8.0, 12.0),
+            "OVERLAP_OR_NEGATIVE": trapezoid(envelope_gap_m, -5.0, -0.10, 0.10, 0.60),
+            "TIGHT": triangle(envelope_gap_m, 0.15, 0.80, 1.60),
+            "CLEAR": trapezoid(envelope_gap_m, 1.10, 1.80, 6.0, 9.0),
         }
 
     @staticmethod
     def uncertainty_memberships(uncertainty_scale_m: float) -> Dict[str, float]:
         return {
-            "SMALL": trapezoid(uncertainty_scale_m, -1.0, 0.0, 0.75, 1.0),
-            "MEDIUM": triangle(uncertainty_scale_m, 0.85, 1.2, 1.75),
-            "LARGE": trapezoid(uncertainty_scale_m, 1.45, 1.95, 4.0, 5.0),
+            "SMALL": trapezoid(uncertainty_scale_m, -1.0, 0.0, 0.28, 0.55),
+            "MEDIUM": triangle(uncertainty_scale_m, 0.35, 0.80, 1.30),
+            "LARGE": trapezoid(uncertainty_scale_m, 0.95, 1.35, 3.0, 4.0),
         }
 
     @staticmethod
     def freshness_memberships(freshness_aoi_s: float) -> Dict[str, float]:
         return {
-            "FRESH": trapezoid(freshness_aoi_s, -1.0, 0.0, 0.20, 0.45),
-            "MODERATE": triangle(freshness_aoi_s, 0.25, 0.70, 1.40),
-            "STALE": trapezoid(freshness_aoi_s, 0.90, 1.80, 10.0, 12.0),
+            "FRESH": trapezoid(freshness_aoi_s, -1.0, 0.0, 0.12, 0.30),
+            "MODERATE": triangle(freshness_aoi_s, 0.15, 0.55, 1.05),
+            "STALE": trapezoid(freshness_aoi_s, 0.75, 1.20, 6.0, 8.0),
         }
 
     @staticmethod

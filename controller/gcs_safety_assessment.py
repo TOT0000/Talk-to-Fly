@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import time
 from typing import Optional
 
@@ -46,11 +45,8 @@ class GcsSafetyAssessmentService:
             safety_state.drone_radius_along_user_direction
             + safety_state.user_radius_along_drone_direction
         )
-        quality_margin_m = (
-            float(safety_state.drone_packet.range_residual_rms_m)
-            + float(safety_state.user_packet.range_residual_rms_m)
-        )
-        uncertainty_scale_m = geometric_uncertainty_m + quality_margin_m
+        # uncertainty_scale_m is intentionally the geometric safety-envelope uncertainty only.
+        uncertainty_scale_m = geometric_uncertainty_m
         result = self.assessor.assess(
             envelope_gap_m=safety_state.envelope_gap_m,
             uncertainty_scale_m=uncertainty_scale_m,
