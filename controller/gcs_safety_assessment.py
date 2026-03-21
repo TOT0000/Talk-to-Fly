@@ -11,18 +11,6 @@ from .safety_context import SafetyContext
 
 class GcsSafetyAssessmentService:
 
-    @staticmethod
-    def _observed_xy_localization_error_m(safety_state) -> float:
-        drone_xy_error = math.hypot(
-            float(safety_state.drone_packet.localization_error_vector_3d[0]),
-            float(safety_state.drone_packet.localization_error_vector_3d[1]),
-        )
-        user_xy_error = math.hypot(
-            float(safety_state.user_packet.localization_error_vector_3d[0]),
-            float(safety_state.user_packet.localization_error_vector_3d[1]),
-        )
-        return drone_xy_error + user_xy_error
-
     def __init__(self):
         self.assessor = FuzzySafetyAssessor()
 
@@ -58,8 +46,11 @@ class GcsSafetyAssessmentService:
             safety_state.drone_radius_along_user_direction
             + safety_state.user_radius_along_drone_direction
         )
-        observed_error_margin_m = self._observed_xy_localization_error_m(safety_state)
-        uncertainty_scale_m = geometric_uncertainty_m + (0.75 * observed_error_margin_m)
+        quality_margin_m = (
+            float(safety_state.drone_packet.range_residual_rms_m)
+            + float(safety_state.user_packet.range_residual_rms_m)
+        )
+        uncertainty_scale_m = geometric_uncertainty_m + quality_margin_m
         result = self.assessor.assess(
             envelope_gap_m=safety_state.envelope_gap_m,
             uncertainty_scale_m=uncertainty_scale_m,

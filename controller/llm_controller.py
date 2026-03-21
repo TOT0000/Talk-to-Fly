@@ -150,15 +150,107 @@ class LLMController():
             source = "user"
             self.position_update_callback(x, y, z, source)
     
+    def _get_planner_position_context(self):
+        drone_pos = (0.00, 0.00, 0.00)
+        user_pos = (0.00, 0.00, 0.00)
+        drone_source = "fallback_zero"
+        user_source = "fallback_zero"
+
+        try:
+            provider = getattr(self, "state_provider", None)
+            drone = getattr(self, "drone", None)
+
+            if provider is not None:
+                get_est_drone = getattr(provider, "get_estimated_drone_position", None)
+                if callable(get_est_drone):
+                    value = get_est_drone()
+                    if value is not None:
+                        drone_pos = tuple(float(v) for v in value)
+                        drone_source = "provider_estimated"
+
+                get_est_user = getattr(provider, "get_estimated_user_position", None)
+                if callable(get_est_user):
+                    value = get_est_user()
+                    if value is not None:
+                        user_pos = tuple(float(v) for v in value)
+                        user_source = "provider_estimated"
+
+                if drone_source == "fallback_zero":
+                    packet = None
+                    get_packet = getattr(provider, "get_latest_received_drone_packet", None)
+                    if callable(get_packet):
+                        packet = get_packet()
+                    if packet is not None:
+                        drone_pos = tuple(float(v) for v in packet.estimated_position_3d)
+                        drone_source = "received_packet_estimated"
+
+                if user_source == "fallback_zero":
+                    packet = None
+                    get_packet = getattr(provider, "get_latest_received_user_packet", None)
+                    if callable(get_packet):
+                        packet = get_packet()
+                    if packet is not None:
+                        user_pos = tuple(float(v) for v in packet.estimated_position_3d)
+                        user_source = "received_packet_estimated"
+
+                if drone_source == "fallback_zero":
+                    get_gt_drone = getattr(provider, "get_drone_position", None)
+                    if callable(get_gt_drone):
+                        value = get_gt_drone()
+                        if value is not None:
+                            drone_pos = tuple(float(v) for v in value)
+                            drone_source = "provider_position_fallback"
+
+                if user_source == "fallback_zero":
+                    get_user = getattr(provider, "get_user_position", None)
+                    if callable(get_user):
+                        value = get_user()
+                        if value is not None:
+                            user_pos = tuple(float(v) for v in value)
+                            user_source = "provider_position_fallback"
+
+            if drone_source == "fallback_zero" and drone is not None:
+                get_drone_position = getattr(drone, "get_drone_position", None)
+                if callable(get_drone_position):
+                    value = get_drone_position()
+                    if value is not None:
+                        drone_pos = tuple(float(v) for v in value)
+                        drone_source = "drone_position_fallback"
+        except Exception:
+            pass
+
+        return {
+            "drone_pos": drone_pos,
+            "user_pos": user_pos,
+            "drone_source": drone_source,
+            "user_source": user_source,
+        }
+
+    def _format_planner_location_info(self) -> str:
+        context = self._get_planner_position_context()
+        drone_pos = context["drone_pos"]
+        user_pos = context["user_pos"]
+        print_debug(
+            "[P-LOCATION-CONTEXT] "
+            f"drone_source={context['drone_source']} user_source={context['user_source']} "
+            f"drone_est={drone_pos} user_est={user_pos}"
+        )
+        return (
+            f"Drone estimated position: x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}\n"
+            f"User estimated position: x={user_pos[0]:.2f}, y={user_pos[1]:.2f}, z={user_pos[2]:.2f}"
+        )
+
     def skill_get_drone_position(self) -> Tuple[str, bool]:
-        x, y, z = self.drone.get_drone_position()
-        position_str = f"Drone position is x={x:.2f}, y={y:.2f}, z={z:.2f}"
+        context = self._get_planner_position_context()
+        x, y, z = context["drone_pos"]
+        position_str = f"Drone estimated position is x={x:.2f}, y={y:.2f}, z={z:.2f}"
        #self.append_message(f"[LOG] {position_str}")
         return position_str, False
         
     def skill_get_user_position(self) -> Tuple[str, bool]:
-        x, y, z = self.state_provider.get_user_position()
-        position_str = f"User position is x={x:.2f}, y={y:.2f}, z={z:.2f}"
+        context = self._get_planner_position_context()
+        x, y, z = context["user_pos"]
+        position_str = f"User estimated position is x={x:.2f}, y={y:.2f}, z={z:.2f}"
        #self.append_message(f"[LOG] {position_str}")
         return position_str, False
         
@@ -333,13 +425,7 @@ class LLMController():
         self.append_message('[TASK]: ' + task_description)
         ret_val = None
         while True:
-            user_pos = self.state_provider.get_user_position() if hasattr(self, "state_provider") else (0.00, 0.00, 0.00)
-            drone_pos = self.drone.get_drone_position() if hasattr(self, "drone") else (0.00, 0.00, 0.00)
-            
-            location_info = (
-                f"Drone position: x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}\n"
-                f"User position: x={user_pos[0]:.2f}, y={user_pos[1]:.2f}, z={user_pos[2]:.2f}"
-            )
+            location_info = self._format_planner_location_info()
 
             scene_description = self.vision.get_obj_list() if self.enable_video else ''
             if hasattr(self.state_provider, "debug_log_latest_localization_snapshot"):

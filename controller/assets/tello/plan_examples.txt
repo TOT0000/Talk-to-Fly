@@ -1,105 +1,83 @@
 Example 1:
-Scene: []
-Task: [Q] Where are you now?
-Reason: Use probe to query current drone position.
-Response: _1=p('What is the current drone position?');l(_1);
+Scene: [SafetyContext: safety_level=SAFE, planning_bias=efficiency, preferred_standoff_m=1.2, envelope_gap_m=3.4, uncertainty_scale_m=0.7, envelopes_overlap=False]
+Task: [A] Move closer to the user.
+Rationale: safety_level is SAFE, so a direct approach is allowed, but the final offset should still respect the preferred standoff instead of collapsing onto the user.
+Response: _1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[0]-_2[0];?_3>0{mr(_3)}?_3<0{ml(-_3)};_4=_1[1]-1.2;_5=_4-_2[1];?_5>0{mf(_5)}?_5<0{mb(-_5)};
 
 Example 2:
-Scene: []
-Task: [Q] Where am I?
-Reason: Use probe to query current user position.
-Response: _1=p('What is the current user position?');l(_1);
+Scene: [SafetyContext: safety_level=CAUTION, planning_bias=balanced, preferred_standoff_m=1.8, envelope_gap_m=1.5, uncertainty_scale_m=1.2, envelopes_overlap=False]
+Task: [A] Move closer to the user.
+Rationale: safety_level is CAUTION, so approach should be gradual and buffered; align first, then close only part of the gap while preserving margin.
+Response: _1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[0]-_2[0];?_3>0{mr(_3)}?_3<0{ml(-_3)};_4=_1[1]-1.8;_5=_4-_2[1];?_5>0{mf(_5/2)}?_5<0{mb(-_5/2)};
 
 Example 3:
-Scene: []
-Task: [A] Move up by 3 meters and tell me your position.
-Reason: Ascend 3 meters then probe the new drone position.
-Response: mu(3);_1=p('What is the current drone position?');l(_1);
-
-
-Example 3b:
-Scene: []
-Task: [A] Take off.
-Reason: Use the dedicated takeoff skill instead of approximating with move_up.
-Response: takeoff;
-
-Example 3c:
-Scene: []
-Task: [A] Land now.
-Reason: Use the dedicated land skill directly.
-Response: land;
+Scene: [SafetyContext: safety_level=WARNING, planning_bias=safety, preferred_standoff_m=2.6, envelope_gap_m=0.5, uncertainty_scale_m=1.9, envelopes_overlap=False]
+Task: [A] Move closer to the user.
+Rationale: safety_level is WARNING, so avoid direct closing; first maintain a safer lateral offset and do not aggressively reduce separation.
+Response: _1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[0]+1.0;_4=_3-_2[0];?_4>0{mr(_4)}?_4<0{ml(-_4)};_5=_1[1]-2.6;_6=_5-_2[1];?_6>0{mf(_6)}?_6<0{mb(-_6)};
 
 Example 4:
-Scene: []
-Task: [Q] Are you above me?
-Reason: Probe latest positions and compare their heights.
-Response: _1=p('What is the current drone position?');_2=p('What is the current user position?');_3=_1[2];_4=_2[2];?_3>_4{l('True');->True}?_3<_4{l('False');->False};
+Scene: [SafetyContext: safety_level=DANGER, planning_bias=safety, preferred_standoff_m=3.2, envelope_gap_m=-0.4, uncertainty_scale_m=2.3, envelopes_overlap=True]
+Task: [A] Move closer to the user immediately.
+Rationale: safety_level is DANGER and envelopes overlap, so direct approach is forbidden; first increase separation to recover a safer standoff.
+Response: _1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[1]-3.2;_4=_3-_2[1];?_4>0{mf(_4)}?_4<0{mb(-_4)};
 
 Example 5:
-Scene: []
-Task: [A] Go to the same height as the user.
-Reason: Probe user height, probe drone height, then move up/down accordingly.
-Response: _1=p('What is the current user position?');_2=_1[2];_3=p('What is the current drone position?');_4=_3[2];_5=_4-_2;?_5>0{md(_5)}?_5<0{mu(-_5)};
+Scene: [SafetyContext: safety_level=SAFE, planning_bias=efficiency, preferred_standoff_m=1.5, envelope_gap_m=2.8, uncertainty_scale_m=0.8, envelopes_overlap=False]
+Task: [A] Follow the user.
+Rationale: safety_level is SAFE, so following can be direct, but the plan should stabilize near the preferred standoff instead of moving onto the user.
+Response: _1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[0]-_2[0];?_3>0{mr(_3)}?_3<0{ml(-_3)};_4=_1[1]-1.5;_5=_4-_2[1];?_5>0{mf(_5)}?_5<0{mb(-_5)};
 
 Example 6:
-Scene: []
-Task: [A] Move in a square with 1 meter sides.
-Reason: Simulate patrol movement in a square path.
-Response: 4{mf(1);tc(90)};
+Scene: [SafetyContext: safety_level=CAUTION, planning_bias=balanced, preferred_standoff_m=2.0, envelope_gap_m=1.2, uncertainty_scale_m=1.3, envelopes_overlap=False]
+Task: [A] Hover near the user.
+Rationale: safety_level is CAUTION, so use a staged approach and keep a buffered hover offset instead of closing fully in one move.
+Response: _1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[0]-_2[0];?_3>0{mr(_3/2)}?_3<0{ml(-_3/2)};_4=_1[1]-2.0;_5=_4-_2[1];?_5>0{mf(_5/2)}?_5<0{mb(-_5/2)};d(0.5);
 
 Example 7:
-Scene: []
-Task: [Q] Have you moved?
-Reason: Probe position twice before and after delay, compare.
-Response: _1=p('What is the current drone position?');d(0.5);_2=p('What is the current drone position?');_3=_1[0];_4=_2[0];_5=_1[1];_6=_2[1];_7=_1[2];_8=_2[2];?_3!=_4|_5!=_6|_7!=_8{l('True');->True}?_3=_4&_5=_6&_7=_8{l('False');->False};
+Scene: [SafetyContext: safety_level=WARNING, planning_bias=safety, preferred_standoff_m=2.8, envelope_gap_m=0.6, uncertainty_scale_m=1.8, envelopes_overlap=False]
+Task: [A] Move to the user's right side and stay there.
+Rationale: safety_level is WARNING, so use conservative repositioning and keep a larger right-side offset rather than cutting directly inward.
+Response: _1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[0]+2.8;_4=_3-_2[0];?_4>0{mr(_4)}?_4<0{ml(-_4)};_5=_1[1]-2.8;_6=_5-_2[1];?_6>0{mf(_6)}?_6<0{mb(-_6)};
 
 Example 8:
-Scene: []
-Task: [A] Ascend 1 meter, rotate 180 degrees, then go back 1 meter.
-Reason: Combine vertical movement, rotation, and backward movement.
-Response: mu(1);tc(180);mb(1);
+Scene: [SafetyContext: safety_level=SAFE, planning_bias=efficiency, preferred_standoff_m=1.0, envelope_gap_m=3.0, uncertainty_scale_m=0.7, envelopes_overlap=False]
+Task: [A] Look around the user and then move near them.
+Rationale: safety_level is SAFE, so a brief orientation scan can be followed by a direct efficient approach that still stops at the preferred standoff.
+Response: tcc(30);tc(60);tcc(30);_1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[0]-_2[0];?_3>0{mr(_3)}?_3<0{ml(-_3)};_4=_1[1]-1.0;_5=_4-_2[1];?_5>0{mf(_5)}?_5<0{mb(-_5)};
 
 Example 9:
-Scene: []
-Task: [A] Fly to the position where two meters above me.
-Reason: Probe user position, move drone horizontally to same x,y then ascend to user z + 2m.
-Response: _1=p('What is the current user position?');_2=_1[2];_3=_2+2;_4=p('What is the current drone position?');_5=_4[0];_6=_4[1];_7=_4[2];_8=_1[0]-_5;?_8>0{mr(_8)}?_8<0{ml(-_8)};_9=_1[1]-_6;?_9>0{mf(_9)}?_9<0{mb(-_9)};_10=_3-_7;?_10>0{mu(_10)}?_10<0{md(-_10)};
+Scene: [SafetyContext: safety_level=CAUTION, planning_bias=balanced, preferred_standoff_m=2.1, envelope_gap_m=1.1, uncertainty_scale_m=1.4, envelopes_overlap=False]
+Task: [A] Move to a position 1 meter left of the user and hover near them.
+Rationale: safety_level is CAUTION, so preserve buffer while aligning to the requested relative side position; use the preferred standoff as the near-user distance target.
+Response: _1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[0]-1.0;_4=_3-_2[0];?_4>0{mr(_4/2)}?_4<0{ml(-_4/2)};_5=_1[1]-2.1;_6=_5-_2[1];?_6>0{mf(_6/2)}?_6<0{mb(-_6/2)};
 
 Example 10:
-Scene: []
-Task: [A] move horizontally to be 1 meter right and 1 meter forward relative to user.
-Reason: Probe user and drone positions, calculate offset and move accordingly.
-Response: _1=p('What is the current user position?');_2=p('What is the current drone position?');_3=_1[0]+1;_4=_1[1]+1;_5=_3-_2[0];?_5>0{mr(_5)}?_5<0{ml(-_5)};_6=_4-_2[1];?_6>0{mf(_6)}?_6<0{mb(-_6)};
+Scene: [SafetyContext: safety_level=WARNING, planning_bias=safety, preferred_standoff_m=3.0, envelope_gap_m=0.3, uncertainty_scale_m=2.0, envelopes_overlap=False]
+Task: [A] Keep a safe standoff from the user.
+Rationale: safety_level is WARNING, so the plan should explicitly maintain or restore a larger offset instead of drifting closer.
+Response: _1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[1]-3.0;_4=_3-_2[1];?_4>0{mf(_4)}?_4<0{mb(-_4)};
 
 Example 11:
-Scene: []
-Task: [A] Maintain same horizontal position as user but hover 3 meters above.
-Reason: Probe user and drone, move horizontally first, then adjust altitude.
-Response: _1=p('What is the current user position?');_2=p('What is the current drone position?');_3=_1[0]-_2[0];?_3>0{mr(_3)}?_3<0{ml(-_3)};_4=_1[1]-_2[1];?_4>0{mf(_4)}?_4<0{mb(-_4)};_5=_1[2]+3;_6=_5-_2[2];?_6>0{mu(_6)}?_6<0{md(-_6)};
-
+Scene: [SafetyContext: safety_level=DANGER, planning_bias=safety, preferred_standoff_m=3.5, envelope_gap_m=0.1, uncertainty_scale_m=2.4, envelopes_overlap=False]
+Task: [A] Follow the user.
+Rationale: safety_level is DANGER, so do not start a close follow; first retreat to a safer trailing distance and only stabilize there.
+Response: _1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[1]-3.5;_4=_3-_2[1];?_4>0{mf(_4)}?_4<0{mb(-_4)};d(0.5);
 
 Example 12:
-Scene: []
-Task: [A] Move to the left of the user by 2 meters and stay at the same height.
-Reason: Probe positions, calculate horizontal offset and move only horizontally.
-Response: _1=p('What is the current user position?');_2=p('What is the current drone position?');_3=_1[0]-2;_4=_3-_2[0];?_4>0{mr(_4)}?_4<0{ml(-_4)};_5=_1[1]-_2[1];?_5>0{mf(_5)}?_5<0{mb(-_5)};
-
+Scene: [SafetyContext: safety_level=SAFE, planning_bias=efficiency, preferred_standoff_m=1.3, envelope_gap_m=2.6, uncertainty_scale_m=0.9, envelopes_overlap=False]
+Task: [A] Move to the front-right of the user at a relative offset.
+Rationale: safety_level is SAFE, so the user-relative alignment can be executed directly while preserving the requested near-user spacing.
+Response: _1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[0]+1.3;_4=_3-_2[0];?_4>0{mr(_4)}?_4<0{ml(-_4)};_5=_1[1]+1.3;_6=_5-_2[1];?_6>0{mf(_6)}?_6<0{mb(-_6)};
 
 Example 13:
-Scene: [SafetyContext: safety_level=SAFE, planning_bias=efficiency, preferred_standoff_m=1.0, envelope_gap_m=3.2, uncertainty_scale_m=0.8]
-Task: [A] Move closer to the user and keep about 1 meter away.
-Reason: Safety is clear and uncertainty is small, so a more efficient user-relative approach is allowed while still respecting the current preferred standoff. The 1.0m value here is illustrative; real plans should use the live preferred_standoff_m from the current safety context.
-Response: _1=p('What is the current user position?');_2=p('What is the current drone position?');_3=_1[0]-_2[0];?_3>0{mr(_3)}?_3<0{ml(-_3)};_4=_1[1]-1;_5=_4-_2[1];?_5>0{mf(_5)}?_5<0{mb(-_5)};
+Scene: [SafetyContext: safety_level=CAUTION, planning_bias=balanced, preferred_standoff_m=2.2, envelope_gap_m=1.0, uncertainty_scale_m=1.5, envelopes_overlap=False]
+Task: [A] Align with the user before approaching.
+Rationale: safety_level is CAUTION, so align first and approach second, both in smaller staged motions rather than a single aggressive move.
+Response: _1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[0]-_2[0];?_3>0{mr(_3/2)}?_3<0{ml(-_3/2)};_4=_1[1]-2.2;_5=_4-_2[1];?_5>0{mf(_5/2)}?_5<0{mb(-_5/2)};
 
 Example 14:
-Scene: [SafetyContext: safety_level=WARNING, planning_bias=safety, preferred_standoff_m=2.5, envelope_gap_m=0.4, uncertainty_scale_m=1.8]
-Task: [A] Move closer to the user.
-Reason: Gap is tight, so plan conservatively and keep a larger user-relative standoff instead of aggressively approaching. The 2.5m value here is illustrative; real plans should use the live preferred_standoff_m from the current safety context.
-Response: _1=p('What is the current user position?');_2=p('What is the current drone position?');_3=_1[0]-_2[0];?_3>0{mr(_3)}?_3<0{ml(-_3)};_4=_1[1]-2.5;_5=_4-_2[1];?_5>0{mf(_5)}?_5<0{mb(-_5)};
-
-Example 15:
-Scene: [SafetyContext: safety_level=DANGER, planning_bias=safety, preferred_standoff_m=3.0, envelope_gap_m=-0.3, uncertainty_scale_m=2.1, envelopes_overlap=True]
-Task: [A] Move closer to the user immediately.
-Reason: Envelopes overlap, so do not directly close distance; first re-establish positive gap by moving to a safer standoff. The 3.0m value here is illustrative; real plans should use the live preferred_standoff_m from the current safety context.
-Response: _1=p('What is the current user position?');_2=p('What is the current drone position?');_3=_1[1]-3;_4=_3-_2[1];?_4>0{mf(_4)}?_4<0{mb(-_4)};
-
+Scene: [SafetyContext: safety_level=DANGER, planning_bias=safety, preferred_standoff_m=3.0, envelope_gap_m=-0.2, uncertainty_scale_m=2.5, envelopes_overlap=True]
+Task: [A] Move to my left side.
+Rationale: safety_level is DANGER and overlap is present, so do not execute a direct side-switch near the user; first increase separation, then stop at a safer offset.
+Response: _1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[1]-3.0;_4=_3-_2[1];?_4>0{mf(_4)}?_4<0{mb(-_4)};

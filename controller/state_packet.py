@@ -14,6 +14,9 @@ class LocalizedStatePacket:
     gt_position_3d: np.ndarray
     estimated_position_3d: np.ndarray
     localization_error_vector_3d: np.ndarray
+    range_residuals: np.ndarray
+    range_residual_rms_m: float
+    normalized_range_residual_rms: float
     gt_user_position_3d: np.ndarray
     est_user_position_3d: Optional[np.ndarray]
     anchor_positions_3d: np.ndarray
@@ -43,6 +46,9 @@ class LocalizedStatePacket:
             gt_position_3d=self.gt_position_3d.copy(),
             estimated_position_3d=self.estimated_position_3d.copy(),
             localization_error_vector_3d=self.localization_error_vector_3d.copy(),
+            range_residuals=self.range_residuals.copy(),
+            range_residual_rms_m=float(self.range_residual_rms_m),
+            normalized_range_residual_rms=float(self.normalized_range_residual_rms),
             gt_user_position_3d=self.gt_user_position_3d.copy(),
             est_user_position_3d=None if self.est_user_position_3d is None else self.est_user_position_3d.copy(),
             anchor_positions_3d=self.anchor_positions_3d.copy(),
