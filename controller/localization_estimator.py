@@ -11,6 +11,9 @@ class LocalizationEstimate:
     est_position_3d: np.ndarray
     jacobian_h_3d: np.ndarray
     estimated_ranges: np.ndarray
+    range_residuals: np.ndarray
+    range_residual_rms_m: float
+    normalized_range_residual_rms: float
     P_3d: np.ndarray
     b_3d: np.ndarray
     M_3d: np.ndarray
@@ -70,6 +73,10 @@ class IterativeLeastSquaresEstimator3D:
 
         predicted_ranges = self._compute_predicted_ranges(p_hat, anchors)
         H = self._compute_jacobian(p_hat, anchors, predicted_ranges)
+        residual = measured_ranges - predicted_ranges
+        residual_rms_m = float(np.sqrt(np.mean(np.square(residual)))) if residual.size > 0 else 0.0
+        normalized_residual = residual / np.maximum(sigma_values, 1e-9)
+        normalized_residual_rms = float(np.sqrt(np.mean(np.square(normalized_residual)))) if normalized_residual.size > 0 else 0.0
 
         variances = np.maximum(np.square(sigma_values), 1e-9)
         R_inv = np.diag(1.0 / variances)
@@ -98,6 +105,9 @@ class IterativeLeastSquaresEstimator3D:
             est_position_3d=p_hat,
             jacobian_h_3d=H,
             estimated_ranges=predicted_ranges,
+            range_residuals=residual,
+            range_residual_rms_m=residual_rms_m,
+            normalized_range_residual_rms=normalized_residual_rms,
             P_3d=P_3d,
             b_3d=b_3d,
             M_3d=M_3d,
