@@ -1,4 +1,5 @@
 from PIL import Image
+import math
 import queue, time, os, json, sys, subprocess
 from typing import Optional, Tuple
 import asyncio
@@ -95,6 +96,7 @@ class LLMController():
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_right", self.drone.move_right, "Move right by a distance", args=[SkillArg("distance", float)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_up", self.drone.move_up, "Move up by a distance", args=[SkillArg("distance", float)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_down", self.drone.move_down, "Move down by a distance", args=[SkillArg("distance", float)]))
+        self.low_level_skillset.add_skill(LowLevelSkillItem("goto_estimated_xy", self.skill_goto_estimated_xy, "Move to an estimated world-frame XY target. Use this for coordinate-based movement from estimated positions instead of converting world x/y deltas directly into body-frame move_forward/move_backward/move_left/move_right.", args=[SkillArg("target_x", float), SkillArg("target_y", float)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("takeoff", self.skill_takeoff, "Take off and climb to a safe hover height"))
         self.low_level_skillset.add_skill(LowLevelSkillItem("land", self.skill_land, "Land safely at current location"))
         self.low_level_skillset.add_skill(LowLevelSkillItem("turn_cw", self.drone.turn_cw, "Rotate clockwise/right by certain degrees", args=[SkillArg("degrees", int)]))
@@ -330,6 +332,46 @@ class LLMController():
 
     def skill_delay(self, s: float) -> Tuple[None, bool]:
         time.sleep(s)
+        return None, False
+
+    def skill_goto_estimated_xy(self, target_x: float, target_y: float) -> Tuple[None, bool]:
+        context = self._get_planner_position_context()
+        drone_x, drone_y, _ = context["drone_pos"]
+        dx_world = float(target_x) - float(drone_x)
+        dy_world = float(target_y) - float(drone_y)
+
+        get_yaw = getattr(self.drone, "get_drone_yaw", None)
+        yaw = float(get_yaw()) if callable(get_yaw) else 0.0
+
+        forward_m = (dx_world * math.cos(yaw)) + (dy_world * math.sin(yaw))
+        right_m = (-dx_world * math.sin(yaw)) + (dy_world * math.cos(yaw))
+
+        print_debug(
+            "[P-WORLD-MOVE] "
+            f"target_xy=({float(target_x):.3f}, {float(target_y):.3f}) "
+            f"drone_est_xy=({drone_x:.3f}, {drone_y:.3f}) "
+            f"delta_world=({dx_world:.3f}, {dy_world:.3f}) "
+            f"yaw={yaw:.3f} body_forward={forward_m:.3f} body_right={right_m:.3f}"
+        )
+
+        move_by_body_offset = getattr(self.drone, "_move_by_body_offset", None)
+        if callable(move_by_body_offset):
+            return move_by_body_offset(
+                "goto_estimated_xy",
+                math.hypot(dx_world, dy_world),
+                forward_m=forward_m,
+                right_m=right_m,
+            )
+
+        if right_m > 1e-6:
+            self.drone.move_right(right_m)
+        elif right_m < -1e-6:
+            self.drone.move_left(-right_m)
+
+        if forward_m > 1e-6:
+            self.drone.move_forward(forward_m)
+        elif forward_m < -1e-6:
+            self.drone.move_backward(-forward_m)
         return None, False
 
     def append_message(self, message: str):
