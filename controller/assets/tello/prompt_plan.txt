@@ -40,6 +40,13 @@ You MUST adapt the plan style by safety level:
 - WARNING: avoid directly shrinking the gap; prefer lateral repositioning, observation, alignment, or holding a safer offset instead of aggressive approach.
 - DANGER: prioritize increasing separation, recovering from overlap/tight geometry, or stabilizing at a safer standoff; do not directly approach the user.
 
+Movement semantics are critical:
+- In PX4_SIM, `mf`, `mb`, `mr`, and `ml` are body-frame movement skills, not world-frame x/y movement skills.
+- Therefore, you must NOT compute world-coordinate deltas from estimated positions and pass those deltas directly into `mf`, `mb`, `mr`, or `ml`.
+- When the task is based on estimated world x/y coordinates or user-relative estimated coordinates, use the dedicated world-aware XY movement skill instead of hand-converting world deltas into body-frame commands.
+- Use `goto_estimated_xy(target_x, target_y)` for coordinate-based movement in the estimated XY plane.
+- Reserve `mf`, `mb`, `mr`, and `ml` for true body-relative motion commands such as "move forward 1 meter" or "move right 0.5 meters".
+
 When the task is user-relative, the plan should reflect safety in its structure:
 - SAFE may approach more directly.
 - CAUTION should approach gradually or in staged motions.
