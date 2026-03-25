@@ -29,7 +29,6 @@ class SafetyContext:
             f"safety_score: {self.safety_score:.3f}\n"
             f"safety_level: {self.safety_level}\n"
             f"planning_bias: {self.planning_bias}\n"
-            f"preferred_standoff_m: {self.preferred_standoff_m:.2f}\n"
             f"reason_tags: {self.reason_tags}\n"
             f"drone_to_user_distance_xy: {self.drone_to_user_distance_xy:.2f}\n"
             f"envelope_gap_m: {self.envelope_gap_m:.2f}\n"
