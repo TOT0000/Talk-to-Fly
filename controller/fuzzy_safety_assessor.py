@@ -74,9 +74,9 @@ class FuzzySafetyAssessor:
     @staticmethod
     def freshness_memberships(freshness_aoi_s: float) -> Dict[str, float]:
         return {
-            "FRESH": trapezoid(freshness_aoi_s, -1.0, 0.0, 0.12, 0.30),
-            "MODERATE": triangle(freshness_aoi_s, 0.15, 0.55, 1.05),
-            "STALE": trapezoid(freshness_aoi_s, 0.75, 1.20, 6.0, 8.0),
+            "FRESH": trapezoid(freshness_aoi_s, -1.0, 0.0, 0.06, 0.16),
+            "MODERATE": triangle(freshness_aoi_s, 0.10, 0.30, 0.65),
+            "STALE": trapezoid(freshness_aoi_s, 0.45, 0.85, 6.0, 8.0),
         }
 
     @staticmethod
