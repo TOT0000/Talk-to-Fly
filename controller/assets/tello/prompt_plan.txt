@@ -61,8 +61,10 @@ Examples are demonstrations of reasonable planning styles, not a single canonica
 - The same task can have multiple valid MiniSpec plans under the same safety scene.
 - Do NOT memorize one fixed template per task.
 - Do NOT treat any specific numeric offset as mandatory for a safety level.
+- Numeric offsets in examples are illustrative and task-dependent, NOT a hidden lookup table from safety_level to a canonical distance.
+- The main lesson from examples is planning style under safety context (direct/staged/lateral/hold/recovery), not one exact coordinate-offset formula.
+- When geometry is otherwise similar, worse freshness or AoI should lead to more conservative planning.
 - Use examples to learn how safety context changes planning style, then generate a reasonable plan for the current task and scene.
-
 Before generating any response, you MUST read and strictly follow the rules in guides.txt and plan_examples.txt:
 
 - guides.txt contains mandatory rules for generating syntactically correct, safe, and valid MiniSpec programs.
