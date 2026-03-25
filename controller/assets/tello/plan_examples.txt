@@ -1,107 +1,131 @@
 Example 1:
-Scene: [SafetyContext: safety_score=0.90, safety_level=SAFE, planning_bias=efficiency, envelope_gap_m=3.3, uncertainty_scale_m=0.7, envelopes_overlap=False, timing_freshness_s=0.08, max_aoi_s=0.30, reason_tags=['wide_clearance']]
+Scene: [SafetyContext: safety_score=0.92, safety_level=SAFE, planning_bias=efficiency, envelope_gap_m=3.5, uncertainty_scale_m=0.6, envelopes_overlap=False, timing_freshness_s=0.07, max_aoi_s=0.30, reason_tags=['gap_clear','uncertainty_medium','aoi_fresh']]
 Task: [A] Move closer to the user.
-Rationale: safety_level is SAFE with large positive gap and low uncertainty, so a direct coordinate-based approach is reasonable.
-Response: _1=p('What is the current estimated user position?');_2=_1[0];_3=_1[1]-1.1;goto_estimated_xy(_2,_3);
+Rationale: SAFE with clear geometry supports direct and efficient closing toward a reasonable near-user point.
+Response: _1=p('What is the current estimated user position?');_2=_1[0]-0.1;_3=_1[1]-0.9;goto_estimated_xy(_2,_3);
 
 Example 2:
-Scene: [SafetyContext: safety_score=0.61, safety_level=CAUTION, planning_bias=balanced, envelope_gap_m=1.4, uncertainty_scale_m=1.3, envelopes_overlap=False, timing_freshness_s=0.14, max_aoi_s=0.30, reason_tags=['moderate_uncertainty']]
+Scene: [SafetyContext: safety_score=0.64, safety_level=CAUTION, planning_bias=balanced, envelope_gap_m=1.5, uncertainty_scale_m=1.2, envelopes_overlap=False, timing_freshness_s=0.11, max_aoi_s=0.30, reason_tags=['gap_clear','uncertainty_large','aoi_fresh']]
 Task: [A] Move closer to the user.
-Rationale: under CAUTION, staged closing is safer than a single aggressive move, so midpoint planning is a reasonable tradeoff.
-Response: _1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[0]-_2[0];_4=_2[0]+_3/2;_5=_1[1]-1.7;_6=_5-_2[1];_7=_2[1]+_6/2;goto_estimated_xy(_4,_7);
+Rationale: in CAUTION, midpoint staging is a reasonable way to progress without one aggressive close.
+Response: _1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[0]-_2[0];_4=_2[0]+_3/2;_5=_1[1]-1.4;_6=_5-_2[1];_7=_2[1]+_6/2;goto_estimated_xy(_4,_7);
 
 Example 3:
-Scene: [SafetyContext: safety_score=0.61, safety_level=CAUTION, planning_bias=balanced, envelope_gap_m=1.4, uncertainty_scale_m=1.3, envelopes_overlap=False, timing_freshness_s=0.14, max_aoi_s=0.30, reason_tags=['moderate_uncertainty']]
+Scene: [SafetyContext: safety_score=0.64, safety_level=CAUTION, planning_bias=balanced, envelope_gap_m=1.5, uncertainty_scale_m=1.2, envelopes_overlap=False, timing_freshness_s=0.11, max_aoi_s=0.30, reason_tags=['gap_clear','uncertainty_large','aoi_fresh']]
 Task: [A] Move closer to the user.
-Rationale: this is another valid response for the same scene/task; buffered lateral-then-approach can also reduce risk while still progressing.
-Response: _1=p('What is the current estimated user position?');_2=_1[0]+0.8;_3=_1[1]-1.8;goto_estimated_xy(_2,_3);
+Rationale: this is another valid response for the same scene/task; buffered lateral-then-approach is also reasonable under CAUTION.
+Response: _1=p('What is the current estimated user position?');_2=_1[0]+1.0;_3=_1[1]-1.6;goto_estimated_xy(_2,_3);
 
 Example 4:
-Scene: [SafetyContext: safety_score=0.44, safety_level=WARNING, planning_bias=safety, envelope_gap_m=0.6, uncertainty_scale_m=1.9, envelopes_overlap=False, timing_freshness_s=0.18, max_aoi_s=0.30, reason_tags=['tight_gap']]
+Scene: [SafetyContext: safety_score=0.43, safety_level=WARNING, planning_bias=safety, envelope_gap_m=0.7, uncertainty_scale_m=1.8, envelopes_overlap=False, timing_freshness_s=0.15, max_aoi_s=0.30, reason_tags=['gap_tight','uncertainty_large','aoi_fresh']]
 Task: [A] Move closer to the user.
-Rationale: WARNING with tight gap should avoid aggressive direct closing; a conservative side-and-trailing reposition is more appropriate.
-Response: _1=p('What is the current estimated user position?');_2=_1[0]+1.4;_3=_1[1]-2.3;goto_estimated_xy(_2,_3);
+Rationale: WARNING should avoid aggressive direct closing; conservative lateral buffering is more appropriate.
+Response: _1=p('What is the current estimated user position?');_2=_1[0]-1.7;_3=_1[1]-1.9;goto_estimated_xy(_2,_3);d(0.3);
 
 Example 5:
-Scene: [SafetyContext: safety_score=0.23, safety_level=DANGER, planning_bias=safety, envelope_gap_m=-0.3, uncertainty_scale_m=2.4, envelopes_overlap=True, timing_freshness_s=0.23, max_aoi_s=0.30, reason_tags=['overlap_detected']]
+Scene: [SafetyContext: safety_score=0.26, safety_level=DANGER, planning_bias=safety, envelope_gap_m=-0.2, uncertainty_scale_m=2.4, envelopes_overlap=True, timing_freshness_s=0.20, max_aoi_s=0.30, reason_tags=['envelope_overlap','gap_overlap_or_negative','uncertainty_large','aoi_fresh']]
 Task: [A] Move closer to the user immediately.
-Rationale: the task urgency conflicts with safety context; overlap under DANGER requires separation recovery first.
-Response: _1=p('What is the current estimated user position?');_2=_1[0];_3=_1[1]-3.0;goto_estimated_xy(_2,_3);d(0.4);
+Rationale: urgency conflicts with DANGER overlap; recovery must come first before any near-user intent.
+Response: _1=p('What is the current estimated user position?');_2=_1[0]-1.5;_3=_1[1]-2.6;goto_estimated_xy(_2,_3);
 
 Example 6:
-Scene: [SafetyContext: safety_score=0.85, safety_level=SAFE, planning_bias=efficiency, envelope_gap_m=2.7, uncertainty_scale_m=0.8, envelopes_overlap=False, timing_freshness_s=0.09, max_aoi_s=0.30, reason_tags=['stable_tracking']]
+Scene: [SafetyContext: safety_score=0.88, safety_level=SAFE, planning_bias=efficiency, envelope_gap_m=2.8, uncertainty_scale_m=0.8, envelopes_overlap=False, timing_freshness_s=0.09, max_aoi_s=0.30, reason_tags=['gap_clear','uncertainty_medium','aoi_fresh']]
 Task: [A] Hover near the user.
-Rationale: SAFE context allows direct near-user hover positioning with an efficient move and short hold.
-Response: _1=p('What is the current estimated user position?');_2=_1[0]-0.2;_3=_1[1]-1.3;goto_estimated_xy(_2,_3);d(0.5);
+Rationale: SAFE context allows direct hover reposition with a short stabilization hold.
+Response: _1=p('What is the current estimated user position?');_2=_1[0]+0.3;_3=_1[1]-1.0;goto_estimated_xy(_2,_3);d(0.4);
 
 Example 7:
-Scene: [SafetyContext: safety_score=0.58, safety_level=CAUTION, planning_bias=balanced, envelope_gap_m=1.1, uncertainty_scale_m=1.5, envelopes_overlap=False, timing_freshness_s=0.16, max_aoi_s=0.30, reason_tags=['buffer_recommended']]
+Scene: [SafetyContext: safety_score=0.56, safety_level=CAUTION, planning_bias=balanced, envelope_gap_m=1.1, uncertainty_scale_m=1.5, envelopes_overlap=False, timing_freshness_s=0.14, max_aoi_s=0.30, reason_tags=['gap_tight','uncertainty_large','aoi_fresh']]
 Task: [A] Hover near the user.
-Rationale: CAUTION should avoid snapping to a close point; buffered hover with a conservative offset is more reasonable.
-Response: _1=p('What is the current estimated user position?');_2=_1[0]+0.6;_3=_1[1]-1.9;goto_estimated_xy(_2,_3);d(0.8);
+Rationale: CAUTION favors buffered hover behavior instead of snapping to a tight near-user point.
+Response: _1=p('What is the current estimated user position?');_2=_1[0]-0.8;_3=_1[1]-2.2;goto_estimated_xy(_2,_3);d(0.8);
 
 Example 8:
-Scene: [SafetyContext: safety_score=0.40, safety_level=WARNING, planning_bias=safety, envelope_gap_m=0.4, uncertainty_scale_m=2.0, envelopes_overlap=False, timing_freshness_s=0.20, max_aoi_s=0.30, reason_tags=['high_uncertainty']]
+Scene: [SafetyContext: safety_score=0.47, safety_level=WARNING, planning_bias=safety, envelope_gap_m=0.5, uncertainty_scale_m=1.9, envelopes_overlap=False, timing_freshness_s=0.18, max_aoi_s=0.30, reason_tags=['gap_tight','uncertainty_large','aoi_fresh']]
 Task: [A] Move to the user's left side.
-Rationale: WARNING implies conservative repositioning; keep a buffered side target and avoid direct gap shrinking.
-Response: _1=p('What is the current estimated user position?');_2=_1[0]-2.1;_3=_1[1]-2.2;goto_estimated_xy(_2,_3);
+Rationale: WARNING scene suggests conservative side positioning with buffered offset rather than direct near-side entry.
+Response: _1=p('What is the current estimated user position?');_2=_1[0]-2.4;_3=_1[1]-1.5;goto_estimated_xy(_2,_3);
 
 Example 9:
-Scene: [SafetyContext: safety_score=0.20, safety_level=DANGER, planning_bias=safety, envelope_gap_m=-0.2, uncertainty_scale_m=2.5, envelopes_overlap=True, timing_freshness_s=0.24, max_aoi_s=0.30, reason_tags=['overlap_and_uncertain']]
+Scene: [SafetyContext: safety_score=0.30, safety_level=DANGER, planning_bias=safety, envelope_gap_m=-0.1, uncertainty_scale_m=2.3, envelopes_overlap=True, timing_freshness_s=0.19, max_aoi_s=0.30, reason_tags=['envelope_overlap','gap_overlap_or_negative','uncertainty_large','aoi_fresh']]
 Task: [A] Move to the user's right side.
-Rationale: with overlap in DANGER, side-switching near the user is unsafe; first increase separation instead.
-Response: _1=p('What is the current estimated user position?');_2=_1[0];_3=_1[1]-3.2;goto_estimated_xy(_2,_3);
+Rationale: with overlap risk, do not execute side-switch near the user first; recover with hold-then-safer reposition.
+Response: d(0.5);_1=p('What is the current estimated user position?');_2=_1[0]+2.1;_3=_1[1]-2.0;goto_estimated_xy(_2,_3);
 
 Example 10:
-Scene: [SafetyContext: safety_score=0.88, safety_level=SAFE, planning_bias=efficiency, envelope_gap_m=3.0, uncertainty_scale_m=0.7, envelopes_overlap=False, timing_freshness_s=0.07, max_aoi_s=0.30, reason_tags=['clear_geometry']]
+Scene: [SafetyContext: safety_score=0.86, safety_level=SAFE, planning_bias=efficiency, envelope_gap_m=2.9, uncertainty_scale_m=0.7, envelopes_overlap=False, timing_freshness_s=0.08, max_aoi_s=0.30, reason_tags=['gap_clear','uncertainty_medium','aoi_fresh']]
 Task: [A] Move to the user's front-right.
-Rationale: SAFE with clear geometry supports direct coordinate targeting for efficient repositioning.
-Response: _1=p('What is the current estimated user position?');_2=_1[0]+1.3;_3=_1[1]+1.0;goto_estimated_xy(_2,_3);
+Rationale: this SAFE scene supports direct estimated-coordinate reposition to satisfy the requested relative side.
+Response: _1=p('What is the current estimated user position?');_2=_1[0]+1.6;_3=_1[1]+0.7;goto_estimated_xy(_2,_3);
 
 Example 11:
-Scene: [SafetyContext: safety_score=0.55, safety_level=CAUTION, planning_bias=balanced, envelope_gap_m=1.0, uncertainty_scale_m=1.6, envelopes_overlap=False, timing_freshness_s=0.17, max_aoi_s=0.30, reason_tags=['staged_alignment']]
+Scene: [SafetyContext: safety_score=0.58, safety_level=CAUTION, planning_bias=balanced, envelope_gap_m=1.0, uncertainty_scale_m=1.6, envelopes_overlap=False, timing_freshness_s=0.12, max_aoi_s=0.30, reason_tags=['gap_tight','uncertainty_large','aoi_fresh']]
 Task: [A] Align with the user before approaching.
-Rationale: in CAUTION, aligning through midpoint progression is reasonable before any tighter near-user move.
-Response: _1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[0]-_2[0];_4=_2[0]+_3/2;_5=_1[1]-2.0;_6=_5-_2[1];_7=_2[1]+_6/2;goto_estimated_xy(_4,_7);
+Rationale: alignment-before-approach under CAUTION can be done through midpoint staging to limit abrupt motion.
+Response: _1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[0]-_2[0];_4=_2[0]+_3/2;_5=_1[1]-1.8;_6=_5-_2[1];_7=_2[1]+_6/2;goto_estimated_xy(_4,_7);
 
 Example 12:
-Scene: [SafetyContext: safety_score=0.55, safety_level=CAUTION, planning_bias=balanced, envelope_gap_m=1.0, uncertainty_scale_m=1.6, envelopes_overlap=False, timing_freshness_s=0.17, max_aoi_s=0.30, reason_tags=['staged_alignment']]
+Scene: [SafetyContext: safety_score=0.58, safety_level=CAUTION, planning_bias=balanced, envelope_gap_m=1.0, uncertainty_scale_m=1.6, envelopes_overlap=False, timing_freshness_s=0.12, max_aoi_s=0.30, reason_tags=['gap_tight','uncertainty_large','aoi_fresh']]
 Task: [A] Align with the user before approaching.
-Rationale: this is an alternative valid response for the same scene/task; lateral pre-alignment can also reduce risk before closing.
-Response: _1=p('What is the current estimated user position?');_2=_1[0]-1.1;_3=_1[1]-2.1;goto_estimated_xy(_2,_3);d(0.4);
+Rationale: another valid response for the same scene/task is lateral pre-alignment with a short hold before final approach.
+Response: _1=p('What is the current estimated user position?');_2=_1[0]-1.3;_3=_1[1]-2.1;goto_estimated_xy(_2,_3);d(0.4);
 
 Example 13:
-Scene: [SafetyContext: safety_score=0.37, safety_level=WARNING, planning_bias=safety, envelope_gap_m=0.3, uncertainty_scale_m=2.1, envelopes_overlap=False, timing_freshness_s=0.22, max_aoi_s=0.30, reason_tags=['freshness_degrading']]
+Scene: [SafetyContext: safety_score=0.51, safety_level=CAUTION, planning_bias=balanced, envelope_gap_m=1.0, uncertainty_scale_m=1.4, envelopes_overlap=False, timing_freshness_s=0.10, max_aoi_s=0.30, reason_tags=['gap_tight','uncertainty_large','aoi_fresh']]
 Task: [A] Reposition near the user.
-Rationale: WARNING with tight margin and degrading freshness should favor conservative repositioning and brief hold for stability.
-Response: _1=p('What is the current estimated user position?');_2=_1[0]+1.8;_3=_1[1]-2.5;goto_estimated_xy(_2,_3);d(0.5);
+Rationale: with similar geometry but better freshness, a staged approach is still reasonable and can make progress.
+Response: _1=p('What is the current estimated user position?');_2=p('What is the current estimated drone position?');_3=_1[0]-_2[0];_4=_2[0]+_3/2;_5=_1[1]-1.7;_6=_5-_2[1];_7=_2[1]+_6/2;goto_estimated_xy(_4,_7);
 
 Example 14:
-Scene: [SafetyContext: safety_score=0.33, safety_level=WARNING, planning_bias=safety, envelope_gap_m=0.2, uncertainty_scale_m=2.2, envelopes_overlap=False, timing_freshness_s=0.28, max_aoi_s=0.30, reason_tags=['stale_updates']]
-Task: [A] Keep a safe offset from the user.
-Rationale: uncertainty and freshness risk are high, so a conservative offset with hold is a reasonable strategy.
-Response: _1=p('What is the current estimated user position?');_2=_1[0]+0.5;_3=_1[1]-2.8;goto_estimated_xy(_2,_3);d(0.7);
+Scene: [SafetyContext: safety_score=0.51, safety_level=CAUTION, planning_bias=balanced, envelope_gap_m=1.0, uncertainty_scale_m=1.4, envelopes_overlap=False, timing_freshness_s=0.27, max_aoi_s=0.30, reason_tags=['gap_tight','uncertainty_large','aoi_moderate']]
+Task: [A] Reposition near the user.
+Rationale: geometry is similar to the previous scene, but worse freshness/AoI justifies a more conservative hold-then-buffered reposition.
+Response: d(0.6);_1=p('What is the current estimated user position?');_2=_1[0]+1.5;_3=_1[1]-2.3;goto_estimated_xy(_2,_3);
 
 Example 15:
-Scene: [SafetyContext: safety_score=0.29, safety_level=DANGER, planning_bias=safety, envelope_gap_m=-0.1, uncertainty_scale_m=2.3, envelopes_overlap=True, timing_freshness_s=0.21, max_aoi_s=0.30, reason_tags=['immediate_recovery']]
-Task: [A] Move near the user but do not get too close.
-Rationale: under DANGER overlap, the first valid step is separation recovery; near-user intent must be deferred.
-Response: _1=p('What is the current estimated user position?');_2=_1[0]-0.8;_3=_1[1]-3.1;goto_estimated_xy(_2,_3);
+Scene: [SafetyContext: safety_score=0.49, safety_level=WARNING, planning_bias=safety, envelope_gap_m=0.9, uncertainty_scale_m=1.6, envelopes_overlap=False, timing_freshness_s=0.11, max_aoi_s=0.30, reason_tags=['gap_tight','uncertainty_large','aoi_fresh']]
+Task: [A] Move to a nearby observation point around the user.
+Rationale: WARNING should still avoid aggressive closing, but with decent freshness a buffered observation point is feasible.
+Response: _1=p('What is the current estimated user position?');_2=_1[0]+1.9;_3=_1[1]-1.2;goto_estimated_xy(_2,_3);d(0.5);
 
 Example 16:
-Scene: [SafetyContext: safety_score=0.87, safety_level=SAFE, planning_bias=efficiency, envelope_gap_m=2.9, uncertainty_scale_m=0.8, envelopes_overlap=False, timing_freshness_s=0.09, max_aoi_s=0.30, reason_tags=['clear_view']]
-Task: [A] Look around the user and then move near them.
-Rationale: SAFE context allows a quick scan followed by direct near-user repositioning.
-Response: tcc(30);tc(60);tcc(30);_1=p('What is the current estimated user position?');_2=_1[0]+0.2;_3=_1[1]-1.2;goto_estimated_xy(_2,_3);
+Scene: [SafetyContext: safety_score=0.49, safety_level=WARNING, planning_bias=safety, envelope_gap_m=0.9, uncertainty_scale_m=1.6, envelopes_overlap=False, timing_freshness_s=0.95, max_aoi_s=0.30, reason_tags=['gap_tight','uncertainty_large','aoi_stale']]
+Task: [A] Move to a nearby observation point around the user.
+Rationale: with similar geometry but stale freshness, a more conservative observation style is reasonable.
+Response: d(0.5);_1=p('What is the current estimated user position?');_2=_1[0]-2.6;_3=_1[1]-1.8;goto_estimated_xy(_2,_3);
 
 Example 17:
-Scene: [SafetyContext: safety_score=0.59, safety_level=CAUTION, planning_bias=balanced, envelope_gap_m=1.2, uncertainty_scale_m=1.4, envelopes_overlap=False, timing_freshness_s=0.15, max_aoi_s=0.30, reason_tags=['buffered_scan']]
-Task: [A] Look around the user and then move near them.
-Rationale: same task under CAUTION should remain more buffered after the scan, with slower closing style.
-Response: tcc(20);tc(40);tcc(20);_1=p('What is the current estimated user position?');_2=_1[0]+0.8;_3=_1[1]-1.9;goto_estimated_xy(_2,_3);d(0.5);
+Scene: [SafetyContext: safety_score=0.34, safety_level=WARNING, planning_bias=safety, envelope_gap_m=0.8, uncertainty_scale_m=2.1, envelopes_overlap=False, timing_freshness_s=0.16, max_aoi_s=0.30, reason_tags=['gap_tight','uncertainty_large','aoi_fresh']]
+Task: [A] Move near the user but do not get too close.
+Rationale: task intent is near-user, but WARNING context requires conservative buffered placement rather than direct close.
+Response: _1=p('What is the current estimated user position?');_2=_1[0]-1.9;_3=_1[1]-2.4;goto_estimated_xy(_2,_3);
 
 Example 18:
-Scene: [SafetyContext: safety_score=0.54, safety_level=CAUTION, planning_bias=balanced, envelope_gap_m=0.9, uncertainty_scale_m=1.7, envelopes_overlap=False, timing_freshness_s=0.18, max_aoi_s=0.30, reason_tags=['multi_option_conservative']]
-Task: [A] Reposition near the user.
-Rationale: another valid response in the same scene/task can first hold to stabilize interpretation, then reposition conservatively.
-Response: d(0.4);_1=p('What is the current estimated user position?');_2=_1[0]-1.4;_3=_1[1]-2.0;goto_estimated_xy(_2,_3);
+Scene: [SafetyContext: safety_score=0.27, safety_level=DANGER, planning_bias=safety, envelope_gap_m=-0.3, uncertainty_scale_m=2.5, envelopes_overlap=True, timing_freshness_s=0.22, max_aoi_s=0.30, reason_tags=['envelope_overlap','gap_overlap_or_negative','uncertainty_large','aoi_fresh']]
+Task: [A] Keep a safe offset from the user.
+Rationale: one valid DANGER recovery is trailing-biased reposition that first reopens separation.
+Response: _1=p('What is the current estimated user position?');_2=_1[0]-0.2;_3=_1[1]-3.1;goto_estimated_xy(_2,_3);
+
+Example 19:
+Scene: [SafetyContext: safety_score=0.27, safety_level=DANGER, planning_bias=safety, envelope_gap_m=-0.3, uncertainty_scale_m=2.5, envelopes_overlap=True, timing_freshness_s=0.22, max_aoi_s=0.30, reason_tags=['envelope_overlap','gap_overlap_or_negative','uncertainty_large','aoi_fresh']]
+Task: [A] Keep a safe offset from the user.
+Rationale: another valid DANGER recovery for the same scene/task is lateral-trailing relocation plus hold, not only pure trailing geometry.
+Response: _1=p('What is the current estimated user position?');_2=_1[0]+2.4;_3=_1[1]-2.2;goto_estimated_xy(_2,_3);d(0.6);
+
+Example 20:
+Scene: [SafetyContext: safety_score=0.31, safety_level=DANGER, planning_bias=safety, envelope_gap_m=0.0, uncertainty_scale_m=2.2, envelopes_overlap=False, timing_freshness_s=0.28, max_aoi_s=0.30, reason_tags=['gap_overlap_or_negative','uncertainty_large','aoi_moderate']]
+Task: [A] Inspect beside the user without getting too close.
+Rationale: near-overlap risk in DANGER calls for conservative side observation and no direct tightening motion.
+Response: d(0.4);_1=p('What is the current estimated user position?');_2=_1[0]-2.2;_3=_1[1]-1.6;goto_estimated_xy(_2,_3);
+
+Example 21:
+Scene: [SafetyContext: safety_score=0.84, safety_level=SAFE, planning_bias=efficiency, envelope_gap_m=2.6, uncertainty_scale_m=0.9, envelopes_overlap=False, timing_freshness_s=0.10, max_aoi_s=0.30, reason_tags=['gap_clear','uncertainty_medium','aoi_fresh']]
+Task: [A] Look around the user and then move near them.
+Rationale: SAFE context allows quick scan plus direct near-user reposition.
+Response: tcc(30);tc(60);tcc(30);_1=p('What is the current estimated user position?');_2=_1[0]+0.4;_3=_1[1]-1.1;goto_estimated_xy(_2,_3);
+
+Example 22:
+Scene: [SafetyContext: safety_score=0.57, safety_level=CAUTION, planning_bias=balanced, envelope_gap_m=1.2, uncertainty_scale_m=1.5, envelopes_overlap=False, timing_freshness_s=0.17, max_aoi_s=0.30, reason_tags=['gap_tight','uncertainty_large','aoi_fresh']]
+Task: [A] Look around the user and then move near them.
+Rationale: same task under CAUTION should keep a more buffered post-scan reposition with slower progression.
+Response: tcc(20);tc(40);tcc(20);_1=p('What is the current estimated user position?');_2=_1[0]-1.2;_3=_1[1]-2.0;goto_estimated_xy(_2,_3);d(0.5);
