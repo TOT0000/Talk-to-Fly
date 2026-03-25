@@ -93,7 +93,7 @@ class LLMPlanner():
         safety_context_block = (
             safety_context.to_prompt_block()
             if safety_context is not None
-            else "safety_score: 0.500\nsafety_level: CAUTION\nplanning_bias: balanced\npreferred_standoff_m: 1.50\nreason_tags: ['safety_context_unavailable']\ndrone_to_user_distance_xy: 0.00\nenvelope_gap_m: 0.00\nuncertainty_scale_m: 1.00\nenvelopes_overlap: False\nlatest_generation_timestamp: unknown\nlatest_receive_timestamp: unknown\ntiming_freshness_s: unknown"
+            else "safety_score: 0.500\nsafety_level: CAUTION\nplanning_bias: balanced\nreason_tags: ['safety_context_unavailable']\ndrone_to_user_distance_xy: 0.00\nenvelope_gap_m: 0.00\nuncertainty_scale_m: 1.00\nenvelopes_overlap: False\nlatest_generation_timestamp: unknown\nlatest_receive_timestamp: unknown\ntiming_freshness_s: unknown\nmax_aoi_s: unknown"
         )
 
         prompt = self.prompt_plan.format(
