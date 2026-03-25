@@ -54,6 +54,22 @@ class SafetyAssessmentFisTests(unittest.TestCase):
         freshness_stale = assessor.assess(envelope_gap_m=1.4, uncertainty_scale_m=0.7, envelopes_overlap=False, freshness_aoi_s=1.8)
         self.assertGreater(freshness_fresh.safety_score, freshness_stale.safety_score)
 
+
+    def test_large_positive_gap_does_not_fall_back_to_overlap_tag(self):
+        assessor = FuzzySafetyAssessor()
+
+        result = assessor.assess(
+            envelope_gap_m=9.876,
+            uncertainty_scale_m=2.564,
+            envelopes_overlap=False,
+            freshness_aoi_s=0.07,
+        )
+
+        self.assertNotAlmostEqual(result.safety_score, 0.5, places=6)
+        self.assertIn("gap_clear", result.reason_tags)
+        self.assertNotIn("gap_overlap_or_negative", result.reason_tags)
+        self.assertNotIn("envelope_overlap", result.reason_tags)
+
     def test_grid_spans_multiple_levels(self):
         assessor = FuzzySafetyAssessor()
         levels = set()

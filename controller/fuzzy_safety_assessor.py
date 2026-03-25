@@ -60,7 +60,7 @@ class FuzzySafetyAssessor:
         return {
             "OVERLAP_OR_NEGATIVE": trapezoid(envelope_gap_m, -5.0, -0.10, 0.10, 0.60),
             "TIGHT": triangle(envelope_gap_m, 0.15, 0.80, 1.60),
-            "CLEAR": trapezoid(envelope_gap_m, 1.10, 1.80, 6.0, 9.0),
+            "CLEAR": trapezoid(envelope_gap_m, 1.10, 1.80, 12.0, 20.0),
         }
 
     @staticmethod
