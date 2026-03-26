@@ -131,10 +131,10 @@ class ScenarioManager:
         target_rank = LEVEL_RANK.get(scenario.name, 2)
 
         base_gap = {
-            "SAFE": 3.2,
+            "SAFE": 2.8,
             "CAUTION": 1.2,
-            "WARNING": 0.45,
-            "DANGER": -0.20,
+            "WARNING": 0.25,
+            "DANGER": -0.45,
         }.get(scenario.name, 1.2)
 
         gap_adjust = 0.0
@@ -164,9 +164,9 @@ class ScenarioManager:
             if measured_rank == target_rank:
                 break
             if measured_rank < target_rank:
-                gap_adjust += 0.7  # too risky -> increase separation
+                gap_adjust += 0.35  # too risky -> increase separation
             else:
-                gap_adjust -= 0.5  # too safe -> decrease separation
+                gap_adjust -= 0.30  # too safe -> decrease separation
         return iterations
 
     @staticmethod
