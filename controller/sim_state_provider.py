@@ -273,6 +273,23 @@ class SimStateProvider(StateProvider):
         with self._lock:
             return self._user_position
 
+    def set_user_position(self, x: float, y: float, z: float, source: str = "manual"):
+        timestamp_now = time.time()
+        with self._lock:
+            self._user_position = (float(x), float(y), float(z))
+            self._last_user_position_ts = timestamp_now
+        self._generate_and_queue_entity_state_packet(
+            "user",
+            np.asarray((float(x), float(y), float(z)), dtype=float),
+            timestamp_now,
+        )
+        self.flush_due_packets(now=timestamp_now)
+        if self._callback:
+            self._callback((timestamp_now, float(x), float(y), float(z)))
+        print_debug(
+            f"[SIM-USER-POS] source={source} position=({float(x):.2f}, {float(y):.2f}, {float(z):.2f})"
+        )
+
     def get_user_yaw(self) -> float:
         """Fallback user yaw for simulation.
 
