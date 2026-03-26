@@ -38,13 +38,13 @@ class FuzzyAssessmentResult:
 
 class FuzzySafetyAssessor:
     GAP_RULES: Dict[Tuple[str, str], float] = {
-        ("OVERLAP_OR_NEGATIVE", "LARGE"): 0.02,
+        ("OVERLAP_OR_NEGATIVE", "LARGE"): 0.08,
         ("OVERLAP_OR_NEGATIVE", "MEDIUM"): 0.06,
         ("OVERLAP_OR_NEGATIVE", "SMALL"): 0.14,
-        ("TIGHT", "LARGE"): 0.12,
+        ("TIGHT", "LARGE"): 0.38,
         ("TIGHT", "MEDIUM"): 0.30,
         ("TIGHT", "SMALL"): 0.52,
-        ("CLEAR", "LARGE"): 0.34,
+        ("CLEAR", "LARGE"): 0.82,
         ("CLEAR", "MEDIUM"): 0.66,
         ("CLEAR", "SMALL"): 0.94,
     }
