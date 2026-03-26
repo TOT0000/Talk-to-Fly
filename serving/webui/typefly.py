@@ -80,6 +80,25 @@ class TypeFly:
                 min-width: 88px !important;
                 padding: 5px 8px !important;
             }
+            .chart-grid {
+                width: 100%;
+                overflow: visible !important;
+            }
+            .chart-row {
+                gap: 10px !important;
+                align-items: stretch !important;
+            }
+            .chart-col {
+                min-width: 0 !important;
+            }
+            .chart-card {
+                overflow: visible !important;
+            }
+            .chart-card .gr-image,
+            .chart-card .gr-image-container,
+            .chart-card .gradio-image {
+                overflow: visible !important;
+            }
             """
         self.ui = gr.Blocks(title="TypeFly")
         self.asyncio_loop = asyncio.get_event_loop()
@@ -105,6 +124,7 @@ class TypeFly:
             "drone": {"main": "#0B57D0", "light": "#8AB4F8"},
             "user": {"main": "#C5221F", "light": "#F28B82"},
         }
+        self.chart_height = 320
 
         # 浮動提示 internal state
         self._temp_message = ""
@@ -193,39 +213,53 @@ class TypeFly:
                 outputs=[self.message_markdown]
             )
 
-            # plots
-            with gr.Row(equal_height=True):
-                with gr.Column(scale=2):
-                    self.xy_plot = gr.Image(
-                        value=self.create_blank_plot("Drone / User Localization & Safety Envelope (XY view)", "X (m)", "Y (m)", xlim=(0, 12), ylim=(0, 12)),
-                        label="XY Plot",
-                        height=340,
-                    )
-                    self.x_plot = gr.Image(
-                        value=self.create_sequence_plot("X in Sequence", "Index", "X (m)", xlim=(0, 1), ylim=(0, 12)),
-                        label="X in Sequence",
-                        height=340,
-                    )
-                with gr.Column(scale=2):
-                    self.z_plot = gr.Image(
-                        value=self.create_sequence_plot("Z in Sequence", "Index", "Z (m)", xlim=(0, 1), ylim=(0, 6)),
-                        label="Z in Sequence",
-                        height=340,
-                    )
-                    self.y_plot = gr.Image(
-                        value=self.create_sequence_plot("Y in Sequence", "Index", "Y (m)", xlim=(0, 1), ylim=(0, 12)),
-                        label="Y in Sequence",
-                        height=340,
-                    )
-            with gr.Row():
-                self.aoi_plot = gr.Image(
-                    value=self.create_sequence_plot("AoI Trend", "Sample", "AoI (s)", xlim=(0, 1), ylim=(0, 1)),
-                    label="AoI Trend"
-                )
-                self.delay_plot = gr.Image(
-                    value=self.create_sequence_plot("Delay Trend", "Sample", "Delay (s)", xlim=(0, 1), ylim=(0, 1)),
-                    label="Delay Trend"
-                )
+            # plots: fixed 2-column x 3-row grid
+            with gr.Column(elem_classes="chart-grid"):
+                with gr.Row(equal_height=True, elem_classes="chart-row"):
+                    with gr.Column(scale=1, elem_classes="chart-col"):
+                        with gr.Group(elem_classes="chart-card"):
+                            self.xy_plot = gr.Image(
+                                value=self.create_blank_plot("Drone / User Localization & Safety Envelope (XY view)", "X (m)", "Y (m)", xlim=(0, 12), ylim=(0, 12)),
+                                label="XY Plot",
+                                height=self.chart_height,
+                            )
+                    with gr.Column(scale=1, elem_classes="chart-col"):
+                        with gr.Group(elem_classes="chart-card"):
+                            self.z_plot = gr.Image(
+                                value=self.create_sequence_plot("Z History", "Sample", "Z (m)", xlim=(0, 1), ylim=(0, 6)),
+                                label="Z History",
+                                height=self.chart_height,
+                            )
+                with gr.Row(equal_height=True, elem_classes="chart-row"):
+                    with gr.Column(scale=1, elem_classes="chart-col"):
+                        with gr.Group(elem_classes="chart-card"):
+                            self.x_plot = gr.Image(
+                                value=self.create_sequence_plot("X History", "Sample", "X (m)", xlim=(0, 1), ylim=(0, 12)),
+                                label="X History",
+                                height=self.chart_height,
+                            )
+                    with gr.Column(scale=1, elem_classes="chart-col"):
+                        with gr.Group(elem_classes="chart-card"):
+                            self.y_plot = gr.Image(
+                                value=self.create_sequence_plot("Y History", "Sample", "Y (m)", xlim=(0, 1), ylim=(0, 12)),
+                                label="Y History",
+                                height=self.chart_height,
+                            )
+                with gr.Row(equal_height=True, elem_classes="chart-row"):
+                    with gr.Column(scale=1, elem_classes="chart-col"):
+                        with gr.Group(elem_classes="chart-card"):
+                            self.aoi_plot = gr.Image(
+                                value=self.create_sequence_plot("AoI Trend", "Sample", "AoI (s)", xlim=(0, 1), ylim=(0, 1)),
+                                label="AoI Trend",
+                                height=self.chart_height,
+                            )
+                    with gr.Column(scale=1, elem_classes="chart-col"):
+                        with gr.Group(elem_classes="chart-card"):
+                            self.delay_plot = gr.Image(
+                                value=self.create_sequence_plot("Delay Trend", "Sample", "Delay (s)", xlim=(0, 1), ylim=(0, 1)),
+                                label="Delay Trend",
+                                height=self.chart_height,
+                            )
             with gr.Row():
                 self.coordinate_markdown = gr.Markdown(value="### Coordinates\nWaiting for live data...")
                 self.safety_markdown = gr.Markdown(value="### Safety / Risk\nWaiting for safety state...")
@@ -720,7 +754,18 @@ class TypeFly:
         if not xs or not ys:
             return (0.0, 5.0), (0.0, 5.0)
         pad = 0.5
-        return (min(xs) - pad, max(xs) + pad), (min(ys) - pad, max(ys) + pad)
+        xmin, xmax = min(xs) - pad, max(xs) + pad
+        ymin, ymax = min(ys) - pad, max(ys) + pad
+
+        # Keep XY data limits square so equal-aspect rendering does not compress
+        # the actual chart area inside a larger figure canvas.
+        x_span = max(xmax - xmin, 1e-6)
+        y_span = max(ymax - ymin, 1e-6)
+        target_span = max(x_span, y_span)
+        x_center = (xmin + xmax) * 0.5
+        y_center = (ymin + ymax) * 0.5
+        half = target_span * 0.5
+        return (x_center - half, x_center + half), (y_center - half, y_center + half)
 
     def _render_timing_plot(self, history_keys, title, ylabel):
         fig, ax = plt.subplots(figsize=(5, 4))
