@@ -142,6 +142,7 @@ class LLMController():
         self.task_run_logger = TaskRunLogger(excel_path=os.getenv("TYPEFLY_TASK_LOG_XLSX", "logs/task_runs.xlsx"))
         self._task_id_counter = 0
         self.latest_scenario_report = None
+        self.initial_scenario_state = None
 
         # PX4_SIM optional managed user-position publisher lifecycle
         self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
@@ -566,6 +567,21 @@ class LLMController():
     def apply_selected_scenario(self):
         report = self.scenario_manager.apply_to_runtime(self)
         self.latest_scenario_report = report
+        self.initial_scenario_state = {
+            "selected_mode": report.selected_mode,
+            "target_drone_gt": report.target_drone_position_3d,
+            "target_user_gt": report.target_user_position_3d,
+            "actual_drone_gt": report.actual_drone_gt_position_3d,
+            "actual_user_gt": report.actual_user_gt_position_3d,
+            "safety_score": report.measured_initial_safety_score,
+            "safety_level": report.measured_initial_safety_level,
+            "envelope_gap_m": report.measured_initial_envelope_gap_m,
+            "uncertainty_scale_m": report.measured_initial_uncertainty_scale_m,
+            "max_aoi_s": report.measured_initial_max_aoi_s,
+            "repositioned": report.repositioned,
+            "calibration_iterations": report.calibration_iterations,
+            "captured_at": time.time(),
+        }
         # Force one immediate safety refresh after scenario apply.
         try:
             now = time.time()
@@ -574,6 +590,9 @@ class LLMController():
         except Exception:
             pass
         return report
+
+    def get_initial_scenario_state(self):
+        return self.initial_scenario_state
 
     def get_scenario_projection(self):
         baseline_uncertainty = 0.85

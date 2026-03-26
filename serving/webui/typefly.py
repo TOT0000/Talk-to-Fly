@@ -104,6 +104,7 @@ class TypeFly:
                     label="Initial Scenario",
                 )
                 self.scenario_apply_btn = gr.Button("Apply Scenario")
+                self.scenario_audit_btn = gr.Button("Run 4-Mode Audit")
                 self.scenario_status = gr.Markdown(value=f"**Active Scenario:** {self.active_scenario}")
 
             with gr.Row():
@@ -186,6 +187,11 @@ class TypeFly:
             self.scenario_selector.change(
                 fn=self.preview_scenario,
                 inputs=[self.scenario_selector],
+                outputs=[self.scenario_status],
+            )
+            self.scenario_audit_btn.click(
+                fn=self.run_scenario_audit,
+                inputs=[],
                 outputs=[self.scenario_status],
             )
 
@@ -423,6 +429,22 @@ class TypeFly:
             f"- calibration_iterations: {None if report is None else report.calibration_iterations}"
         )
 
+    def run_scenario_audit(self):
+        lines = ["**Scenario Initial-State Audit**"]
+        for mode in ["SAFE", "CAUTION", "WARNING", "DANGER"]:
+            self.llm_controller.set_active_scenario(mode)
+            report = self.llm_controller.apply_selected_scenario()
+            lines.append(
+                f"- {mode}: actual_drone_gt={report.actual_drone_gt_position_3d}, "
+                f"actual_user_gt={report.actual_user_gt_position_3d}, "
+                f"score={report.measured_initial_safety_score}, "
+                f"level={report.measured_initial_safety_level}, "
+                f"gap={report.measured_initial_envelope_gap_m}, "
+                f"uncertainty={report.measured_initial_uncertainty_scale_m}"
+            )
+        self.active_scenario = self.llm_controller.get_active_scenario_name()
+        return "\n".join(lines)
+
     def process_message(self, message, history):
         print_t(f"[S] Receiving task description: {message}")
         if message == "exit":
@@ -611,13 +633,25 @@ class TypeFly:
         if not snapshot:
             return "### Coordinates\nWaiting for live data..."
         positions = self._extract_ui_positions(snapshot)
+        initial_state = self.llm_controller.get_initial_scenario_state()
         print_debug(
             "[UI-MARKDOWN] "
             f"drone_gt={positions['drone_gt']} drone_est={positions['drone_est']} "
             f"user_gt={positions['user_gt']} user_est={positions['user_est']}"
         )
+        initial_block = ""
+        if initial_state:
+            initial_block = (
+                f"**Initial scenario (locked before task)**\n"
+                f"- selected_mode: {initial_state.get('selected_mode')}\n"
+                f"- target drone GT: {initial_state.get('target_drone_gt')}\n"
+                f"- target user GT: {initial_state.get('target_user_gt')}\n"
+                f"- actual initial drone GT: {initial_state.get('actual_drone_gt')}\n"
+                f"- actual initial user GT: {initial_state.get('actual_user_gt')}\n\n"
+            )
         return (
             "### Coordinates\n"
+            f"{initial_block}"
             f"**Drone (Blue)**\n"
             f"- GT position: {self._fmt_vec(positions['drone_gt'])}\n"
             f"- EST position: {self._fmt_vec(positions['drone_est'])}\n\n"
@@ -631,8 +665,21 @@ class TypeFly:
         safety_state = snapshot.get("safety_state") if snapshot else None
         if safety_context is None:
             return "### Safety / Risk\nWaiting for safety state..."
+        initial_state = self.llm_controller.get_initial_scenario_state()
         lines = [
             "### Safety / Risk",
+        ]
+        if initial_state:
+            lines.extend([
+                "**Initial scenario (locked before task)**",
+                f"- selected_mode: {initial_state.get('selected_mode')}",
+                f"- initial safety_score: {initial_state.get('safety_score')}",
+                f"- initial safety_level: {initial_state.get('safety_level')}",
+                f"- initial envelope_gap_m: {initial_state.get('envelope_gap_m')}",
+                f"- initial uncertainty_scale_m: {initial_state.get('uncertainty_scale_m')}",
+            ])
+        lines.extend([
+            "**Current live state**",
             f"- safety_score: {safety_context.safety_score:.3f}",
             f"- safety_level: {safety_context.safety_level}",
             f"- planning_bias: {safety_context.planning_bias}",
@@ -641,7 +688,7 @@ class TypeFly:
             f"- uncertainty_scale_m: {safety_context.uncertainty_scale_m:.3f} m",
             f"- envelopes_overlap: {safety_context.envelopes_overlap}",
             f"- reason_tags: {safety_context.reason_tags}",
-        ]
+        ])
         if safety_state is not None:
             lines.extend([
                 f"- drone envelope (blue dashed): center=({safety_state.drone_envelope.center_xy[0]:.2f}, {safety_state.drone_envelope.center_xy[1]:.2f}), "
