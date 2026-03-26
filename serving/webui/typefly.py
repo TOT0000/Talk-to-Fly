@@ -52,24 +52,28 @@ class TypeFly:
                 animation: none !important;
             }
             .user-move-panel {
-                max-width: 340px;
+                max-width: 360px;
                 margin: 0 auto;
             }
             .user-move-step {
-                margin-bottom: 6px !important;
+                margin-bottom: 4px !important;
             }
             .scenario-panel {
-                max-width: 320px;
+                max-width: 360px;
+                margin: 0 auto;
+            }
+            .control-card {
+                padding: 8px !important;
             }
             .user-move-row {
                 justify-content: center;
-                gap: 8px;
+                gap: 6px;
                 margin: 1px 0 !important;
             }
             .user-move-btn button {
-                width: 96px !important;
-                min-width: 96px !important;
-                padding: 6px 8px !important;
+                width: 88px !important;
+                min-width: 88px !important;
+                padding: 5px 8px !important;
             }
             """
         self.ui = gr.Blocks(title="TypeFly")
@@ -118,34 +122,36 @@ class TypeFly:
 
             with gr.Row():
                 with gr.Column(scale=1, min_width=260, elem_classes="scenario-panel"):
-                    self.scenario_selector = gr.Dropdown(
-                        choices=list(SCENARIOS.keys()),
-                        value=self.active_scenario,
-                        label="Scenario Mode",
-                    )
-                    self.scenario_apply_btn = gr.Button("Apply Scenario")
+                    with gr.Group(elem_classes="control-card"):
+                        self.scenario_selector = gr.Dropdown(
+                            choices=list(SCENARIOS.keys()),
+                            value=self.active_scenario,
+                            label="Scenario Mode",
+                        )
+                        self.scenario_apply_btn = gr.Button("Apply Scenario")
+                        self.scenario_status = gr.Markdown(value="")
                 with gr.Column(scale=1, min_width=320, elem_classes="user-move-panel"):
-                    self.user_move_step = gr.Slider(
-                        minimum=0.1,
-                        maximum=1.0,
-                        value=0.5,
-                        step=0.1,
-                        label="User Move Step (m)",
-                        elem_classes="user-move-step",
-                    )
-                    with gr.Row(elem_classes="user-move-row"):
-                        gr.Markdown("")
-                        self.user_move_forward_btn = gr.Button("Forward", elem_classes="user-move-btn")
-                        gr.Markdown("")
-                    with gr.Row(elem_classes="user-move-row"):
-                        self.user_move_left_btn = gr.Button("Left", elem_classes="user-move-btn")
-                        gr.Markdown("")
-                        self.user_move_right_btn = gr.Button("Right", elem_classes="user-move-btn")
-                    with gr.Row(elem_classes="user-move-row"):
-                        gr.Markdown("")
-                        self.user_move_backward_btn = gr.Button("Backward", elem_classes="user-move-btn")
-                        gr.Markdown("")
-            self.scenario_status = gr.Markdown(value="")
+                    with gr.Group(elem_classes="control-card"):
+                        self.user_move_step = gr.Slider(
+                            minimum=0.1,
+                            maximum=1.0,
+                            value=0.5,
+                            step=0.1,
+                            label="User Move Step (m)",
+                            elem_classes="user-move-step",
+                        )
+                        with gr.Row(elem_classes="user-move-row"):
+                            gr.Markdown("")
+                            self.user_move_forward_btn = gr.Button("Forward", elem_classes="user-move-btn")
+                            gr.Markdown("")
+                        with gr.Row(elem_classes="user-move-row"):
+                            self.user_move_left_btn = gr.Button("Left", elem_classes="user-move-btn")
+                            gr.Markdown("")
+                            self.user_move_right_btn = gr.Button("Right", elem_classes="user-move-btn")
+                        with gr.Row(elem_classes="user-move-row"):
+                            gr.Markdown("")
+                            self.user_move_backward_btn = gr.Button("Backward", elem_classes="user-move-btn")
+                            gr.Markdown("")
 
             self.scenario_apply_btn.click(
                 fn=self.apply_scenario,
@@ -545,6 +551,7 @@ class TypeFly:
 
     def update_and_step(self, counter):
         snapshot = self.llm_controller.get_live_ui_snapshot()
+        self._validate_snapshot_consistency(snapshot)
         self._append_history(snapshot)
         xy, x, y, z = self.update_position_plot(snapshot)
         aoi_img, delay_img = self.update_timing_plots()
@@ -596,6 +603,35 @@ class TypeFly:
             value = snapshot.get(key)
             if value is not None:
                 self.timing_history[key].append(float(value))
+
+    def _validate_snapshot_consistency(self, snapshot):
+        if not snapshot:
+            return
+        safety_state = snapshot.get("safety_state")
+        safety_context = snapshot.get("safety_context")
+        if safety_state is None or safety_context is None:
+            return
+        gap_state = float(safety_state.envelope_gap_m)
+        gap_context = float(safety_context.envelope_gap_m)
+        overlap_state = bool(safety_state.envelopes_overlap)
+        overlap_context = bool(safety_context.envelopes_overlap)
+        overlap_from_gap = bool(gap_state < 0.0)
+        print_debug(
+            "[UI-SAFETY-CONSISTENCY] "
+            f"snapshot_ts={self._fmt_float(snapshot.get('snapshot_timestamp'))} "
+            f"state_id={snapshot.get('safety_state_id')} "
+            f"ctx_source_ts={self._fmt_float(snapshot.get('safety_context_source_ts'))} "
+            f"state_gen_ts={self._fmt_float(getattr(safety_state, 'latest_generation_timestamp', None))} "
+            f"gap_state={gap_state:.6f} gap_context={gap_context:.6f} "
+            f"overlap_state={overlap_state} overlap_context={overlap_context} overlap_from_gap={overlap_from_gap} "
+            f"drone_env(center={self._fmt_vec((safety_state.drone_envelope.center_xy[0], safety_state.drone_envelope.center_xy[1], 0.0))},"
+            f" axes=({safety_state.drone_envelope.major_axis_radius:.3f},{safety_state.drone_envelope.minor_axis_radius:.3f}),"
+            f" angle={safety_state.drone_envelope.orientation_deg:.2f}) "
+            f"user_env(center={self._fmt_vec((safety_state.user_envelope.center_xy[0], safety_state.user_envelope.center_xy[1], 0.0))},"
+            f" axes=({safety_state.user_envelope.major_axis_radius:.3f},{safety_state.user_envelope.minor_axis_radius:.3f}),"
+            f" angle={safety_state.user_envelope.orientation_deg:.2f}) "
+            f"reason_tags={safety_context.reason_tags} score={safety_context.safety_score:.3f} level={safety_context.safety_level}"
+        )
 
     def render_coordinate_markdown(self, snapshot):
         if not snapshot:
@@ -774,7 +810,9 @@ class TypeFly:
             )
 
         safety_state = snapshot.get("safety_state") if snapshot else None
+        safety_context = snapshot.get("safety_context") if snapshot else None
         if safety_state is not None:
+            fill_alpha = 0.18 if safety_state.envelopes_overlap else 0.10
             for label, envelope, color in (
                 ("Drone envelope", safety_state.drone_envelope, self.plot_style["drone"]["light"]),
                 ("User envelope", safety_state.user_envelope, self.plot_style["user"]["light"]),
@@ -785,15 +823,36 @@ class TypeFly:
                     height=2.0 * float(envelope.minor_axis_radius),
                     angle=float(envelope.orientation_deg),
                     edgecolor=color,
-                    facecolor="none",
+                    facecolor=color,
+                    alpha=fill_alpha,
                     linewidth=1.5,
                     linestyle="--",
                     label=label,
                 )
                 ax_xy.add_patch(ellipse)
+            ax_xy.plot(
+                [float(safety_state.drone_center_xy[0]), float(safety_state.user_center_xy[0])],
+                [float(safety_state.drone_center_xy[1]), float(safety_state.user_center_xy[1])],
+                linestyle=":",
+                linewidth=1.2,
+                color="#5f6368",
+                label="Envelope center line",
+            )
+            if safety_context is not None:
+                ax_xy.text(
+                    0.02,
+                    0.98,
+                    f"gap={safety_context.envelope_gap_m:.3f} m\noverlap={safety_context.envelopes_overlap}",
+                    transform=ax_xy.transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=8,
+                    bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.65, edgecolor="#B0B0B0"),
+                )
 
         ax_xy.set_xlim(*xlim)
         ax_xy.set_ylim(*ylim)
+        ax_xy.set_aspect("equal", adjustable="box")
         ax_xy.set_xlabel("X (m)")
         ax_xy.set_ylabel("Y (m)")
         ax_xy.set_title("Drone / User Localization & Safety Envelope (XY view)")

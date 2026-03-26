@@ -732,6 +732,9 @@ class LLMController():
             "user_delay_s": user_delay_s,
             "safety_state": safety_state,
             "safety_context": safety_context,
+            "snapshot_timestamp": now,
+            "safety_state_id": None if safety_state is None else id(safety_state),
+            "safety_context_source_ts": None if safety_state is None else float(safety_state.latest_generation_timestamp),
         }
         if safety_state is not None and safety_context is not None:
             consistency_from_gap = bool(float(safety_state.envelope_gap_m) < 0.0)
@@ -744,6 +747,10 @@ class LLMController():
                 f"user_center={tuple(float(v) for v in safety_state.user_center_xy)} "
                 f"drone_radius={safety_state.drone_radius_along_user_direction:.6f} "
                 f"user_radius={safety_state.user_radius_along_drone_direction:.6f} "
+                f"drone_axes=({safety_state.drone_envelope.major_axis_radius:.6f},{safety_state.drone_envelope.minor_axis_radius:.6f}) "
+                f"user_axes=({safety_state.user_envelope.major_axis_radius:.6f},{safety_state.user_envelope.minor_axis_radius:.6f}) "
+                f"drone_angle={safety_state.drone_envelope.orientation_deg:.3f} "
+                f"user_angle={safety_state.user_envelope.orientation_deg:.3f} "
                 f"score={safety_context.safety_score:.6f} "
                 f"level={safety_context.safety_level} "
                 f"reason_tags={safety_context.reason_tags}"
