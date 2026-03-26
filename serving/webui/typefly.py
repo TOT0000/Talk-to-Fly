@@ -52,16 +52,19 @@ class TypeFly:
                 animation: none !important;
             }
             .user-move-panel {
-                max-width: 360px;
+                max-width: 340px;
                 margin: 0 auto;
             }
             .user-move-step {
-                margin-bottom: 8px !important;
+                margin-bottom: 6px !important;
+            }
+            .scenario-panel {
+                max-width: 320px;
             }
             .user-move-row {
                 justify-content: center;
                 gap: 8px;
-                margin: 2px 0 !important;
+                margin: 1px 0 !important;
             }
             .user-move-btn button {
                 width: 96px !important;
@@ -114,22 +117,14 @@ class TypeFly:
             self.message_markdown = gr.Markdown(value="", visible=False)
 
             with gr.Row():
-                self.scenario_selector = gr.Dropdown(
-                    choices=list(SCENARIOS.keys()),
-                    value=self.active_scenario,
-                    label="Scenario Mode",
-                )
-                self.scenario_apply_btn = gr.Button("Apply Scenario")
-                self.scenario_status = gr.Markdown(value="")
-
-            self.scenario_apply_btn.click(
-                fn=self.apply_scenario,
-                inputs=[self.scenario_selector],
-                outputs=[self.scenario_status],
-            )
-
-            with gr.Row():
-                with gr.Column(scale=1, min_width=340, elem_classes="user-move-panel"):
+                with gr.Column(scale=1, min_width=260, elem_classes="scenario-panel"):
+                    self.scenario_selector = gr.Dropdown(
+                        choices=list(SCENARIOS.keys()),
+                        value=self.active_scenario,
+                        label="Scenario Mode",
+                    )
+                    self.scenario_apply_btn = gr.Button("Apply Scenario")
+                with gr.Column(scale=1, min_width=320, elem_classes="user-move-panel"):
                     self.user_move_step = gr.Slider(
                         minimum=0.1,
                         maximum=1.0,
@@ -150,6 +145,13 @@ class TypeFly:
                         gr.Markdown("")
                         self.user_move_backward_btn = gr.Button("Backward", elem_classes="user-move-btn")
                         gr.Markdown("")
+            self.scenario_status = gr.Markdown(value="")
+
+            self.scenario_apply_btn.click(
+                fn=self.apply_scenario,
+                inputs=[self.scenario_selector],
+                outputs=[self.scenario_status],
+            )
 
             self.user_move_forward_btn.click(
                 fn=self.move_user_forward,

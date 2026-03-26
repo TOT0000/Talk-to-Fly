@@ -672,7 +672,13 @@ class LLMController():
         if hasattr(provider, "flush_due_packets"):
             provider.flush_due_packets(now=now)
         safety_state = provider.get_latest_gcs_safety_state(now=now) if hasattr(provider, "get_latest_gcs_safety_state") else None
-        safety_context = provider.get_latest_safety_context(now=now) if hasattr(provider, "get_latest_safety_context") else self.latest_safety_context
+        safety_context = None
+        if safety_state is not None:
+            safety_context = self.safety_assessor.build_from_safety_state(safety_state, now=now)
+        elif hasattr(provider, "get_latest_safety_context"):
+            safety_context = provider.get_latest_safety_context(now=now)
+        else:
+            safety_context = self.latest_safety_context
 
         drone_gt = (
             _as_position_tuple(getattr(getattr(provider, "_cache", None), "position", None))
@@ -727,6 +733,21 @@ class LLMController():
             "safety_state": safety_state,
             "safety_context": safety_context,
         }
+        if safety_state is not None and safety_context is not None:
+            consistency_from_gap = bool(float(safety_state.envelope_gap_m) < 0.0)
+            print_debug(
+                "[UI-SAFETY-SNAPSHOT] "
+                f"gap={safety_context.envelope_gap_m:.6f} "
+                f"overlap={safety_context.envelopes_overlap} "
+                f"overlap_from_gap={consistency_from_gap} "
+                f"drone_center={tuple(float(v) for v in safety_state.drone_center_xy)} "
+                f"user_center={tuple(float(v) for v in safety_state.user_center_xy)} "
+                f"drone_radius={safety_state.drone_radius_along_user_direction:.6f} "
+                f"user_radius={safety_state.user_radius_along_drone_direction:.6f} "
+                f"score={safety_context.safety_score:.6f} "
+                f"level={safety_context.safety_level} "
+                f"reason_tags={safety_context.reason_tags}"
+            )
         print_debug(
             "[UI-SNAPSHOT] "
             f"drone_gt={snapshot['drone_gt']} drone_est={snapshot['drone_est']} "
