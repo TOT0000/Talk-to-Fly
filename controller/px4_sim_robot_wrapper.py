@@ -556,6 +556,37 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         cmd_land = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_NAV_LAND", 21)
         self._publish_vehicle_command(cmd_land)
 
+    def reposition_for_scenario(self, scenario) -> bool:
+        if not self._ensure_ros_publishers():
+            return False
+        if self._state_provider is not None and hasattr(self._state_provider, "wait_for_position"):
+            if not self._state_provider.wait_for_position(timeout_s=3.0):
+                return False
+
+        tx, ty, tz = [float(v) for v in scenario.drone_position_3d]
+        target_yaw = float(getattr(scenario, "drone_yaw_rad", 0.0))
+        (x, y, z), yaw = self._get_state()
+        if not self._ensure_offboard_control(x, y, z, yaw):
+            return False
+
+        # If scenario wants airborne state but current vehicle is on/near ground, lift first.
+        if tz < -0.2 and z > -0.3:
+            if not self.takeoff():
+                return False
+
+        self._begin_motion_debug("scenario_reposition", math.dist((x, y, z), (tx, ty, tz)))
+        ok, _ = self._move_to_local_target(tx, ty, tz, yaw=target_yaw, timeout_s=12.0, pos_tol=0.35)
+        if not ok:
+            print_debug(
+                f"[PX4-SCENARIO] reposition timeout target={self._format_position((tx, ty, tz))}"
+            )
+            return False
+        self._set_active_target(tx, ty, tz, target_yaw)
+        print_t(
+            f"[PX4-SCENARIO] repositioned to target={self._format_position((tx, ty, tz))} yaw={target_yaw:.2f}"
+        )
+        return True
+
     def stop_stream(self):
         super().stop_stream()
 

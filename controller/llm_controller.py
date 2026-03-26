@@ -23,6 +23,8 @@ from .abs.robot_wrapper import RobotType
 from .uwb_wrapper import UWBWrapper
 from .state_provider import StateProvider, UwbStateProvider
 from .sim_state_provider import SimStateProvider
+from .scenario_manager import ScenarioManager
+from .task_run_logger import TaskRunLogger
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -136,6 +138,9 @@ class LLMController():
         self.execution_history = None
         self.execution_time = time.time()
         self.latest_safety_context = None
+        self.scenario_manager = ScenarioManager(default_name=os.getenv("TYPEFLY_SCENARIO", "SAFE"))
+        self.task_run_logger = TaskRunLogger(excel_path=os.getenv("TYPEFLY_TASK_LOG_XLSX", "logs/task_runs.xlsx"))
+        self._task_id_counter = 0
 
         # PX4_SIM optional managed user-position publisher lifecycle
         self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
@@ -464,8 +469,28 @@ class LLMController():
         if self.controller_wait_takeoff:
             self.append_message("[Warning] Controller is waiting for takeoff...")
             return
+        self._task_id_counter += 1
+        task_id = f"task_{self._task_id_counter:05d}"
+        initial_snapshot = self.get_live_ui_snapshot()
+        self.task_run_logger.start_run(
+            task_id=task_id,
+            task_text=task_description,
+            scenario_name=self.get_active_scenario_name(),
+            initial_snapshot=initial_snapshot,
+        )
         self.append_message('[TASK]: ' + task_description)
         ret_val = None
+        monitor_stop = threading.Event()
+        monitor_thread = None
+        def _run_monitor():
+            while not monitor_stop.is_set():
+                try:
+                    self.task_run_logger.consume_runtime_snapshot(self.get_live_ui_snapshot())
+                except Exception:
+                    pass
+                monitor_stop.wait(0.2)
+        monitor_thread = threading.Thread(target=_run_monitor, daemon=True)
+        monitor_thread.start()
         while True:
             location_info = self._format_planner_location_info()
 
@@ -486,20 +511,67 @@ class LLMController():
                     safety_context=safety_context,
                 )
                 self.latest_safety_context = safety_context
+                self.task_run_logger.update_plan_info(self.current_plan, generation_success=True)
 
                 self.append_message(f'[Plan]: \\\\')
                 self.execution_time = time.time()
                 ret_val = self.execute_minispec(self.current_plan)
+                execution_success = True
+                task_completed = True
+                if isinstance(ret_val, tuple) and len(ret_val) >= 2:
+                    execution_success = bool(ret_val[0] is not False)
+                self.task_run_logger.update_execution_info(
+                    execution_success=execution_success,
+                    task_completed=task_completed,
+                )
             except Exception as e:
                 error_message = f"[C] Error: {e}"
                 print_t(error_message)
                 self.append_message(error_message)
+                self.task_run_logger.update_plan_info(self.current_plan or "", generation_success=bool(self.current_plan))
+                self.task_run_logger.update_execution_info(
+                    execution_success=False,
+                    failure_reason=str(e),
+                    task_completed=False,
+                )
+                self.task_run_logger.end_run(run_status="exception", failure_reason=str(e))
+                monitor_stop.set()
+                if monitor_thread is not None:
+                    monitor_thread.join(timeout=1.0)
+                self.append_message(f'\n[Task ended]')
+                self.append_message('end')
+                self.current_plan = None
+                self.execution_history = None
+                return
 
             break
+        self.task_run_logger.consume_runtime_snapshot(self.get_live_ui_snapshot())
+        self.task_run_logger.end_run(run_status="completed")
+        monitor_stop.set()
+        if monitor_thread is not None:
+            monitor_thread.join(timeout=1.0)
         self.append_message(f'\n[Task ended]')
         self.append_message('end')
         self.current_plan = None
         self.execution_history = None
+
+    def get_active_scenario_name(self) -> str:
+        return self.scenario_manager.selected_name()
+
+    def set_active_scenario(self, scenario_name: str):
+        scenario = self.scenario_manager.select(scenario_name)
+        return scenario.name
+
+    def apply_selected_scenario(self):
+        return self.scenario_manager.apply_to_runtime(self)
+
+    def get_scenario_projection(self):
+        baseline_uncertainty = 0.85
+        snapshot = self.get_live_ui_snapshot()
+        safety_context = snapshot.get("safety_context") if snapshot else None
+        if safety_context is not None:
+            baseline_uncertainty = float(safety_context.uncertainty_scale_m)
+        return self.scenario_manager.projected_assessment(baseline_uncertainty_scale_m=baseline_uncertainty)
 
     def _debug_log_safety_context(self, safety_context):
         if safety_context is None:
@@ -616,6 +688,7 @@ class LLMController():
         if self.robot_type != RobotType.PX4_SIM:
             self.drone.takeoff()
             self.drone.move_up(0.25)
+        self.apply_selected_scenario()
 
         if self.enable_video:
             print_t("[C] Starting stream...")
