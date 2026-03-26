@@ -52,18 +52,23 @@ class TypeFly:
                 animation: none !important;
             }
             .user-move-panel {
-                max-width: 360px;
-                margin: 0 auto;
+                max-width: 380px;
             }
             .user-move-step {
                 margin-bottom: 4px !important;
             }
             .scenario-panel {
-                max-width: 360px;
-                margin: 0 auto;
+                max-width: 380px;
             }
             .control-card {
                 padding: 8px !important;
+            }
+            .control-panels {
+                gap: 10px !important;
+                align-items: stretch !important;
+            }
+            .scenario-status p {
+                margin: 2px 0 0 0 !important;
             }
             .user-move-row {
                 justify-content: center;
@@ -120,7 +125,7 @@ class TypeFly:
             # 浮動提示（頂端）
             self.message_markdown = gr.Markdown(value="", visible=False)
 
-            with gr.Row():
+            with gr.Row(elem_classes="control-panels"):
                 with gr.Column(scale=1, min_width=260, elem_classes="scenario-panel"):
                     with gr.Group(elem_classes="control-card"):
                         self.scenario_selector = gr.Dropdown(
@@ -129,7 +134,7 @@ class TypeFly:
                             label="Scenario Mode",
                         )
                         self.scenario_apply_btn = gr.Button("Apply Scenario")
-                        self.scenario_status = gr.Markdown(value="")
+                        self.scenario_status = gr.Markdown(value="", elem_classes="scenario-status")
                 with gr.Column(scale=1, min_width=320, elem_classes="user-move-panel"):
                     with gr.Group(elem_classes="control-card"):
                         self.user_move_step = gr.Slider(
@@ -823,9 +828,8 @@ class TypeFly:
                     height=2.0 * float(envelope.minor_axis_radius),
                     angle=float(envelope.orientation_deg),
                     edgecolor=color,
-                    facecolor=color,
-                    alpha=fill_alpha,
-                    linewidth=1.5,
+                    facecolor="none",
+                    linewidth=1.8,
                     linestyle="--",
                     label=label,
                 )
