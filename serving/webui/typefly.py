@@ -110,6 +110,21 @@ class TypeFly:
                 inputs=[self.scenario_selector],
                 outputs=[self.scenario_status],
             )
+            self.scenario_apply_btn.click(
+                fn=self.apply_scenario,
+                inputs=[self.scenario_selector],
+                outputs=[self.scenario_status],
+            )
+            self.scenario_selector.change(
+                fn=self.preview_scenario,
+                inputs=[self.scenario_selector],
+                outputs=[self.scenario_status],
+            )
+            self.scenario_audit_btn.click(
+                fn=self.run_scenario_audit,
+                inputs=[],
+                outputs=[self.scenario_status],
+            )
 
             # floating message refresher
             self.message_timer = Timer(value=0.5)
@@ -525,13 +540,23 @@ class TypeFly:
         if not snapshot:
             return "### Coordinates\nWaiting for live data..."
         positions = self._extract_ui_positions(snapshot)
+        initial_state = self.llm_controller.get_initial_scenario_state()
         print_debug(
             "[UI-MARKDOWN] "
             f"drone_gt={positions['drone_gt']} drone_est={positions['drone_est']} "
             f"user_gt={positions['user_gt']} user_est={positions['user_est']}"
         )
+        initial_block = ""
+        if initial_state:
+            initial_block = (
+                f"**Initial scenario (locked before task)**\n"
+                f"- selected_mode: {initial_state.get('selected_mode')}\n"
+                f"- actual initial drone GT: {self._fmt_vec(initial_state.get('actual_drone_gt'))}\n"
+                f"- actual initial user GT: {self._fmt_vec(initial_state.get('actual_user_gt'))}\n\n"
+            )
         return (
             "### Coordinates\n"
+            f"{initial_block}"
             f"**Drone (Blue)**\n"
             f"- GT position: {self._fmt_vec(positions['drone_gt'])}\n"
             f"- EST position: {self._fmt_vec(positions['drone_est'])}\n\n"
@@ -544,8 +569,21 @@ class TypeFly:
         safety_context = snapshot.get("safety_context") if snapshot else None
         if safety_context is None:
             return "### Safety / Risk\nWaiting for safety state..."
+        initial_state = self.llm_controller.get_initial_scenario_state()
         lines = [
             "### Safety / Risk",
+        ]
+        if initial_state:
+            lines.extend([
+                "**Initial scenario (locked before task)**",
+                f"- selected_mode: {initial_state.get('selected_mode')}",
+                f"- initial safety_score: {self._fmt_float(initial_state.get('safety_score'))}",
+                f"- initial safety_level: {initial_state.get('safety_level')}",
+                f"- initial envelope_gap_m: {self._fmt_float(initial_state.get('envelope_gap_m'))}",
+                f"- initial uncertainty_scale_m: {self._fmt_float(initial_state.get('uncertainty_scale_m'))}",
+            ])
+        lines.extend([
+            "**Current live state**",
             f"- safety_score: {safety_context.safety_score:.3f}",
             f"- safety_level: {safety_context.safety_level}",
             f"- envelope_gap_m: {safety_context.envelope_gap_m:.3f} m",
