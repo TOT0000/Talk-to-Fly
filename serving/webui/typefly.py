@@ -22,14 +22,14 @@ from controller.llm_controller import LLMController
 from controller.utils import print_debug, print_t
 from controller.llm_wrapper import GPT4, LLAMA3
 from controller.abs.robot_wrapper import RobotType
-from controller.uwb_wrapper import UWBWrapper
+from controller.experiment_scenarios import SCENARIOS, normalize_scenario_name
 from gradio import Timer
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 class TypeFly:
-    def __init__(self, robot_type, use_http=False, enable_video=False, backend="uwb"):
+    def __init__(self, robot_type, use_http=False, enable_video=False, backend="uwb", initial_scenario="SAFE"):
         self.cache_folder = os.path.join(CURRENT_DIR, 'cache')
         if not os.path.exists(self.cache_folder):
             os.makedirs(self.cache_folder)
@@ -41,6 +41,7 @@ class TypeFly:
         controller_robot_type = RobotType.PX4_SIM if backend == "sim" else robot_type
         self.llm_controller = LLMController(controller_robot_type, self.virtual_queue, use_http, self.message_queue, enable_video=enable_video)
         self.llm_controller.register_position_callback(self.receive_position)
+        self.active_scenario = self.llm_controller.set_active_scenario(initial_scenario)
         
         self.system_stop = False
         self.ui_css = """
@@ -49,6 +50,35 @@ class TypeFly:
                 filter: none !important;
                 transition: none !important;
                 animation: none !important;
+            }
+            .user-move-panel {
+                max-width: 380px;
+            }
+            .user-move-step {
+                margin-bottom: 4px !important;
+            }
+            .scenario-panel {
+                max-width: 380px;
+            }
+            .control-card {
+                padding: 8px !important;
+            }
+            .control-panels {
+                gap: 10px !important;
+                align-items: stretch !important;
+            }
+            .scenario-status p {
+                margin: 2px 0 0 0 !important;
+            }
+            .user-move-row {
+                justify-content: center;
+                gap: 6px;
+                margin: 1px 0 !important;
+            }
+            .user-move-btn button {
+                width: 88px !important;
+                min-width: 88px !important;
+                padding: 5px 8px !important;
             }
             """
         self.ui = gr.Blocks(title="TypeFly")
@@ -60,16 +90,16 @@ class TypeFly:
         self.anchor_count = 0
         self.anchor_input_history = ""
         self.position_history = {
-            "drone_gt": deque(maxlen=50),
-            "drone_est": deque(maxlen=50),
-            "user_gt": deque(maxlen=50),
-            "user_est": deque(maxlen=50),
+            "drone_gt": deque(maxlen=100),
+            "drone_est": deque(maxlen=100),
+            "user_gt": deque(maxlen=100),
+            "user_est": deque(maxlen=100),
         }
         self.timing_history = {
-            "drone_aoi_s": deque(maxlen=50),
-            "user_aoi_s": deque(maxlen=50),
-            "drone_delay_s": deque(maxlen=50),
-            "user_delay_s": deque(maxlen=50),
+            "drone_aoi_s": deque(maxlen=100),
+            "user_aoi_s": deque(maxlen=100),
+            "drone_delay_s": deque(maxlen=100),
+            "user_delay_s": deque(maxlen=100),
         }
         self.plot_style = {
             "drone": {"main": "#0B57D0", "light": "#8AB4F8"},
@@ -95,77 +125,64 @@ class TypeFly:
             # 浮動提示（頂端）
             self.message_markdown = gr.Markdown(value="", visible=False)
 
-            with gr.Row():
-                with gr.Column(scale=1):
-                    self.anchor_count_input = gr.Textbox(
-                        label="Anchor Count (Enter integer)",
-                        placeholder="e.g. 4",
-                        value=""
-                    )
-                    self.anchor_count_submit_btn = gr.Button("Submit Anchor Count")
-                    self.anchor_reset_btn = gr.Button("Reset Anchors")
-                with gr.Column(scale=3):
-                    self.anchor_line_input = gr.Textbox(
-                        label="Enter Anchor Position (format: i,x,y,z)",
-                        placeholder="e.g. 1,1.23,4.56,7.89",
-                        interactive=True,
-                        value=""
-                    )
-                    self.anchor_line_btn = gr.Button("Add/Update Anchor Position")
-                    self.anchor_history_display = gr.Textbox(
-                        label="Anchor Input History",
-                        lines=6,
-                        interactive=False,
-                        value=""
-                    )
+            with gr.Row(elem_classes="control-panels"):
+                with gr.Column(scale=1, min_width=260, elem_classes="scenario-panel"):
+                    with gr.Group(elem_classes="control-card"):
+                        self.scenario_selector = gr.Dropdown(
+                            choices=list(SCENARIOS.keys()),
+                            value=self.active_scenario,
+                            label="Scenario Mode",
+                        )
+                        self.scenario_apply_btn = gr.Button("Apply Scenario")
+                        self.scenario_status = gr.Markdown(value="", elem_classes="scenario-status")
+                with gr.Column(scale=1, min_width=320, elem_classes="user-move-panel"):
+                    with gr.Group(elem_classes="control-card"):
+                        self.user_move_step = gr.Slider(
+                            minimum=0.1,
+                            maximum=1.0,
+                            value=0.5,
+                            step=0.1,
+                            label="User Move Step (m)",
+                            elem_classes="user-move-step",
+                        )
+                        with gr.Row(elem_classes="user-move-row"):
+                            gr.Markdown("")
+                            self.user_move_forward_btn = gr.Button("Forward", elem_classes="user-move-btn")
+                            gr.Markdown("")
+                        with gr.Row(elem_classes="user-move-row"):
+                            self.user_move_left_btn = gr.Button("Left", elem_classes="user-move-btn")
+                            gr.Markdown("")
+                            self.user_move_right_btn = gr.Button("Right", elem_classes="user-move-btn")
+                        with gr.Row(elem_classes="user-move-row"):
+                            gr.Markdown("")
+                            self.user_move_backward_btn = gr.Button("Backward", elem_classes="user-move-btn")
+                            gr.Markdown("")
 
-            # 綁定事件
-            self.anchor_count_submit_btn.click(
-                fn=self.set_anchor_count,
-                inputs=[self.anchor_count_input],
-                outputs=[
-                    self.anchor_count_input,
-                    self.anchor_line_input,
-                    self.anchor_history_display,
-                    self.anchor_count_submit_btn,
-                    self.anchor_line_btn,
-                ],
-            )
-            self.anchor_count_input.submit(
-                fn=self.set_anchor_count,
-                inputs=[self.anchor_count_input],
-                outputs=[
-                    self.anchor_count_input,
-                    self.anchor_line_input,
-                    self.anchor_history_display,
-                    self.anchor_count_submit_btn,
-                    self.anchor_line_btn,
-                ],
+            self.scenario_apply_btn.click(
+                fn=self.apply_scenario,
+                inputs=[self.scenario_selector],
+                outputs=[self.scenario_status],
             )
 
-            # anchor line submit
-            self.anchor_line_btn.click(
-                fn=self.input_anchor_line,
-                inputs=[self.anchor_line_input],
-                outputs=[self.anchor_line_input, self.anchor_history_display, self.anchor_line_btn]
+            self.user_move_forward_btn.click(
+                fn=self.move_user_forward,
+                inputs=[self.user_move_step],
+                outputs=[self.scenario_status],
             )
-            self.anchor_line_input.submit(
-                fn=self.input_anchor_line,
-                inputs=[self.anchor_line_input],
-                outputs=[self.anchor_line_input, self.anchor_history_display, self.anchor_line_btn]
+            self.user_move_backward_btn.click(
+                fn=self.move_user_backward,
+                inputs=[self.user_move_step],
+                outputs=[self.scenario_status],
             )
-
-            # reset 按鈕
-            self.anchor_reset_btn.click(
-                fn=self.reset_anchors,
-                inputs=[],
-                outputs=[
-                    self.anchor_count_input,
-                    self.anchor_line_input,
-                    self.anchor_history_display,
-                    self.anchor_count_submit_btn,
-                    self.anchor_line_btn,
-                ],
+            self.user_move_left_btn.click(
+                fn=self.move_user_left,
+                inputs=[self.user_move_step],
+                outputs=[self.scenario_status],
+            )
+            self.user_move_right_btn.click(
+                fn=self.move_user_right,
+                inputs=[self.user_move_step],
+                outputs=[self.scenario_status],
             )
 
             # floating message refresher
@@ -177,24 +194,28 @@ class TypeFly:
             )
 
             # plots
-            with gr.Row():
+            with gr.Row(equal_height=True):
                 with gr.Column(scale=2):
                     self.xy_plot = gr.Image(
                         value=self.create_blank_plot("Drone / User Localization & Safety Envelope (XY view)", "X (m)", "Y (m)", xlim=(0, 12), ylim=(0, 12)),
-                        label="XY Plot"
+                        label="XY Plot",
+                        height=340,
                     )
                     self.x_plot = gr.Image(
                         value=self.create_sequence_plot("X in Sequence", "Index", "X (m)", xlim=(0, 1), ylim=(0, 12)),
-                        label="X in Sequence"
+                        label="X in Sequence",
+                        height=340,
                     )
                 with gr.Column(scale=2):
                     self.z_plot = gr.Image(
                         value=self.create_sequence_plot("Z in Sequence", "Index", "Z (m)", xlim=(0, 1), ylim=(0, 6)),
-                        label="Z in Sequence"
+                        label="Z in Sequence",
+                        height=340,
                     )
                     self.y_plot = gr.Image(
                         value=self.create_sequence_plot("Y in Sequence", "Index", "Y (m)", xlim=(0, 1), ylim=(0, 12)),
-                        label="Y in Sequence"
+                        label="Y in Sequence",
+                        height=340,
                     )
             with gr.Row():
                 self.aoi_plot = gr.Image(
@@ -211,7 +232,7 @@ class TypeFly:
                 self.delay_markdown = gr.Markdown(value="### AoI / Delay\nWaiting for packets...")
 
             self.counter = gr.State(0)
-            self.timer = Timer(value=0.2)
+            self.timer = Timer(value=0.08)
             self.timer.tick(
                 fn=self.update_and_step,
                 inputs=[self.counter],
@@ -367,6 +388,46 @@ class TypeFly:
             print_t("Switch to gpt4")
             self.llm_controller.planner.set_model(GPT4)
 
+    def apply_scenario(self, scenario_name):
+        normalized, report, runtime = self._apply_mode_and_collect(scenario_name)
+        return (
+            f"Scenario `{normalized}` applied. "
+            f"Live safety: {runtime.get('safety_level')} "
+            f"(score={self._fmt_float(runtime.get('safety_score'))})"
+        )
+
+    def _apply_mode_and_collect(self, scenario_name):
+        normalized = normalize_scenario_name(scenario_name)
+        self.llm_controller.set_active_scenario(normalized)
+        report = self.llm_controller.apply_selected_scenario()
+        runtime = self.llm_controller.get_scenario_runtime_status()
+        self.active_scenario = normalized
+        return normalized, report, runtime
+
+    def _move_user(self, dx: float, dy: float, step_m: float):
+        step = float(step_m)
+        updated = self.llm_controller.move_user_world(dx=dx * step, dy=dy * step, dz=0.0)
+        if updated is None:
+            return "User move failed: no simulation user-position provider."
+        runtime = self.llm_controller.get_scenario_runtime_status()
+        return (
+            f"User moved to {self._fmt_vec(updated)} | "
+            f"live safety={runtime.get('safety_level')} "
+            f"(score={self._fmt_float(runtime.get('safety_score'))})"
+        )
+
+    def move_user_forward(self, step_m: float):
+        return self._move_user(dx=0.0, dy=1.0, step_m=step_m)
+
+    def move_user_backward(self, step_m: float):
+        return self._move_user(dx=0.0, dy=-1.0, step_m=step_m)
+
+    def move_user_left(self, step_m: float):
+        return self._move_user(dx=-1.0, dy=0.0, step_m=step_m)
+
+    def move_user_right(self, step_m: float):
+        return self._move_user(dx=1.0, dy=0.0, step_m=step_m)
+
     def process_message(self, message, history):
         print_t(f"[S] Receiving task description: {message}")
         if message == "exit":
@@ -476,7 +537,7 @@ class TypeFly:
         ax.set_title(title)
         ax.grid(True, which='both', linestyle='--', linewidth=0.5)
         buf = io.BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight')
+        fig.savefig(buf, format='png')
         buf.seek(0)
         plt.close(fig)
         return Image.open(buf)
@@ -499,6 +560,7 @@ class TypeFly:
 
     def update_and_step(self, counter):
         snapshot = self.llm_controller.get_live_ui_snapshot()
+        self._validate_snapshot_consistency(snapshot)
         self._append_history(snapshot)
         xy, x, y, z = self.update_position_plot(snapshot)
         aoi_img, delay_img = self.update_timing_plots()
@@ -551,6 +613,35 @@ class TypeFly:
             if value is not None:
                 self.timing_history[key].append(float(value))
 
+    def _validate_snapshot_consistency(self, snapshot):
+        if not snapshot:
+            return
+        safety_state = snapshot.get("safety_state")
+        safety_context = snapshot.get("safety_context")
+        if safety_state is None or safety_context is None:
+            return
+        gap_state = float(safety_state.envelope_gap_m)
+        gap_context = float(safety_context.envelope_gap_m)
+        overlap_state = bool(safety_state.envelopes_overlap)
+        overlap_context = bool(safety_context.envelopes_overlap)
+        overlap_from_gap = bool(gap_state < 0.0)
+        print_debug(
+            "[UI-SAFETY-CONSISTENCY] "
+            f"snapshot_ts={self._fmt_float(snapshot.get('snapshot_timestamp'))} "
+            f"state_id={snapshot.get('safety_state_id')} "
+            f"ctx_source_ts={self._fmt_float(snapshot.get('safety_context_source_ts'))} "
+            f"state_gen_ts={self._fmt_float(getattr(safety_state, 'latest_generation_timestamp', None))} "
+            f"gap_state={gap_state:.6f} gap_context={gap_context:.6f} "
+            f"overlap_state={overlap_state} overlap_context={overlap_context} overlap_from_gap={overlap_from_gap} "
+            f"drone_env(center={self._fmt_vec((safety_state.drone_envelope.center_xy[0], safety_state.drone_envelope.center_xy[1], 0.0))},"
+            f" axes=({safety_state.drone_envelope.major_axis_radius:.3f},{safety_state.drone_envelope.minor_axis_radius:.3f}),"
+            f" angle={safety_state.drone_envelope.orientation_deg:.2f}) "
+            f"user_env(center={self._fmt_vec((safety_state.user_envelope.center_xy[0], safety_state.user_envelope.center_xy[1], 0.0))},"
+            f" axes=({safety_state.user_envelope.major_axis_radius:.3f},{safety_state.user_envelope.minor_axis_radius:.3f}),"
+            f" angle={safety_state.user_envelope.orientation_deg:.2f}) "
+            f"reason_tags={safety_context.reason_tags} score={safety_context.safety_score:.3f} level={safety_context.safety_level}"
+        )
+
     def render_coordinate_markdown(self, snapshot):
         if not snapshot:
             return "### Coordinates\nWaiting for live data..."
@@ -562,40 +653,26 @@ class TypeFly:
         )
         return (
             "### Coordinates\n"
-            f"**Drone (Blue)**\n"
-            f"- GT position: {self._fmt_vec(positions['drone_gt'])}\n"
-            f"- EST position: {self._fmt_vec(positions['drone_est'])}\n\n"
-            f"**User (Red)**\n"
-            f"- GT position: {self._fmt_vec(positions['user_gt'])}\n"
-            f"- EST position: {self._fmt_vec(positions['user_est'])}"
+            f"- Drone GT: {self._fmt_vec(positions['drone_gt'])}\n"
+            f"- Drone EST: {self._fmt_vec(positions['drone_est'])}\n"
+            f"- User GT: {self._fmt_vec(positions['user_gt'])}\n"
+            f"- User EST: {self._fmt_vec(positions['user_est'])}"
         )
 
     def render_safety_markdown(self, snapshot):
         safety_context = snapshot.get("safety_context") if snapshot else None
-        safety_state = snapshot.get("safety_state") if snapshot else None
         if safety_context is None:
             return "### Safety / Risk\nWaiting for safety state..."
-        lines = [
-            "### Safety / Risk",
-            f"- safety_score: {safety_context.safety_score:.3f}",
-            f"- safety_level: {safety_context.safety_level}",
-            f"- planning_bias: {safety_context.planning_bias}",
-            f"- preferred_standoff_m: {safety_context.preferred_standoff_m:.3f} m",
-            f"- envelope_gap_m: {safety_context.envelope_gap_m:.3f} m",
-            f"- uncertainty_scale_m: {safety_context.uncertainty_scale_m:.3f} m",
-            f"- envelopes_overlap: {safety_context.envelopes_overlap}",
-            f"- reason_tags: {safety_context.reason_tags}",
-        ]
-        if safety_state is not None:
-            lines.extend([
-                f"- drone envelope (blue dashed): center=({safety_state.drone_envelope.center_xy[0]:.2f}, {safety_state.drone_envelope.center_xy[1]:.2f}), "
-                f"major={safety_state.drone_envelope.major_axis_radius:.2f}, minor={safety_state.drone_envelope.minor_axis_radius:.2f}, "
-                f"orientation={safety_state.drone_envelope.orientation_deg:.1f}°",
-                f"- user envelope (red dashed): center=({safety_state.user_envelope.center_xy[0]:.2f}, {safety_state.user_envelope.center_xy[1]:.2f}), "
-                f"major={safety_state.user_envelope.major_axis_radius:.2f}, minor={safety_state.user_envelope.minor_axis_radius:.2f}, "
-                f"orientation={safety_state.user_envelope.orientation_deg:.1f}°",
-            ])
-        return "\n".join(lines)
+        return "\n".join(
+            [
+                "### Safety / Risk",
+                f"- safety_score: {safety_context.safety_score:.3f}",
+                f"- safety_level: {safety_context.safety_level}",
+                f"- envelope_gap_m: {safety_context.envelope_gap_m:.3f} m",
+                f"- uncertainty_scale_m: {safety_context.uncertainty_scale_m:.3f} m",
+                f"- envelopes_overlap: {safety_context.envelopes_overlap}",
+            ]
+        )
 
     def render_delay_markdown(self, snapshot):
         if not snapshot:
@@ -669,7 +746,7 @@ class TypeFly:
         ax.legend(fontsize=8)
 
         buf = io.BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight')
+        fig.savefig(buf, format='png')
         buf.seek(0)
         plt.close(fig)
         return Image.open(buf)
@@ -733,6 +810,7 @@ class TypeFly:
             )
 
         safety_state = snapshot.get("safety_state") if snapshot else None
+        safety_context = snapshot.get("safety_context") if snapshot else None
         if safety_state is not None:
             for label, envelope, color in (
                 ("Drone envelope", safety_state.drone_envelope, self.plot_style["drone"]["light"]),
@@ -745,14 +823,34 @@ class TypeFly:
                     angle=float(envelope.orientation_deg),
                     edgecolor=color,
                     facecolor="none",
-                    linewidth=1.5,
+                    linewidth=1.8,
                     linestyle="--",
                     label=label,
                 )
                 ax_xy.add_patch(ellipse)
+            ax_xy.plot(
+                [float(safety_state.drone_center_xy[0]), float(safety_state.user_center_xy[0])],
+                [float(safety_state.drone_center_xy[1]), float(safety_state.user_center_xy[1])],
+                linestyle=":",
+                linewidth=1.2,
+                color="#5f6368",
+                label="Envelope center line",
+            )
+            if safety_context is not None:
+                ax_xy.text(
+                    0.02,
+                    0.98,
+                    f"gap={safety_context.envelope_gap_m:.3f} m\noverlap={safety_context.envelopes_overlap}",
+                    transform=ax_xy.transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=8,
+                    bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.65, edgecolor="#B0B0B0"),
+                )
 
         ax_xy.set_xlim(*xlim)
         ax_xy.set_ylim(*ylim)
+        ax_xy.set_aspect("equal", adjustable="box")
         ax_xy.set_xlabel("X (m)")
         ax_xy.set_ylabel("Y (m)")
         ax_xy.set_title("Drone / User Localization & Safety Envelope (XY view)")
@@ -762,7 +860,7 @@ class TypeFly:
         ax_xy.legend(dedup.values(), dedup.keys(), fontsize=8)
 
         buf_xy = io.BytesIO()
-        fig_xy.savefig(buf_xy, format='png', bbox_inches='tight')
+        fig_xy.savefig(buf_xy, format='png')
         buf_xy.seek(0)
         plt.close(fig_xy)
         img_xy = Image.open(buf_xy)
@@ -818,7 +916,7 @@ class TypeFly:
             ax.legend(fontsize=8)
 
             buf = io.BytesIO()
-            fig.savefig(buf, format='png', bbox_inches='tight')
+            fig.savefig(buf, format='png')
             buf.seek(0)
             plt.close(fig)
             imgs.append(Image.open(buf))
@@ -833,6 +931,7 @@ if __name__ == "__main__":
     parser.add_argument('--gear', action='store_true')
     parser.add_argument('--image', action='store_true')
     parser.add_argument('--px4_sim', action='store_true')
+    parser.add_argument('--scenario', type=str, default=os.getenv("TYPEFLY_SCENARIO", "SAFE"))
 
     args = parser.parse_args()
     robot_type = RobotType.TELLO
@@ -845,5 +944,11 @@ if __name__ == "__main__":
     elif args.gear:
         robot_type = RobotType.GEAR
 
-    typefly = TypeFly(robot_type, use_http=args.use_http, enable_video=args.image, backend=backend)
+    typefly = TypeFly(
+        robot_type,
+        use_http=args.use_http,
+        enable_video=args.image,
+        backend=backend,
+        initial_scenario=normalize_scenario_name(args.scenario),
+    )
     typefly.run()
