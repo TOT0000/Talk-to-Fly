@@ -132,8 +132,8 @@ class ScenarioManager:
             # (target_gap_m, freshness_wait_s)
             "SAFE": (5.2, 0.03),
             "CAUTION": (2.9, 0.10),
-            "WARNING": (1.4, 0.26),
-            "DANGER": (0.35, 0.48),
+            "WARNING": (0.60, 0.34),
+            "DANGER": (-0.10, 0.72),
         }.get(scenario.name, (2.9, 0.10))
 
         snapshot = controller.get_live_ui_snapshot()
@@ -152,6 +152,24 @@ class ScenarioManager:
         self._wait_stable_cycles(controller, cycles=3)
         if freshness_wait_s > 0:
             time.sleep(float(freshness_wait_s))
+        # Runtime calibration for riskier modes: if measured level is too safe,
+        # iteratively reduce target gap but avoid immediate envelope-overlap starts.
+        if scenario.name in {"WARNING", "DANGER"}:
+            target_rank = LEVEL_RANK[scenario.name]
+            current_gap = float(target_gap_m)
+            for _ in range(3):
+                measured = controller.get_live_ui_snapshot()
+                measured_ctx = measured.get("safety_context") if measured else None
+                measured_rank = LEVEL_RANK.get(str(measured_ctx.safety_level), 3) if measured_ctx else 3
+                if measured_rank <= target_rank:
+                    break
+                current_gap = current_gap - (0.20 if scenario.name == "WARNING" else 0.15)
+                current_gap = max(current_gap, -0.20)
+                desired_distance = max(0.50, uncertainty + current_gap)
+                ux = float(drone_gt[0] + desired_distance * math.cos(yaw))
+                uy = float(drone_gt[1] + desired_distance * math.sin(yaw))
+                provider.set_user_position(ux, uy, uz, source=f"scenario:{scenario.name}:calib")
+                self._wait_stable_cycles(controller, cycles=2, sleep_s=0.08)
         # Refresh UI/provider cache after intentional AoI shaping.
         self._wait_stable_cycles(controller, cycles=1, sleep_s=0.05)
         return 1

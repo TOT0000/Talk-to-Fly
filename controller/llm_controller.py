@@ -618,6 +618,21 @@ class LLMController():
             "uncertainty_scale_m": None if safety_context is None else float(safety_context.uncertainty_scale_m),
         }
 
+    def move_user_world(self, dx: float, dy: float, dz: float = 0.0):
+        provider = getattr(self, "state_provider", None)
+        if provider is None or not hasattr(provider, "get_user_position") or not hasattr(provider, "set_user_position"):
+            return None
+        if hasattr(provider, "lock_user_position"):
+            provider.lock_user_position(True, reason="ui_manual_user_move")
+        ux, uy, uz = provider.get_user_position()
+        nx = float(ux + dx)
+        ny = float(uy + dy)
+        nz = float(uz + dz)
+        provider.set_user_position(nx, ny, nz, source="ui_manual_user_move")
+        if hasattr(provider, "flush_due_packets"):
+            provider.flush_due_packets(now=time.time())
+        return (nx, ny, nz)
+
     def _debug_log_safety_context(self, safety_context):
         if safety_context is None:
             print_debug("[SAFETY] unavailable")

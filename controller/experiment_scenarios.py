@@ -32,17 +32,17 @@ SCENARIOS: Dict[str, ExperimentScenario] = {
     ),
     "WARNING": ExperimentScenario(
         name="WARNING",
-        drone_position_3d=(8.6, 4.0, -1.4),
-        user_position_3d=(10.1, 5.2, 0.0),
-        drone_yaw_rad=0.7,
-        notes="Right-lower-mid zone with tighter geometry than caution.",
+        drone_position_3d=(9.8, 2.2, -1.4),
+        user_position_3d=(11.0, 3.1, 0.0),
+        drone_yaw_rad=0.6,
+        notes="Edge-adjacent zone with tighter geometry for warning-level risk.",
     ),
     "DANGER": ExperimentScenario(
         name="DANGER",
-        drone_position_3d=(1.2, 1.4, -1.3),
-        user_position_3d=(2.7, 2.2, 0.0),
-        drone_yaw_rad=0.5,
-        notes="Corner-region geometry with high risk but non-overlapping initial placement.",
+        drone_position_3d=(0.9, 0.9, -1.3),
+        user_position_3d=(1.9, 1.6, 0.0),
+        drone_yaw_rad=0.55,
+        notes="Corner-region geometry with higher risk while avoiding immediate overlap.",
     ),
 }
 

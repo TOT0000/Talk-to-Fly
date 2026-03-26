@@ -111,6 +111,43 @@ class TypeFly:
                 outputs=[self.scenario_status],
             )
 
+            with gr.Row():
+                self.user_move_step = gr.Slider(
+                    minimum=0.1,
+                    maximum=1.0,
+                    value=0.5,
+                    step=0.1,
+                    label="User Move Step (m)",
+                )
+            with gr.Row():
+                self.user_move_forward_btn = gr.Button("前")
+            with gr.Row():
+                self.user_move_left_btn = gr.Button("左")
+                self.user_move_right_btn = gr.Button("右")
+            with gr.Row():
+                self.user_move_backward_btn = gr.Button("後")
+
+            self.user_move_forward_btn.click(
+                fn=self.move_user_forward,
+                inputs=[self.user_move_step],
+                outputs=[self.scenario_status],
+            )
+            self.user_move_backward_btn.click(
+                fn=self.move_user_backward,
+                inputs=[self.user_move_step],
+                outputs=[self.scenario_status],
+            )
+            self.user_move_left_btn.click(
+                fn=self.move_user_left,
+                inputs=[self.user_move_step],
+                outputs=[self.scenario_status],
+            )
+            self.user_move_right_btn.click(
+                fn=self.move_user_right,
+                inputs=[self.user_move_step],
+                outputs=[self.scenario_status],
+            )
+
             # floating message refresher
             self.message_timer = Timer(value=0.5)
             self.message_timer.tick(
@@ -325,6 +362,30 @@ class TypeFly:
         runtime = self.llm_controller.get_scenario_runtime_status()
         self.active_scenario = normalized
         return normalized, report, runtime
+
+    def _move_user(self, dx: float, dy: float, step_m: float):
+        step = float(step_m)
+        updated = self.llm_controller.move_user_world(dx=dx * step, dy=dy * step, dz=0.0)
+        if updated is None:
+            return "User move failed: no simulation user-position provider."
+        runtime = self.llm_controller.get_scenario_runtime_status()
+        return (
+            f"User moved to {self._fmt_vec(updated)} | "
+            f"live safety={runtime.get('safety_level')} "
+            f"(score={self._fmt_float(runtime.get('safety_score'))})"
+        )
+
+    def move_user_forward(self, step_m: float):
+        return self._move_user(dx=0.0, dy=1.0, step_m=step_m)
+
+    def move_user_backward(self, step_m: float):
+        return self._move_user(dx=0.0, dy=-1.0, step_m=step_m)
+
+    def move_user_left(self, step_m: float):
+        return self._move_user(dx=-1.0, dy=0.0, step_m=step_m)
+
+    def move_user_right(self, step_m: float):
+        return self._move_user(dx=1.0, dy=0.0, step_m=step_m)
 
     def process_message(self, message, history):
         print_t(f"[S] Receiving task description: {message}")
@@ -543,28 +604,16 @@ class TypeFly:
         safety_context = snapshot.get("safety_context") if snapshot else None
         if safety_context is None:
             return "### Safety / Risk\nWaiting for safety state..."
-        initial_state = self.llm_controller.get_initial_scenario_state()
-        lines = [
-            "### Safety / Risk",
-        ]
-        if initial_state:
-            lines.extend([
-                "**Initial scenario (locked before task)**",
-                f"- selected_mode: {initial_state.get('selected_mode')}",
-                f"- initial safety_score: {self._fmt_float(initial_state.get('safety_score'))}",
-                f"- initial safety_level: {initial_state.get('safety_level')}",
-                f"- initial envelope_gap_m: {self._fmt_float(initial_state.get('envelope_gap_m'))}",
-                f"- initial uncertainty_scale_m: {self._fmt_float(initial_state.get('uncertainty_scale_m'))}",
-            ])
-        lines.extend([
-            "**Current live state**",
-            f"- safety_score: {safety_context.safety_score:.3f}",
-            f"- safety_level: {safety_context.safety_level}",
-            f"- envelope_gap_m: {safety_context.envelope_gap_m:.3f} m",
-            f"- uncertainty_scale_m: {safety_context.uncertainty_scale_m:.3f} m",
-            f"- envelopes_overlap: {safety_context.envelopes_overlap}",
-        ])
-        return "\n".join(lines)
+        return "\n".join(
+            [
+                "### Safety / Risk",
+                f"- safety_score: {safety_context.safety_score:.3f}",
+                f"- safety_level: {safety_context.safety_level}",
+                f"- envelope_gap_m: {safety_context.envelope_gap_m:.3f} m",
+                f"- uncertainty_scale_m: {safety_context.uncertainty_scale_m:.3f} m",
+                f"- envelopes_overlap: {safety_context.envelopes_overlap}",
+            ]
+        )
 
     def render_delay_markdown(self, snapshot):
         if not snapshot:
