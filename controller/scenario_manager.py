@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import asdict
 from typing import Dict, Optional
+import math
 
 from .experiment_scenarios import SCENARIOS, ExperimentScenario, normalize_scenario_name
 from .fuzzy_safety_assessor import FuzzySafetyAssessor
@@ -65,15 +66,54 @@ class ScenarioManager:
         if provider is not None and hasattr(provider, "lock_user_position"):
             provider.lock_user_position(True, reason=f"scenario:{scenario.name}")
 
-        if provider is not None and hasattr(provider, "set_user_position"):
-            provider.set_user_position(*scenario.user_position_3d, source=f"scenario:{scenario.name}")
-
         repositioned = False
         if drone is not None and hasattr(drone, "reposition_for_scenario"):
             repositioned = bool(drone.reposition_for_scenario(scenario))
 
+        # Calibrate user placement from the *actual* runtime drone position so scenario
+        # level and measured safety context stay aligned even if PX4 reposition is imperfect.
+        drone_pos = None
+        if drone is not None and hasattr(drone, "get_ground_truth_drone_position"):
+            drone_pos = drone.get_ground_truth_drone_position()
+        if drone_pos is None and provider is not None and hasattr(provider, "get_drone_position"):
+            drone_pos = provider.get_drone_position()
+
+        applied_user = scenario.user_position_3d
+        if provider is not None and hasattr(provider, "set_user_position"):
+            uncertainty = 0.85
+            try:
+                snapshot = controller.get_live_ui_snapshot()
+                safety_context = snapshot.get("safety_context") if snapshot else None
+                if safety_context is not None:
+                    uncertainty = float(safety_context.uncertainty_scale_m)
+            except Exception:
+                pass
+            desired_distance = self._distance_for_level(scenario.name, uncertainty)
+            yaw = float(getattr(scenario, "drone_yaw_rad", 0.0))
+            anchor_x, anchor_y, _ = scenario.drone_position_3d
+            if drone_pos is not None:
+                anchor_x, anchor_y = float(drone_pos[0]), float(drone_pos[1])
+            ux = float(anchor_x + desired_distance * math.cos(yaw))
+            uy = float(anchor_y + desired_distance * math.sin(yaw))
+            uz = float(scenario.user_position_3d[2])
+            provider.set_user_position(ux, uy, uz, source=f"scenario:{scenario.name}:calibrated")
+            applied_user = (ux, uy, uz)
+
         print_t(
-            f"[SCENARIO] active={scenario.name} user={scenario.user_position_3d} "
+            f"[SCENARIO] active={scenario.name} user={applied_user} "
             f"drone_target={scenario.drone_position_3d} repositioned={repositioned}"
         )
         return repositioned
+
+    @staticmethod
+    def _distance_for_level(level: str, uncertainty_scale_m: float) -> float:
+        # Target envelope gaps tuned to FIS boundaries:
+        # SAFE > CAUTION > WARNING > DANGER
+        target_gap_by_level = {
+            "SAFE": 3.2,
+            "CAUTION": 1.3,
+            "WARNING": 0.45,
+            "DANGER": -0.20,
+        }
+        target_gap = target_gap_by_level.get(level, 1.3)
+        return max(0.15, float(uncertainty_scale_m) + float(target_gap))
