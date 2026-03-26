@@ -23,6 +23,8 @@ from .abs.robot_wrapper import RobotType
 from .uwb_wrapper import UWBWrapper
 from .state_provider import StateProvider, UwbStateProvider
 from .sim_state_provider import SimStateProvider
+from .scenario_manager import ScenarioManager
+from .task_run_logger import TaskRunLogger
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -136,6 +138,11 @@ class LLMController():
         self.execution_history = None
         self.execution_time = time.time()
         self.latest_safety_context = None
+        self.scenario_manager = ScenarioManager(default_name=os.getenv("TYPEFLY_SCENARIO", "SAFE"))
+        self.task_run_logger = TaskRunLogger(excel_path=os.getenv("TYPEFLY_TASK_LOG_XLSX", "logs/task_runs.xlsx"))
+        self._task_id_counter = 0
+        self.latest_scenario_report = None
+        self.initial_scenario_state = None
 
         # PX4_SIM optional managed user-position publisher lifecycle
         self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
@@ -464,8 +471,28 @@ class LLMController():
         if self.controller_wait_takeoff:
             self.append_message("[Warning] Controller is waiting for takeoff...")
             return
+        self._task_id_counter += 1
+        task_id = f"task_{self._task_id_counter:05d}"
+        initial_snapshot = self.get_live_ui_snapshot()
+        self.task_run_logger.start_run(
+            task_id=task_id,
+            task_text=task_description,
+            scenario_name=self.get_active_scenario_name(),
+            initial_snapshot=initial_snapshot,
+        )
         self.append_message('[TASK]: ' + task_description)
         ret_val = None
+        monitor_stop = threading.Event()
+        monitor_thread = None
+        def _run_monitor():
+            while not monitor_stop.is_set():
+                try:
+                    self.task_run_logger.consume_runtime_snapshot(self.get_live_ui_snapshot())
+                except Exception:
+                    pass
+                monitor_stop.wait(0.2)
+        monitor_thread = threading.Thread(target=_run_monitor, daemon=True)
+        monitor_thread.start()
         while True:
             location_info = self._format_planner_location_info()
 
@@ -486,20 +513,125 @@ class LLMController():
                     safety_context=safety_context,
                 )
                 self.latest_safety_context = safety_context
+                self.task_run_logger.update_plan_info(self.current_plan, generation_success=True)
 
                 self.append_message(f'[Plan]: \\\\')
                 self.execution_time = time.time()
                 ret_val = self.execute_minispec(self.current_plan)
+                execution_success = True
+                task_completed = True
+                if isinstance(ret_val, tuple) and len(ret_val) >= 2:
+                    execution_success = bool(ret_val[0] is not False)
+                self.task_run_logger.update_execution_info(
+                    execution_success=execution_success,
+                    task_completed=task_completed,
+                )
             except Exception as e:
                 error_message = f"[C] Error: {e}"
                 print_t(error_message)
                 self.append_message(error_message)
+                self.task_run_logger.update_plan_info(self.current_plan or "", generation_success=bool(self.current_plan))
+                self.task_run_logger.update_execution_info(
+                    execution_success=False,
+                    failure_reason=str(e),
+                    task_completed=False,
+                )
+                self.task_run_logger.end_run(run_status="exception", failure_reason=str(e))
+                monitor_stop.set()
+                if monitor_thread is not None:
+                    monitor_thread.join(timeout=1.0)
+                self.append_message(f'\n[Task ended]')
+                self.append_message('end')
+                self.current_plan = None
+                self.execution_history = None
+                return
 
             break
+        self.task_run_logger.consume_runtime_snapshot(self.get_live_ui_snapshot())
+        self.task_run_logger.end_run(run_status="completed")
+        monitor_stop.set()
+        if monitor_thread is not None:
+            monitor_thread.join(timeout=1.0)
         self.append_message(f'\n[Task ended]')
         self.append_message('end')
         self.current_plan = None
         self.execution_history = None
+
+    def get_active_scenario_name(self) -> str:
+        return self.scenario_manager.selected_name()
+
+    def set_active_scenario(self, scenario_name: str):
+        scenario = self.scenario_manager.select(scenario_name)
+        return scenario.name
+
+    def apply_selected_scenario(self):
+        report = self.scenario_manager.apply_to_runtime(self)
+        self.latest_scenario_report = report
+        self.initial_scenario_state = {
+            "selected_mode": report.selected_mode,
+            "target_drone_gt": report.target_drone_position_3d,
+            "target_user_gt": report.target_user_position_3d,
+            "actual_drone_gt": report.actual_drone_gt_position_3d,
+            "actual_user_gt": report.actual_user_gt_position_3d,
+            "safety_score": report.measured_initial_safety_score,
+            "safety_level": report.measured_initial_safety_level,
+            "envelope_gap_m": report.measured_initial_envelope_gap_m,
+            "uncertainty_scale_m": report.measured_initial_uncertainty_scale_m,
+            "max_aoi_s": report.measured_initial_max_aoi_s,
+            "repositioned": report.repositioned,
+            "calibration_iterations": report.calibration_iterations,
+            "captured_at": time.time(),
+        }
+        # Force one immediate safety refresh after scenario apply.
+        try:
+            now = time.time()
+            if hasattr(self.state_provider, "flush_due_packets"):
+                self.state_provider.flush_due_packets(now=now)
+        except Exception:
+            pass
+        return report
+
+    def get_initial_scenario_state(self):
+        return self.initial_scenario_state
+
+    def get_scenario_projection(self):
+        baseline_uncertainty = 0.85
+        snapshot = self.get_live_ui_snapshot()
+        safety_context = snapshot.get("safety_context") if snapshot else None
+        if safety_context is not None:
+            baseline_uncertainty = float(safety_context.uncertainty_scale_m)
+        return self.scenario_manager.projected_assessment(baseline_uncertainty_scale_m=baseline_uncertainty)
+
+    def get_scenario_runtime_status(self):
+        report = self.latest_scenario_report
+        snapshot = self.get_live_ui_snapshot()
+        safety_context = snapshot.get("safety_context") if snapshot else None
+        return {
+            "selected_mode": None if report is None else report.selected_mode,
+            "target_drone_gt": None if report is None else report.target_drone_position_3d,
+            "target_user_gt": None if report is None else report.target_user_position_3d,
+            "actual_drone_gt": snapshot.get("drone_gt") if snapshot else None,
+            "actual_user_gt": snapshot.get("user_gt") if snapshot else None,
+            "safety_level": None if safety_context is None else safety_context.safety_level,
+            "safety_score": None if safety_context is None else float(safety_context.safety_score),
+            "envelope_gap_m": None if safety_context is None else float(safety_context.envelope_gap_m),
+            "uncertainty_scale_m": None if safety_context is None else float(safety_context.uncertainty_scale_m),
+        }
+
+    def move_user_world(self, dx: float, dy: float, dz: float = 0.0):
+        provider = getattr(self, "state_provider", None)
+        if provider is None or not hasattr(provider, "get_user_position") or not hasattr(provider, "set_user_position"):
+            return None
+        if hasattr(provider, "lock_user_position"):
+            provider.lock_user_position(True, reason="ui_manual_user_move")
+        ux, uy, uz = provider.get_user_position()
+        nx = float(ux + dx)
+        ny = float(uy + dy)
+        nz = float(uz + dz)
+        provider.set_user_position(nx, ny, nz, source="ui_manual_user_move")
+        if hasattr(provider, "flush_due_packets"):
+            provider.flush_due_packets(now=time.time())
+        return (nx, ny, nz)
 
     def _debug_log_safety_context(self, safety_context):
         if safety_context is None:
@@ -540,7 +672,13 @@ class LLMController():
         if hasattr(provider, "flush_due_packets"):
             provider.flush_due_packets(now=now)
         safety_state = provider.get_latest_gcs_safety_state(now=now) if hasattr(provider, "get_latest_gcs_safety_state") else None
-        safety_context = provider.get_latest_safety_context(now=now) if hasattr(provider, "get_latest_safety_context") else self.latest_safety_context
+        safety_context = None
+        if safety_state is not None:
+            safety_context = self.safety_assessor.build_from_safety_state(safety_state, now=now)
+        elif hasattr(provider, "get_latest_safety_context"):
+            safety_context = provider.get_latest_safety_context(now=now)
+        else:
+            safety_context = self.latest_safety_context
 
         drone_gt = (
             _as_position_tuple(getattr(getattr(provider, "_cache", None), "position", None))
@@ -595,6 +733,21 @@ class LLMController():
             "safety_state": safety_state,
             "safety_context": safety_context,
         }
+        if safety_state is not None and safety_context is not None:
+            consistency_from_gap = bool(float(safety_state.envelope_gap_m) < 0.0)
+            print_debug(
+                "[UI-SAFETY-SNAPSHOT] "
+                f"gap={safety_context.envelope_gap_m:.6f} "
+                f"overlap={safety_context.envelopes_overlap} "
+                f"overlap_from_gap={consistency_from_gap} "
+                f"drone_center={tuple(float(v) for v in safety_state.drone_center_xy)} "
+                f"user_center={tuple(float(v) for v in safety_state.user_center_xy)} "
+                f"drone_radius={safety_state.drone_radius_along_user_direction:.6f} "
+                f"user_radius={safety_state.user_radius_along_drone_direction:.6f} "
+                f"score={safety_context.safety_score:.6f} "
+                f"level={safety_context.safety_level} "
+                f"reason_tags={safety_context.reason_tags}"
+            )
         print_debug(
             "[UI-SNAPSHOT] "
             f"drone_gt={snapshot['drone_gt']} drone_est={snapshot['drone_est']} "
@@ -616,6 +769,7 @@ class LLMController():
         if self.robot_type != RobotType.PX4_SIM:
             self.drone.takeoff()
             self.drone.move_up(0.25)
+        self.apply_selected_scenario()
 
         if self.enable_video:
             print_t("[C] Starting stream...")
