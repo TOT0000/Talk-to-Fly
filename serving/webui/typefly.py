@@ -563,7 +563,7 @@ class TypeFly:
             f"- envelope_gap_m: {safety_context.envelope_gap_m:.3f} m",
             f"- uncertainty_scale_m: {safety_context.uncertainty_scale_m:.3f} m",
             f"- envelopes_overlap: {safety_context.envelopes_overlap}",
-        ]
+        ])
         return "\n".join(lines)
 
     def render_delay_markdown(self, snapshot):
