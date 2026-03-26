@@ -61,16 +61,16 @@ class TypeFly:
         self.anchor_count = 0
         self.anchor_input_history = ""
         self.position_history = {
-            "drone_gt": deque(maxlen=50),
-            "drone_est": deque(maxlen=50),
-            "user_gt": deque(maxlen=50),
-            "user_est": deque(maxlen=50),
+            "drone_gt": deque(maxlen=100),
+            "drone_est": deque(maxlen=100),
+            "user_gt": deque(maxlen=100),
+            "user_est": deque(maxlen=100),
         }
         self.timing_history = {
-            "drone_aoi_s": deque(maxlen=50),
-            "user_aoi_s": deque(maxlen=50),
-            "drone_delay_s": deque(maxlen=50),
-            "user_delay_s": deque(maxlen=50),
+            "drone_aoi_s": deque(maxlen=100),
+            "user_aoi_s": deque(maxlen=100),
+            "drone_delay_s": deque(maxlen=100),
+            "user_delay_s": deque(maxlen=100),
         }
         self.plot_style = {
             "drone": {"main": "#0B57D0", "light": "#8AB4F8"},
@@ -154,7 +154,7 @@ class TypeFly:
                 self.delay_markdown = gr.Markdown(value="### AoI / Delay\nWaiting for packets...")
 
             self.counter = gr.State(0)
-            self.timer = Timer(value=0.2)
+            self.timer = Timer(value=0.1)
             self.timer.tick(
                 fn=self.update_and_step,
                 inputs=[self.counter],
@@ -563,7 +563,7 @@ class TypeFly:
             f"- envelope_gap_m: {safety_context.envelope_gap_m:.3f} m",
             f"- uncertainty_scale_m: {safety_context.uncertainty_scale_m:.3f} m",
             f"- envelopes_overlap: {safety_context.envelopes_overlap}",
-        ])
+        ]
         return "\n".join(lines)
 
     def render_delay_markdown(self, snapshot):
