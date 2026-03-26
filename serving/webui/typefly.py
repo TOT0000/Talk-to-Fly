@@ -720,18 +720,7 @@ class TypeFly:
         if not xs or not ys:
             return (0.0, 5.0), (0.0, 5.0)
         pad = 0.5
-        xmin, xmax = min(xs) - pad, max(xs) + pad
-        ymin, ymax = min(ys) - pad, max(ys) + pad
-
-        # Keep XY data limits square so equal-aspect rendering does not compress
-        # the actual chart area inside a larger figure canvas.
-        x_span = max(xmax - xmin, 1e-6)
-        y_span = max(ymax - ymin, 1e-6)
-        target_span = max(x_span, y_span)
-        x_center = (xmin + xmax) * 0.5
-        y_center = (ymin + ymax) * 0.5
-        half = target_span * 0.5
-        return (x_center - half, x_center + half), (y_center - half, y_center + half)
+        return (min(xs) - pad, max(xs) + pad), (min(ys) - pad, max(ys) + pad)
 
     def _render_timing_plot(self, history_keys, title, ylabel):
         fig, ax = plt.subplots(figsize=(5, 4))
