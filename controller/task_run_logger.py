@@ -9,7 +9,13 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 from uuid import uuid4
 
-from openpyxl import Workbook, load_workbook
+try:
+    from openpyxl import Workbook, load_workbook
+    _OPENPYXL_AVAILABLE = True
+except Exception:
+    Workbook = None
+    load_workbook = None
+    _OPENPYXL_AVAILABLE = False
 
 
 RUNS_SHEET = "runs"
@@ -84,6 +90,8 @@ class TaskRunLogger:
         self.excel_path = excel_path
         self._lock = threading.Lock()
         self._active: Optional[_RunRecord] = None
+        self._enabled = _OPENPYXL_AVAILABLE
+        self._warned_disabled = False
         self._ensure_workbook()
 
     @staticmethod
@@ -105,6 +113,9 @@ class TaskRunLogger:
         return json.dumps(value, ensure_ascii=False)
 
     def _ensure_workbook(self):
+        if not self._enabled:
+            self._warn_once_disabled()
+            return
         os.makedirs(os.path.dirname(self.excel_path), exist_ok=True)
         if os.path.exists(self.excel_path):
             wb = load_workbook(self.excel_path)
@@ -125,6 +136,8 @@ class TaskRunLogger:
         wb.save(self.excel_path)
 
     def start_run(self, task_id: str, task_text: str, scenario_name: str, initial_snapshot: Dict):
+        if not self._enabled:
+            return
         with self._lock:
             if self._active is not None:
                 return
@@ -141,6 +154,8 @@ class TaskRunLogger:
             self._consume_snapshot(initial_snapshot, now=now)
 
     def update_plan_info(self, plan_text: str, generation_success: bool):
+        if not self._enabled:
+            return
         with self._lock:
             if self._active is None:
                 return
@@ -148,6 +163,8 @@ class TaskRunLogger:
             self._active.plan_generation_success = bool(generation_success)
 
     def update_execution_info(self, execution_success: bool, failure_reason: str = "", timeout_bool: bool = False, task_completed: bool = False):
+        if not self._enabled:
+            return
         with self._lock:
             if self._active is None:
                 return
@@ -158,6 +175,8 @@ class TaskRunLogger:
                 self._active.failure_reason = str(failure_reason)
 
     def consume_runtime_snapshot(self, snapshot: Dict):
+        if not self._enabled:
+            return
         with self._lock:
             if self._active is None:
                 return
@@ -228,6 +247,8 @@ class TaskRunLogger:
         return distance_3d <= threshold
 
     def _append_event(self, now: float, event_type: str, snapshot: Dict):
+        if not self._enabled:
+            return
         safety_context = snapshot.get("safety_context")
         details = {
             "scenario": self._active.scenario_name if self._active else "",
@@ -250,6 +271,8 @@ class TaskRunLogger:
         wb.save(self.excel_path)
 
     def end_run(self, run_status: str, failure_reason: str = ""):
+        if not self._enabled:
+            return
         with self._lock:
             if self._active is None:
                 return
@@ -332,3 +355,12 @@ class TaskRunLogger:
         ws = wb[RUNS_SHEET]
         ws.append([row[col] for col in RUN_COLUMNS])
         wb.save(self.excel_path)
+
+    def _warn_once_disabled(self):
+        if self._warned_disabled:
+            return
+        self._warned_disabled = True
+        print(
+            "[WARN] TaskRunLogger disabled because openpyxl is not installed. "
+            "Install dependency with: pip install openpyxl"
+        )

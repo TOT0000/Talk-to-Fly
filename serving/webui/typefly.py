@@ -405,11 +405,14 @@ class TypeFly:
         repositioned = self.llm_controller.apply_selected_scenario()
         self.active_scenario = normalized
         projection = self.llm_controller.get_scenario_projection()
+        runtime = self.llm_controller.get_scenario_runtime_status()
         return (
             f"**Active Scenario:** {normalized}  \n"
             f"- repositioned: {repositioned}  \n"
             f"- projected_level: {projection.get('projected_level')}  \n"
-            f"- projected_envelope_gap_m: {projection.get('projected_envelope_gap_m', 0.0):.3f}"
+            f"- projected_envelope_gap_m: {projection.get('projected_envelope_gap_m', 0.0):.3f}  \n"
+            f"- runtime_safety_level: {runtime.get('safety_level')}  \n"
+            f"- runtime_envelope_gap_m: {runtime.get('envelope_gap_m')}"
         )
 
     def process_message(self, message, history):

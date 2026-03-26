@@ -566,16 +566,21 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         tx, ty, tz = [float(v) for v in scenario.drone_position_3d]
         target_yaw = float(getattr(scenario, "drone_yaw_rad", 0.0))
         (x, y, z), yaw = self._get_state()
-        if not self._ensure_offboard_control(x, y, z, yaw):
-            return False
 
         # If scenario wants airborne state but current vehicle is on/near ground, lift first.
         if tz < -0.2 and z > -0.3:
             if not self.takeoff():
                 return False
+            (x, y, z), yaw = self._get_state()
+
+        if not self._ensure_offboard_control(x, y, z, yaw):
+            return False
 
         self._begin_motion_debug("scenario_reposition", math.dist((x, y, z), (tx, ty, tz)))
-        ok, _ = self._move_to_local_target(tx, ty, tz, yaw=target_yaw, timeout_s=12.0, pos_tol=0.35)
+        ok, _ = self._move_to_local_target(tx, ty, tz, yaw=target_yaw, timeout_s=15.0, pos_tol=0.35)
+        if not ok:
+            # Retry once with looser tolerance to handle simulator transient convergence issues.
+            ok, _ = self._move_to_local_target(tx, ty, tz, yaw=target_yaw, timeout_s=8.0, pos_tol=0.50)
         if not ok:
             print_debug(
                 f"[PX4-SCENARIO] reposition timeout target={self._format_position((tx, ty, tz))}"

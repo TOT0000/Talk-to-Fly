@@ -563,7 +563,15 @@ class LLMController():
         return scenario.name
 
     def apply_selected_scenario(self):
-        return self.scenario_manager.apply_to_runtime(self)
+        repositioned = self.scenario_manager.apply_to_runtime(self)
+        # Force one immediate safety refresh after scenario apply.
+        try:
+            now = time.time()
+            if hasattr(self.state_provider, "flush_due_packets"):
+                self.state_provider.flush_due_packets(now=now)
+        except Exception:
+            pass
+        return repositioned
 
     def get_scenario_projection(self):
         baseline_uncertainty = 0.85
@@ -572,6 +580,17 @@ class LLMController():
         if safety_context is not None:
             baseline_uncertainty = float(safety_context.uncertainty_scale_m)
         return self.scenario_manager.projected_assessment(baseline_uncertainty_scale_m=baseline_uncertainty)
+
+    def get_scenario_runtime_status(self):
+        snapshot = self.get_live_ui_snapshot()
+        safety_context = snapshot.get("safety_context") if snapshot else None
+        return {
+            "drone_gt": snapshot.get("drone_gt") if snapshot else None,
+            "user_gt": snapshot.get("user_gt") if snapshot else None,
+            "safety_level": None if safety_context is None else safety_context.safety_level,
+            "safety_score": None if safety_context is None else float(safety_context.safety_score),
+            "envelope_gap_m": None if safety_context is None else float(safety_context.envelope_gap_m),
+        }
 
     def _debug_log_safety_context(self, safety_context):
         if safety_context is None:

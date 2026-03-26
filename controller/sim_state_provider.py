@@ -83,6 +83,8 @@ class SimStateProvider(StateProvider):
         # TODO(px4-sim): user position is currently fixed/env-driven, not dynamic from simulator topics.
         self._fixed_user_position = fixed_user_position or self._load_user_position_from_env()
         self._user_position: Tuple[float, float, float] = self._fixed_user_position
+        self._user_position_locked: bool = False
+        self._user_position_lock_reason: str = ""
         self._last_position_ts: float = 0.0
         self._last_user_position_ts: float = 0.0
         self._ros_ready: bool = False
@@ -256,6 +258,9 @@ class SimStateProvider(StateProvider):
         return point_stamped_cls
 
     def _on_user_position(self, msg):
+        with self._lock:
+            if self._user_position_locked:
+                return
         # Support the configured single subscription type (Point or PointStamped).
         point = getattr(msg, "point", msg)
         x = float(getattr(point, "x", 0.0))
@@ -288,6 +293,14 @@ class SimStateProvider(StateProvider):
             self._callback((timestamp_now, float(x), float(y), float(z)))
         print_debug(
             f"[SIM-USER-POS] source={source} position=({float(x):.2f}, {float(y):.2f}, {float(z):.2f})"
+        )
+
+    def lock_user_position(self, locked: bool, reason: str = ""):
+        with self._lock:
+            self._user_position_locked = bool(locked)
+            self._user_position_lock_reason = str(reason)
+        print_debug(
+            f"[SIM-USER-POS] lock={self._user_position_locked} reason={self._user_position_lock_reason}"
         )
 
     def get_user_yaw(self) -> float:

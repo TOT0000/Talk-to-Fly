@@ -62,6 +62,9 @@ class ScenarioManager:
         provider = getattr(controller, "state_provider", None)
         drone = getattr(controller, "drone", None)
 
+        if provider is not None and hasattr(provider, "lock_user_position"):
+            provider.lock_user_position(True, reason=f"scenario:{scenario.name}")
+
         if provider is not None and hasattr(provider, "set_user_position"):
             provider.set_user_position(*scenario.user_position_3d, source=f"scenario:{scenario.name}")
 
