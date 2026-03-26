@@ -402,17 +402,25 @@ class TypeFly:
     def apply_scenario(self, scenario_name):
         normalized = normalize_scenario_name(scenario_name)
         self.llm_controller.set_active_scenario(normalized)
-        repositioned = self.llm_controller.apply_selected_scenario()
+        report = self.llm_controller.apply_selected_scenario()
         self.active_scenario = normalized
         projection = self.llm_controller.get_scenario_projection()
         runtime = self.llm_controller.get_scenario_runtime_status()
         return (
             f"**Active Scenario:** {normalized}  \n"
-            f"- repositioned: {repositioned}  \n"
+            f"- selected_mode: {runtime.get('selected_mode')}  \n"
+            f"- target_drone_gt: {runtime.get('target_drone_gt')}  \n"
+            f"- target_user_gt: {runtime.get('target_user_gt')}  \n"
+            f"- actual_initial_drone_gt: {runtime.get('actual_drone_gt')}  \n"
+            f"- actual_initial_user_gt: {runtime.get('actual_user_gt')}  \n"
             f"- projected_level: {projection.get('projected_level')}  \n"
             f"- projected_envelope_gap_m: {projection.get('projected_envelope_gap_m', 0.0):.3f}  \n"
-            f"- runtime_safety_level: {runtime.get('safety_level')}  \n"
-            f"- runtime_envelope_gap_m: {runtime.get('envelope_gap_m')}"
+            f"- actual_initial_safety_score: {runtime.get('safety_score')}  \n"
+            f"- actual_initial_safety_level: {runtime.get('safety_level')}  \n"
+            f"- actual_initial_envelope_gap_m: {runtime.get('envelope_gap_m')}  \n"
+            f"- actual_initial_uncertainty_scale_m: {runtime.get('uncertainty_scale_m')}  \n"
+            f"- repositioned: {None if report is None else report.repositioned}  \n"
+            f"- calibration_iterations: {None if report is None else report.calibration_iterations}"
         )
 
     def process_message(self, message, history):

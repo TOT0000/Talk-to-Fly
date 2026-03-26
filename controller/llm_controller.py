@@ -141,6 +141,7 @@ class LLMController():
         self.scenario_manager = ScenarioManager(default_name=os.getenv("TYPEFLY_SCENARIO", "SAFE"))
         self.task_run_logger = TaskRunLogger(excel_path=os.getenv("TYPEFLY_TASK_LOG_XLSX", "logs/task_runs.xlsx"))
         self._task_id_counter = 0
+        self.latest_scenario_report = None
 
         # PX4_SIM optional managed user-position publisher lifecycle
         self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
@@ -563,7 +564,8 @@ class LLMController():
         return scenario.name
 
     def apply_selected_scenario(self):
-        repositioned = self.scenario_manager.apply_to_runtime(self)
+        report = self.scenario_manager.apply_to_runtime(self)
+        self.latest_scenario_report = report
         # Force one immediate safety refresh after scenario apply.
         try:
             now = time.time()
@@ -571,7 +573,7 @@ class LLMController():
                 self.state_provider.flush_due_packets(now=now)
         except Exception:
             pass
-        return repositioned
+        return report
 
     def get_scenario_projection(self):
         baseline_uncertainty = 0.85
@@ -582,14 +584,19 @@ class LLMController():
         return self.scenario_manager.projected_assessment(baseline_uncertainty_scale_m=baseline_uncertainty)
 
     def get_scenario_runtime_status(self):
+        report = self.latest_scenario_report
         snapshot = self.get_live_ui_snapshot()
         safety_context = snapshot.get("safety_context") if snapshot else None
         return {
-            "drone_gt": snapshot.get("drone_gt") if snapshot else None,
-            "user_gt": snapshot.get("user_gt") if snapshot else None,
+            "selected_mode": None if report is None else report.selected_mode,
+            "target_drone_gt": None if report is None else report.target_drone_position_3d,
+            "target_user_gt": None if report is None else report.target_user_position_3d,
+            "actual_drone_gt": snapshot.get("drone_gt") if snapshot else None,
+            "actual_user_gt": snapshot.get("user_gt") if snapshot else None,
             "safety_level": None if safety_context is None else safety_context.safety_level,
             "safety_score": None if safety_context is None else float(safety_context.safety_score),
             "envelope_gap_m": None if safety_context is None else float(safety_context.envelope_gap_m),
+            "uncertainty_scale_m": None if safety_context is None else float(safety_context.uncertainty_scale_m),
         }
 
     def _debug_log_safety_context(self, safety_context):

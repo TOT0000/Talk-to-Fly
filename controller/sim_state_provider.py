@@ -281,8 +281,16 @@ class SimStateProvider(StateProvider):
     def set_user_position(self, x: float, y: float, z: float, source: str = "manual"):
         timestamp_now = time.time()
         with self._lock:
+            current_drone_position = np.asarray(self._cache.position, dtype=float)
+        with self._lock:
             self._user_position = (float(x), float(y), float(z))
             self._last_user_position_ts = timestamp_now
+        # Refresh both entities at same timestamp so safety freshness/AoI is consistent.
+        self._generate_and_queue_entity_state_packet(
+            "drone",
+            current_drone_position,
+            timestamp_now,
+        )
         self._generate_and_queue_entity_state_packet(
             "user",
             np.asarray((float(x), float(y), float(z)), dtype=float),
