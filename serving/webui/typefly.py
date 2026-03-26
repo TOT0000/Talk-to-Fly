@@ -23,13 +23,14 @@ from controller.utils import print_debug, print_t
 from controller.llm_wrapper import GPT4, LLAMA3
 from controller.abs.robot_wrapper import RobotType
 from controller.uwb_wrapper import UWBWrapper
+from controller.experiment_scenarios import SCENARIOS, normalize_scenario_name
 from gradio import Timer
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 class TypeFly:
-    def __init__(self, robot_type, use_http=False, enable_video=False, backend="uwb"):
+    def __init__(self, robot_type, use_http=False, enable_video=False, backend="uwb", initial_scenario="SAFE"):
         self.cache_folder = os.path.join(CURRENT_DIR, 'cache')
         if not os.path.exists(self.cache_folder):
             os.makedirs(self.cache_folder)
@@ -41,6 +42,7 @@ class TypeFly:
         controller_robot_type = RobotType.PX4_SIM if backend == "sim" else robot_type
         self.llm_controller = LLMController(controller_robot_type, self.virtual_queue, use_http, self.message_queue, enable_video=enable_video)
         self.llm_controller.register_position_callback(self.receive_position)
+        self.active_scenario = self.llm_controller.set_active_scenario(initial_scenario)
         
         self.system_stop = False
         self.ui_css = """
@@ -94,6 +96,15 @@ class TypeFly:
 
             # 浮動提示（頂端）
             self.message_markdown = gr.Markdown(value="", visible=False)
+
+            with gr.Row():
+                self.scenario_selector = gr.Dropdown(
+                    choices=list(SCENARIOS.keys()),
+                    value=self.active_scenario,
+                    label="Initial Scenario",
+                )
+                self.scenario_apply_btn = gr.Button("Apply Scenario")
+                self.scenario_status = gr.Markdown(value=f"**Active Scenario:** {self.active_scenario}")
 
             with gr.Row():
                 with gr.Column(scale=1):
@@ -166,6 +177,16 @@ class TypeFly:
                     self.anchor_count_submit_btn,
                     self.anchor_line_btn,
                 ],
+            )
+            self.scenario_apply_btn.click(
+                fn=self.apply_scenario,
+                inputs=[self.scenario_selector],
+                outputs=[self.scenario_status],
+            )
+            self.scenario_selector.change(
+                fn=self.preview_scenario,
+                inputs=[self.scenario_selector],
+                outputs=[self.scenario_status],
             )
 
             # floating message refresher
@@ -366,6 +387,41 @@ class TypeFly:
         else:
             print_t("Switch to gpt4")
             self.llm_controller.planner.set_model(GPT4)
+
+    def preview_scenario(self, scenario_name):
+        normalized = normalize_scenario_name(scenario_name)
+        self.llm_controller.set_active_scenario(normalized)
+        projection = self.llm_controller.get_scenario_projection()
+        return (
+            f"**Selected Scenario:** {normalized}  \n"
+            f"- projected_level: {projection.get('projected_level')}  \n"
+            f"- projected_score: {projection.get('projected_score', 0.0):.3f}  \n"
+            f"- projected_envelope_gap_m: {projection.get('projected_envelope_gap_m', 0.0):.3f}"
+        )
+
+    def apply_scenario(self, scenario_name):
+        normalized = normalize_scenario_name(scenario_name)
+        self.llm_controller.set_active_scenario(normalized)
+        report = self.llm_controller.apply_selected_scenario()
+        self.active_scenario = normalized
+        projection = self.llm_controller.get_scenario_projection()
+        runtime = self.llm_controller.get_scenario_runtime_status()
+        return (
+            f"**Active Scenario:** {normalized}  \n"
+            f"- selected_mode: {runtime.get('selected_mode')}  \n"
+            f"- target_drone_gt: {runtime.get('target_drone_gt')}  \n"
+            f"- target_user_gt: {runtime.get('target_user_gt')}  \n"
+            f"- actual_initial_drone_gt: {runtime.get('actual_drone_gt')}  \n"
+            f"- actual_initial_user_gt: {runtime.get('actual_user_gt')}  \n"
+            f"- projected_level: {projection.get('projected_level')}  \n"
+            f"- projected_envelope_gap_m: {projection.get('projected_envelope_gap_m', 0.0):.3f}  \n"
+            f"- actual_initial_safety_score: {runtime.get('safety_score')}  \n"
+            f"- actual_initial_safety_level: {runtime.get('safety_level')}  \n"
+            f"- actual_initial_envelope_gap_m: {runtime.get('envelope_gap_m')}  \n"
+            f"- actual_initial_uncertainty_scale_m: {runtime.get('uncertainty_scale_m')}  \n"
+            f"- repositioned: {None if report is None else report.repositioned}  \n"
+            f"- calibration_iterations: {None if report is None else report.calibration_iterations}"
+        )
 
     def process_message(self, message, history):
         print_t(f"[S] Receiving task description: {message}")
@@ -833,6 +889,7 @@ if __name__ == "__main__":
     parser.add_argument('--gear', action='store_true')
     parser.add_argument('--image', action='store_true')
     parser.add_argument('--px4_sim', action='store_true')
+    parser.add_argument('--scenario', type=str, default=os.getenv("TYPEFLY_SCENARIO", "SAFE"))
 
     args = parser.parse_args()
     robot_type = RobotType.TELLO
@@ -845,5 +902,11 @@ if __name__ == "__main__":
     elif args.gear:
         robot_type = RobotType.GEAR
 
-    typefly = TypeFly(robot_type, use_http=args.use_http, enable_video=args.image, backend=backend)
+    typefly = TypeFly(
+        robot_type,
+        use_http=args.use_http,
+        enable_video=args.image,
+        backend=backend,
+        initial_scenario=normalize_scenario_name(args.scenario),
+    )
     typefly.run()
