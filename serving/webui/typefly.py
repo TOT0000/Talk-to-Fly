@@ -406,25 +406,16 @@ class TypeFly:
         )
 
     def apply_scenario(self, scenario_name):
-        normalized = normalize_scenario_name(scenario_name)
-        self.llm_controller.set_active_scenario(normalized)
-        report = self.llm_controller.apply_selected_scenario()
-        self.active_scenario = normalized
-        projection = self.llm_controller.get_scenario_projection()
-        runtime = self.llm_controller.get_scenario_runtime_status()
+        normalized, report, runtime = self._apply_mode_and_collect(scenario_name)
         return (
             f"**Active Scenario:** {normalized}  \n"
             f"- selected_mode: {runtime.get('selected_mode')}  \n"
-            f"- target_drone_gt: {runtime.get('target_drone_gt')}  \n"
-            f"- target_user_gt: {runtime.get('target_user_gt')}  \n"
-            f"- actual_initial_drone_gt: {runtime.get('actual_drone_gt')}  \n"
-            f"- actual_initial_user_gt: {runtime.get('actual_user_gt')}  \n"
-            f"- projected_level: {projection.get('projected_level')}  \n"
-            f"- projected_envelope_gap_m: {projection.get('projected_envelope_gap_m', 0.0):.3f}  \n"
-            f"- actual_initial_safety_score: {runtime.get('safety_score')}  \n"
-            f"- actual_initial_safety_level: {runtime.get('safety_level')}  \n"
-            f"- actual_initial_envelope_gap_m: {runtime.get('envelope_gap_m')}  \n"
-            f"- actual_initial_uncertainty_scale_m: {runtime.get('uncertainty_scale_m')}  \n"
+            f"- actual_initial_drone_gt: {self._fmt_vec(runtime.get('actual_drone_gt'))}  \n"
+            f"- actual_initial_user_gt: {self._fmt_vec(runtime.get('actual_user_gt'))}  \n"
+            f"- initial_safety_score: {self._fmt_float(runtime.get('safety_score'))}  \n"
+            f"- initial_safety_level: {runtime.get('safety_level')}  \n"
+            f"- initial_envelope_gap_m: {self._fmt_float(runtime.get('envelope_gap_m'))}  \n"
+            f"- initial_uncertainty_scale_m: {self._fmt_float(runtime.get('uncertainty_scale_m'))}  \n"
             f"- repositioned: {None if report is None else report.repositioned}  \n"
             f"- calibration_iterations: {None if report is None else report.calibration_iterations}"
         )
@@ -432,18 +423,25 @@ class TypeFly:
     def run_scenario_audit(self):
         lines = ["**Scenario Initial-State Audit**"]
         for mode in ["SAFE", "CAUTION", "WARNING", "DANGER"]:
-            self.llm_controller.set_active_scenario(mode)
-            report = self.llm_controller.apply_selected_scenario()
+            _, report, _ = self._apply_mode_and_collect(mode)
             lines.append(
-                f"- {mode}: actual_drone_gt={report.actual_drone_gt_position_3d}, "
-                f"actual_user_gt={report.actual_user_gt_position_3d}, "
-                f"score={report.measured_initial_safety_score}, "
+                f"- {mode}: actual_drone_gt={self._fmt_vec(report.actual_drone_gt_position_3d)}, "
+                f"actual_user_gt={self._fmt_vec(report.actual_user_gt_position_3d)}, "
+                f"score={self._fmt_float(report.measured_initial_safety_score)}, "
                 f"level={report.measured_initial_safety_level}, "
-                f"gap={report.measured_initial_envelope_gap_m}, "
-                f"uncertainty={report.measured_initial_uncertainty_scale_m}"
+                f"gap={self._fmt_float(report.measured_initial_envelope_gap_m)}, "
+                f"uncertainty={self._fmt_float(report.measured_initial_uncertainty_scale_m)}"
             )
         self.active_scenario = self.llm_controller.get_active_scenario_name()
         return "\n".join(lines)
+
+    def _apply_mode_and_collect(self, scenario_name):
+        normalized = normalize_scenario_name(scenario_name)
+        self.llm_controller.set_active_scenario(normalized)
+        report = self.llm_controller.apply_selected_scenario()
+        runtime = self.llm_controller.get_scenario_runtime_status()
+        self.active_scenario = normalized
+        return normalized, report, runtime
 
     def process_message(self, message, history):
         print_t(f"[S] Receiving task description: {message}")
@@ -644,10 +642,8 @@ class TypeFly:
             initial_block = (
                 f"**Initial scenario (locked before task)**\n"
                 f"- selected_mode: {initial_state.get('selected_mode')}\n"
-                f"- target drone GT: {initial_state.get('target_drone_gt')}\n"
-                f"- target user GT: {initial_state.get('target_user_gt')}\n"
-                f"- actual initial drone GT: {initial_state.get('actual_drone_gt')}\n"
-                f"- actual initial user GT: {initial_state.get('actual_user_gt')}\n\n"
+                f"- actual initial drone GT: {self._fmt_vec(initial_state.get('actual_drone_gt'))}\n"
+                f"- actual initial user GT: {self._fmt_vec(initial_state.get('actual_user_gt'))}\n\n"
             )
         return (
             "### Coordinates\n"
@@ -662,7 +658,6 @@ class TypeFly:
 
     def render_safety_markdown(self, snapshot):
         safety_context = snapshot.get("safety_context") if snapshot else None
-        safety_state = snapshot.get("safety_state") if snapshot else None
         if safety_context is None:
             return "### Safety / Risk\nWaiting for safety state..."
         initial_state = self.llm_controller.get_initial_scenario_state()
@@ -673,31 +668,19 @@ class TypeFly:
             lines.extend([
                 "**Initial scenario (locked before task)**",
                 f"- selected_mode: {initial_state.get('selected_mode')}",
-                f"- initial safety_score: {initial_state.get('safety_score')}",
+                f"- initial safety_score: {self._fmt_float(initial_state.get('safety_score'))}",
                 f"- initial safety_level: {initial_state.get('safety_level')}",
-                f"- initial envelope_gap_m: {initial_state.get('envelope_gap_m')}",
-                f"- initial uncertainty_scale_m: {initial_state.get('uncertainty_scale_m')}",
+                f"- initial envelope_gap_m: {self._fmt_float(initial_state.get('envelope_gap_m'))}",
+                f"- initial uncertainty_scale_m: {self._fmt_float(initial_state.get('uncertainty_scale_m'))}",
             ])
         lines.extend([
             "**Current live state**",
             f"- safety_score: {safety_context.safety_score:.3f}",
             f"- safety_level: {safety_context.safety_level}",
-            f"- planning_bias: {safety_context.planning_bias}",
-            f"- preferred_standoff_m: {safety_context.preferred_standoff_m:.3f} m",
             f"- envelope_gap_m: {safety_context.envelope_gap_m:.3f} m",
             f"- uncertainty_scale_m: {safety_context.uncertainty_scale_m:.3f} m",
             f"- envelopes_overlap: {safety_context.envelopes_overlap}",
-            f"- reason_tags: {safety_context.reason_tags}",
         ])
-        if safety_state is not None:
-            lines.extend([
-                f"- drone envelope (blue dashed): center=({safety_state.drone_envelope.center_xy[0]:.2f}, {safety_state.drone_envelope.center_xy[1]:.2f}), "
-                f"major={safety_state.drone_envelope.major_axis_radius:.2f}, minor={safety_state.drone_envelope.minor_axis_radius:.2f}, "
-                f"orientation={safety_state.drone_envelope.orientation_deg:.1f}°",
-                f"- user envelope (red dashed): center=({safety_state.user_envelope.center_xy[0]:.2f}, {safety_state.user_envelope.center_xy[1]:.2f}), "
-                f"major={safety_state.user_envelope.major_axis_radius:.2f}, minor={safety_state.user_envelope.minor_axis_radius:.2f}, "
-                f"orientation={safety_state.user_envelope.orientation_deg:.1f}°",
-            ])
         return "\n".join(lines)
 
     def render_delay_markdown(self, snapshot):
