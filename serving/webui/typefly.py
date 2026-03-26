@@ -51,6 +51,23 @@ class TypeFly:
                 transition: none !important;
                 animation: none !important;
             }
+            .user-move-panel {
+                max-width: 360px;
+                margin: 0 auto;
+            }
+            .user-move-step {
+                margin-bottom: 8px !important;
+            }
+            .user-move-row {
+                justify-content: center;
+                gap: 8px;
+                margin: 2px 0 !important;
+            }
+            .user-move-btn button {
+                width: 96px !important;
+                min-width: 96px !important;
+                padding: 6px 8px !important;
+            }
             """
         self.ui = gr.Blocks(title="TypeFly")
         self.asyncio_loop = asyncio.get_event_loop()
@@ -112,20 +129,27 @@ class TypeFly:
             )
 
             with gr.Row():
-                self.user_move_step = gr.Slider(
-                    minimum=0.1,
-                    maximum=1.0,
-                    value=0.5,
-                    step=0.1,
-                    label="User Move Step (m)",
-                )
-            with gr.Row():
-                self.user_move_forward_btn = gr.Button("前")
-            with gr.Row():
-                self.user_move_left_btn = gr.Button("左")
-                self.user_move_right_btn = gr.Button("右")
-            with gr.Row():
-                self.user_move_backward_btn = gr.Button("後")
+                with gr.Column(scale=1, min_width=340, elem_classes="user-move-panel"):
+                    self.user_move_step = gr.Slider(
+                        minimum=0.1,
+                        maximum=1.0,
+                        value=0.5,
+                        step=0.1,
+                        label="User Move Step (m)",
+                        elem_classes="user-move-step",
+                    )
+                    with gr.Row(elem_classes="user-move-row"):
+                        gr.Markdown("")
+                        self.user_move_forward_btn = gr.Button("Forward", elem_classes="user-move-btn")
+                        gr.Markdown("")
+                    with gr.Row(elem_classes="user-move-row"):
+                        self.user_move_left_btn = gr.Button("Left", elem_classes="user-move-btn")
+                        gr.Markdown("")
+                        self.user_move_right_btn = gr.Button("Right", elem_classes="user-move-btn")
+                    with gr.Row(elem_classes="user-move-row"):
+                        gr.Markdown("")
+                        self.user_move_backward_btn = gr.Button("Backward", elem_classes="user-move-btn")
+                        gr.Markdown("")
 
             self.user_move_forward_btn.click(
                 fn=self.move_user_forward,
@@ -591,13 +615,10 @@ class TypeFly:
             )
         return (
             "### Coordinates\n"
-            f"{initial_block}"
-            f"**Drone (Blue)**\n"
-            f"- GT position: {self._fmt_vec(positions['drone_gt'])}\n"
-            f"- EST position: {self._fmt_vec(positions['drone_est'])}\n\n"
-            f"**User (Red)**\n"
-            f"- GT position: {self._fmt_vec(positions['user_gt'])}\n"
-            f"- EST position: {self._fmt_vec(positions['user_est'])}"
+            f"- Drone GT: {self._fmt_vec(positions['drone_gt'])}\n"
+            f"- Drone EST: {self._fmt_vec(positions['drone_est'])}\n"
+            f"- User GT: {self._fmt_vec(positions['user_gt'])}\n"
+            f"- User EST: {self._fmt_vec(positions['user_est'])}"
         )
 
     def render_safety_markdown(self, snapshot):
