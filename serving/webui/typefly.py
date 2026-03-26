@@ -194,24 +194,28 @@ class TypeFly:
             )
 
             # plots
-            with gr.Row():
+            with gr.Row(equal_height=True):
                 with gr.Column(scale=2):
                     self.xy_plot = gr.Image(
                         value=self.create_blank_plot("Drone / User Localization & Safety Envelope (XY view)", "X (m)", "Y (m)", xlim=(0, 12), ylim=(0, 12)),
-                        label="XY Plot"
+                        label="XY Plot",
+                        height=340,
                     )
                     self.x_plot = gr.Image(
                         value=self.create_sequence_plot("X in Sequence", "Index", "X (m)", xlim=(0, 1), ylim=(0, 12)),
-                        label="X in Sequence"
+                        label="X in Sequence",
+                        height=340,
                     )
                 with gr.Column(scale=2):
                     self.z_plot = gr.Image(
                         value=self.create_sequence_plot("Z in Sequence", "Index", "Z (m)", xlim=(0, 1), ylim=(0, 6)),
-                        label="Z in Sequence"
+                        label="Z in Sequence",
+                        height=340,
                     )
                     self.y_plot = gr.Image(
                         value=self.create_sequence_plot("Y in Sequence", "Index", "Y (m)", xlim=(0, 1), ylim=(0, 12)),
-                        label="Y in Sequence"
+                        label="Y in Sequence",
+                        height=340,
                     )
             with gr.Row():
                 self.aoi_plot = gr.Image(
@@ -533,7 +537,7 @@ class TypeFly:
         ax.set_title(title)
         ax.grid(True, which='both', linestyle='--', linewidth=0.5)
         buf = io.BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight')
+        fig.savefig(buf, format='png')
         buf.seek(0)
         plt.close(fig)
         return Image.open(buf)
@@ -751,7 +755,7 @@ class TypeFly:
         ax.legend(fontsize=8)
 
         buf = io.BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight')
+        fig.savefig(buf, format='png')
         buf.seek(0)
         plt.close(fig)
         return Image.open(buf)
@@ -866,7 +870,7 @@ class TypeFly:
         ax_xy.legend(dedup.values(), dedup.keys(), fontsize=8)
 
         buf_xy = io.BytesIO()
-        fig_xy.savefig(buf_xy, format='png', bbox_inches='tight')
+        fig_xy.savefig(buf_xy, format='png')
         buf_xy.seek(0)
         plt.close(fig_xy)
         img_xy = Image.open(buf_xy)
@@ -922,7 +926,7 @@ class TypeFly:
             ax.legend(fontsize=8)
 
             buf = io.BytesIO()
-            fig.savefig(buf, format='png', bbox_inches='tight')
+            fig.savefig(buf, format='png')
             buf.seek(0)
             plt.close(fig)
             imgs.append(Image.open(buf))
