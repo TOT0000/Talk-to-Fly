@@ -110,21 +110,6 @@ class TypeFly:
                 inputs=[self.scenario_selector],
                 outputs=[self.scenario_status],
             )
-            self.scenario_apply_btn.click(
-                fn=self.apply_scenario,
-                inputs=[self.scenario_selector],
-                outputs=[self.scenario_status],
-            )
-            self.scenario_selector.change(
-                fn=self.preview_scenario,
-                inputs=[self.scenario_selector],
-                outputs=[self.scenario_status],
-            )
-            self.scenario_audit_btn.click(
-                fn=self.run_scenario_audit,
-                inputs=[],
-                outputs=[self.scenario_status],
-            )
 
             # floating message refresher
             self.message_timer = Timer(value=0.5)
@@ -324,17 +309,6 @@ class TypeFly:
         else:
             print_t("Switch to gpt4")
             self.llm_controller.planner.set_model(GPT4)
-
-    def preview_scenario(self, scenario_name):
-        normalized = normalize_scenario_name(scenario_name)
-        self.llm_controller.set_active_scenario(normalized)
-        projection = self.llm_controller.get_scenario_projection()
-        return (
-            f"**Selected Scenario:** {normalized}  \n"
-            f"- projected_level: {projection.get('projected_level')}  \n"
-            f"- projected_score: {projection.get('projected_score', 0.0):.3f}  \n"
-            f"- projected_envelope_gap_m: {projection.get('projected_envelope_gap_m', 0.0):.3f}"
-        )
 
     def apply_scenario(self, scenario_name):
         normalized, report, runtime = self._apply_mode_and_collect(scenario_name)
@@ -589,7 +563,7 @@ class TypeFly:
             f"- envelope_gap_m: {safety_context.envelope_gap_m:.3f} m",
             f"- uncertainty_scale_m: {safety_context.uncertainty_scale_m:.3f} m",
             f"- envelopes_overlap: {safety_context.envelopes_overlap}",
-        ])
+        ]
         return "\n".join(lines)
 
     def render_delay_markdown(self, snapshot):
