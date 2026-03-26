@@ -128,46 +128,33 @@ class ScenarioManager:
     def _calibrate_user_offset(self, controller, scenario: ExperimentScenario) -> int:
         provider = controller.state_provider
         yaw = float(getattr(scenario, "drone_yaw_rad", 0.0))
-        target_rank = LEVEL_RANK.get(scenario.name, 2)
+        profile = {
+            # (target_gap_m, freshness_wait_s)
+            "SAFE": (2.8, 0.05),
+            "CAUTION": (1.2, 0.22),
+            "WARNING": (0.7, 0.52),
+            "DANGER": (-0.45, 0.65),
+        }.get(scenario.name, (1.2, 0.22))
 
-        base_gap = {
-            "SAFE": 2.8,
-            "CAUTION": 1.2,
-            "WARNING": 0.25,
-            "DANGER": -0.45,
-        }.get(scenario.name, 1.2)
+        snapshot = controller.get_live_ui_snapshot()
+        drone_gt = snapshot.get("drone_gt") if snapshot else None
+        safety_context = snapshot.get("safety_context") if snapshot else None
+        uncertainty = 0.85 if safety_context is None else float(safety_context.uncertainty_scale_m)
+        if drone_gt is None:
+            drone_gt = scenario.drone_position_3d
 
-        gap_adjust = 0.0
-        iterations = 0
-        for _ in range(8):
-            iterations += 1
-            snapshot = controller.get_live_ui_snapshot()
-            drone_gt = snapshot.get("drone_gt") if snapshot else None
-            safety_context = snapshot.get("safety_context") if snapshot else None
-            uncertainty = 0.85 if safety_context is None else float(safety_context.uncertainty_scale_m)
-            if drone_gt is None:
-                drone_gt = scenario.drone_position_3d
-
-            desired_gap = base_gap + gap_adjust
-            desired_distance = max(0.15, uncertainty + desired_gap)
-            ux = float(drone_gt[0] + desired_distance * math.cos(yaw))
-            uy = float(drone_gt[1] + desired_distance * math.sin(yaw))
-            uz = float(scenario.user_position_3d[2])
-            provider.set_user_position(ux, uy, uz, source=f"scenario:{scenario.name}:iter{iterations}")
-
-            self._wait_stable_cycles(controller, cycles=3)
-            measured = controller.get_live_ui_snapshot()
-            measured_ctx = measured.get("safety_context") if measured else None
-            if measured_ctx is None:
-                continue
-            measured_rank = LEVEL_RANK.get(str(measured_ctx.safety_level), 2)
-            if measured_rank == target_rank:
-                break
-            if measured_rank < target_rank:
-                gap_adjust += 0.35  # too risky -> increase separation
-            else:
-                gap_adjust -= 0.30  # too safe -> decrease separation
-        return iterations
+        target_gap_m, freshness_wait_s = profile
+        desired_distance = max(0.15, uncertainty + float(target_gap_m))
+        ux = float(drone_gt[0] + desired_distance * math.cos(yaw))
+        uy = float(drone_gt[1] + desired_distance * math.sin(yaw))
+        uz = float(scenario.user_position_3d[2])
+        provider.set_user_position(ux, uy, uz, source=f"scenario:{scenario.name}:profile")
+        self._wait_stable_cycles(controller, cycles=3)
+        if freshness_wait_s > 0:
+            time.sleep(float(freshness_wait_s))
+        # Refresh UI/provider cache after intentional AoI shaping.
+        self._wait_stable_cycles(controller, cycles=1, sleep_s=0.05)
+        return 1
 
     @staticmethod
     def _wait_stable_cycles(controller, cycles: int = 3, sleep_s: float = 0.12):
