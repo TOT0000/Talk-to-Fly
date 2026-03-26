@@ -543,28 +543,16 @@ class TypeFly:
         safety_context = snapshot.get("safety_context") if snapshot else None
         if safety_context is None:
             return "### Safety / Risk\nWaiting for safety state..."
-        initial_state = self.llm_controller.get_initial_scenario_state()
-        lines = [
-            "### Safety / Risk",
-        ]
-        if initial_state:
-            lines.extend([
-                "**Initial scenario (locked before task)**",
-                f"- selected_mode: {initial_state.get('selected_mode')}",
-                f"- initial safety_score: {self._fmt_float(initial_state.get('safety_score'))}",
-                f"- initial safety_level: {initial_state.get('safety_level')}",
-                f"- initial envelope_gap_m: {self._fmt_float(initial_state.get('envelope_gap_m'))}",
-                f"- initial uncertainty_scale_m: {self._fmt_float(initial_state.get('uncertainty_scale_m'))}",
-            ])
-        lines.extend([
-            "**Current live state**",
-            f"- safety_score: {safety_context.safety_score:.3f}",
-            f"- safety_level: {safety_context.safety_level}",
-            f"- envelope_gap_m: {safety_context.envelope_gap_m:.3f} m",
-            f"- uncertainty_scale_m: {safety_context.uncertainty_scale_m:.3f} m",
-            f"- envelopes_overlap: {safety_context.envelopes_overlap}",
-        ]
-        return "\n".join(lines)
+        return "\n".join(
+            [
+                "### Safety / Risk",
+                f"- safety_score: {safety_context.safety_score:.3f}",
+                f"- safety_level: {safety_context.safety_level}",
+                f"- envelope_gap_m: {safety_context.envelope_gap_m:.3f} m",
+                f"- uncertainty_scale_m: {safety_context.uncertainty_scale_m:.3f} m",
+                f"- envelopes_overlap: {safety_context.envelopes_overlap}",
+            ]
+        )
 
     def render_delay_markdown(self, snapshot):
         if not snapshot:
