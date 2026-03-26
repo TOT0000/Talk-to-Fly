@@ -637,11 +637,20 @@ class TypeFly:
         if not snapshot:
             return "### Coordinates\nWaiting for live data..."
         positions = self._extract_ui_positions(snapshot)
+        initial_state = self.llm_controller.get_initial_scenario_state()
         print_debug(
             "[UI-MARKDOWN] "
             f"drone_gt={positions['drone_gt']} drone_est={positions['drone_est']} "
             f"user_gt={positions['user_gt']} user_est={positions['user_est']}"
         )
+        initial_block = ""
+        if initial_state:
+            initial_block = (
+                f"**Initial scenario (locked before task)**\n"
+                f"- selected_mode: {initial_state.get('selected_mode')}\n"
+                f"- actual initial drone GT: {self._fmt_vec(initial_state.get('actual_drone_gt'))}\n"
+                f"- actual initial user GT: {self._fmt_vec(initial_state.get('actual_user_gt'))}\n\n"
+            )
         return (
             "### Coordinates\n"
             f"- Drone GT: {self._fmt_vec(positions['drone_gt'])}\n"
