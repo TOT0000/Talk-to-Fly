@@ -130,11 +130,11 @@ class ScenarioManager:
         yaw = float(getattr(scenario, "drone_yaw_rad", 0.0))
         profile = {
             # (target_gap_m, freshness_wait_s)
-            "SAFE": (2.8, 0.05),
-            "CAUTION": (1.2, 0.22),
-            "WARNING": (0.7, 0.52),
-            "DANGER": (-0.45, 0.65),
-        }.get(scenario.name, (1.2, 0.22))
+            "SAFE": (3.8, 0.05),
+            "CAUTION": (2.0, 0.20),
+            "WARNING": (0.85, 0.45),
+            "DANGER": (-0.05, 0.75),
+        }.get(scenario.name, (2.0, 0.20))
 
         snapshot = controller.get_live_ui_snapshot()
         drone_gt = snapshot.get("drone_gt") if snapshot else None

@@ -22,7 +22,6 @@ from controller.llm_controller import LLMController
 from controller.utils import print_debug, print_t
 from controller.llm_wrapper import GPT4, LLAMA3
 from controller.abs.robot_wrapper import RobotType
-from controller.uwb_wrapper import UWBWrapper
 from controller.experiment_scenarios import SCENARIOS, normalize_scenario_name
 from gradio import Timer
 
@@ -101,83 +100,15 @@ class TypeFly:
                 self.scenario_selector = gr.Dropdown(
                     choices=list(SCENARIOS.keys()),
                     value=self.active_scenario,
-                    label="Initial Scenario",
+                    label="Scenario Mode",
                 )
                 self.scenario_apply_btn = gr.Button("Apply Scenario")
-                self.scenario_audit_btn = gr.Button("Run 4-Mode Audit")
-                self.scenario_status = gr.Markdown(value=f"**Active Scenario:** {self.active_scenario}")
+                self.scenario_status = gr.Markdown(value="")
 
-            with gr.Row():
-                with gr.Column(scale=1):
-                    self.anchor_count_input = gr.Textbox(
-                        label="Anchor Count (Enter integer)",
-                        placeholder="e.g. 4",
-                        value=""
-                    )
-                    self.anchor_count_submit_btn = gr.Button("Submit Anchor Count")
-                    self.anchor_reset_btn = gr.Button("Reset Anchors")
-                with gr.Column(scale=3):
-                    self.anchor_line_input = gr.Textbox(
-                        label="Enter Anchor Position (format: i,x,y,z)",
-                        placeholder="e.g. 1,1.23,4.56,7.89",
-                        interactive=True,
-                        value=""
-                    )
-                    self.anchor_line_btn = gr.Button("Add/Update Anchor Position")
-                    self.anchor_history_display = gr.Textbox(
-                        label="Anchor Input History",
-                        lines=6,
-                        interactive=False,
-                        value=""
-                    )
-
-            # 綁定事件
-            self.anchor_count_submit_btn.click(
-                fn=self.set_anchor_count,
-                inputs=[self.anchor_count_input],
-                outputs=[
-                    self.anchor_count_input,
-                    self.anchor_line_input,
-                    self.anchor_history_display,
-                    self.anchor_count_submit_btn,
-                    self.anchor_line_btn,
-                ],
-            )
-            self.anchor_count_input.submit(
-                fn=self.set_anchor_count,
-                inputs=[self.anchor_count_input],
-                outputs=[
-                    self.anchor_count_input,
-                    self.anchor_line_input,
-                    self.anchor_history_display,
-                    self.anchor_count_submit_btn,
-                    self.anchor_line_btn,
-                ],
-            )
-
-            # anchor line submit
-            self.anchor_line_btn.click(
-                fn=self.input_anchor_line,
-                inputs=[self.anchor_line_input],
-                outputs=[self.anchor_line_input, self.anchor_history_display, self.anchor_line_btn]
-            )
-            self.anchor_line_input.submit(
-                fn=self.input_anchor_line,
-                inputs=[self.anchor_line_input],
-                outputs=[self.anchor_line_input, self.anchor_history_display, self.anchor_line_btn]
-            )
-
-            # reset 按鈕
-            self.anchor_reset_btn.click(
-                fn=self.reset_anchors,
-                inputs=[],
-                outputs=[
-                    self.anchor_count_input,
-                    self.anchor_line_input,
-                    self.anchor_history_display,
-                    self.anchor_count_submit_btn,
-                    self.anchor_line_btn,
-                ],
+            self.scenario_apply_btn.click(
+                fn=self.apply_scenario,
+                inputs=[self.scenario_selector],
+                outputs=[self.scenario_status],
             )
             self.scenario_apply_btn.click(
                 fn=self.apply_scenario,
@@ -408,32 +339,10 @@ class TypeFly:
     def apply_scenario(self, scenario_name):
         normalized, report, runtime = self._apply_mode_and_collect(scenario_name)
         return (
-            f"**Active Scenario:** {normalized}  \n"
-            f"- selected_mode: {runtime.get('selected_mode')}  \n"
-            f"- actual_initial_drone_gt: {self._fmt_vec(runtime.get('actual_drone_gt'))}  \n"
-            f"- actual_initial_user_gt: {self._fmt_vec(runtime.get('actual_user_gt'))}  \n"
-            f"- initial_safety_score: {self._fmt_float(runtime.get('safety_score'))}  \n"
-            f"- initial_safety_level: {runtime.get('safety_level')}  \n"
-            f"- initial_envelope_gap_m: {self._fmt_float(runtime.get('envelope_gap_m'))}  \n"
-            f"- initial_uncertainty_scale_m: {self._fmt_float(runtime.get('uncertainty_scale_m'))}  \n"
-            f"- repositioned: {None if report is None else report.repositioned}  \n"
-            f"- calibration_iterations: {None if report is None else report.calibration_iterations}"
+            f"Scenario `{normalized}` applied. "
+            f"Live safety: {runtime.get('safety_level')} "
+            f"(score={self._fmt_float(runtime.get('safety_score'))})"
         )
-
-    def run_scenario_audit(self):
-        lines = ["**Scenario Initial-State Audit**"]
-        for mode in ["SAFE", "CAUTION", "WARNING", "DANGER"]:
-            _, report, _ = self._apply_mode_and_collect(mode)
-            lines.append(
-                f"- {mode}: actual_drone_gt={self._fmt_vec(report.actual_drone_gt_position_3d)}, "
-                f"actual_user_gt={self._fmt_vec(report.actual_user_gt_position_3d)}, "
-                f"score={self._fmt_float(report.measured_initial_safety_score)}, "
-                f"level={report.measured_initial_safety_level}, "
-                f"gap={self._fmt_float(report.measured_initial_envelope_gap_m)}, "
-                f"uncertainty={self._fmt_float(report.measured_initial_uncertainty_scale_m)}"
-            )
-        self.active_scenario = self.llm_controller.get_active_scenario_name()
-        return "\n".join(lines)
 
     def _apply_mode_and_collect(self, scenario_name):
         normalized = normalize_scenario_name(scenario_name)
@@ -680,7 +589,7 @@ class TypeFly:
             f"- envelope_gap_m: {safety_context.envelope_gap_m:.3f} m",
             f"- uncertainty_scale_m: {safety_context.uncertainty_scale_m:.3f} m",
             f"- envelopes_overlap: {safety_context.envelopes_overlap}",
-        ])
+        ]
         return "\n".join(lines)
 
     def render_delay_markdown(self, snapshot):
