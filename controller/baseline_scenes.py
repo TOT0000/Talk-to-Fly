@@ -16,9 +16,11 @@ class TaskPoint:
 @dataclass(frozen=True)
 class StaticObstacle:
     id: str
-    x: float
-    y: float
-    radius_m: float
+    center_x: float
+    center_y: float
+    major_axis_m: float
+    minor_axis_m: float
+    orientation_deg: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,63 @@ class PathClearResult:
     blocking_entity: str
     corridor_min_gap: float
     blocking_entities: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class BaselineExpectation:
+    scene_id: str
+    target_task_point: str
+    expected_path_clear: bool
+    expected_blocking_entity: str
+    expected_motion_mode: str
+
+
+def _rotate(x: float, y: float, yaw_rad: float) -> Tuple[float, float]:
+    c = math.cos(yaw_rad)
+    s = math.sin(yaw_rad)
+    return (x * c) + (y * s), (-x * s) + (y * c)
+
+
+def _point_to_obstacle_local(x: float, y: float, obstacle: StaticObstacle) -> Tuple[float, float]:
+    dx = float(x - obstacle.center_x)
+    dy = float(y - obstacle.center_y)
+    return _rotate(dx, dy, math.radians(float(obstacle.orientation_deg)))
+
+
+def _segment_min_f_on_inflated_ellipse(
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+    obstacle: StaticObstacle,
+    corridor_half_width_m: float,
+    samples: int = 81,
+) -> float:
+    inflated_major = max(1e-4, float(obstacle.major_axis_m) + float(corridor_half_width_m))
+    inflated_minor = max(1e-4, float(obstacle.minor_axis_m) + float(corridor_half_width_m))
+    min_f = float("inf")
+    for i in range(max(3, samples)):
+        t = float(i / (samples - 1))
+        px = ax + (bx - ax) * t
+        py = ay + (by - ay) * t
+        lx, ly = _point_to_obstacle_local(px, py, obstacle)
+        f = ((lx / inflated_major) ** 2) + ((ly / inflated_minor) ** 2)
+        if f < min_f:
+            min_f = f
+    return min_f
+
+
+def _signed_gap_for_obstacle(
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+    obstacle: StaticObstacle,
+    corridor_half_width_m: float,
+) -> float:
+    min_f = _segment_min_f_on_inflated_ellipse(ax, ay, bx, by, obstacle, corridor_half_width_m)
+    min_axis = min(float(obstacle.major_axis_m), float(obstacle.minor_axis_m))
+    return (math.sqrt(min_f) - 1.0) * max(1e-4, min_axis)
 
 
 def _distance_point_to_segment(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
@@ -67,105 +126,121 @@ def evaluate_path_clear(
 
     blockers: List[Tuple[str, float]] = []
 
-    def _check_circle(label: str, cx: float, cy: float, radius: float):
-        center_distance = _distance_point_to_segment(cx, cy, ax, ay, bx, by)
-        signed_gap = center_distance - (radius + corridor_half_width_m)
-        blockers.append((label, signed_gap))
-
     if user_xy is not None:
-        _check_circle("user", float(user_xy[0]), float(user_xy[1]), float(user_radius_m))
+        center_distance = _distance_point_to_segment(float(user_xy[0]), float(user_xy[1]), ax, ay, bx, by)
+        blockers.append(("user", center_distance - (float(user_radius_m) + float(corridor_half_width_m))))
 
     for obstacle in obstacles:
-        _check_circle(obstacle.id, obstacle.x, obstacle.y, obstacle.radius_m)
+        blockers.append((obstacle.id, _signed_gap_for_obstacle(ax, ay, bx, by, obstacle, corridor_half_width_m)))
 
     if not blockers:
-        return PathClearResult(
-            path_clear=True,
-            blocking_entity="none",
-            corridor_min_gap=float("inf"),
-            blocking_entities=tuple(),
-        )
+        return PathClearResult(True, "none", float("inf"), tuple())
 
     blockers_sorted = sorted(blockers, key=lambda item: item[1])
     min_entity, min_gap = blockers_sorted[0]
     overlapping = tuple(entity for entity, gap in blockers_sorted if gap < 0.0)
+    return PathClearResult(min_gap >= 0.0, "none" if min_gap >= 0.0 else min_entity, float(min_gap), overlapping)
 
-    return PathClearResult(
-        path_clear=bool(min_gap >= 0.0),
-        blocking_entity="none" if min_gap >= 0.0 else min_entity,
-        corridor_min_gap=float(min_gap),
-        blocking_entities=overlapping,
-    )
+
+def build_scene_expectations(
+    scene: BaselineScene,
+    user_radius_m: float,
+    corridor_half_width_m: float,
+    high_risk: bool,
+) -> List[BaselineExpectation]:
+    drone_xy = (float(scene.drone_initial_pose[0]), float(scene.drone_initial_pose[1]))
+    user_xy = (float(scene.user_position[0]), float(scene.user_position[1]))
+    rows: List[BaselineExpectation] = []
+    for point in scene.task_points:
+        result = evaluate_path_clear(
+            drone_xy=drone_xy,
+            target_xy=(float(point.x), float(point.y)),
+            user_xy=user_xy,
+            user_radius_m=float(user_radius_m),
+            obstacles=list(scene.obstacles),
+            corridor_half_width_m=float(corridor_half_width_m),
+        )
+        direct = bool(result.path_clear and not high_risk)
+        rows.append(
+            BaselineExpectation(
+                scene_id=scene.id,
+                target_task_point=point.id,
+                expected_path_clear=bool(result.path_clear),
+                expected_blocking_entity=result.blocking_entity,
+                expected_motion_mode="direct_go_to" if direct else "staged_detour",
+            )
+        )
+    return rows
 
 
 BASELINE_SCENES: Dict[str, BaselineScene] = {
     "SCENE_1_CLEAR_PATH": BaselineScene(
         id="SCENE_1_CLEAR_PATH",
-        drone_initial_pose=(1.5, 1.5, -1.5),
+        drone_initial_pose=(1.2, 1.6, -1.5),
         drone_initial_yaw_rad=0.0,
-        user_position=(10.0, 10.0, 0.0),
+        user_position=(10.6, 10.4, 0.0),
         task_points=(
-            TaskPoint("A", 9.0, 1.7, -1.5),
-            TaskPoint("B", 8.8, 4.8, -1.5),
-            TaskPoint("C", 9.2, 8.2, -1.5),
+            TaskPoint("A", 9.8, 1.8, -1.5),
+            TaskPoint("B", 9.4, 4.8, -1.5),
+            TaskPoint("C", 9.0, 7.8, -1.5),
         ),
         obstacles=(
-            StaticObstacle("O1", 4.3, 7.8, 0.55),
-            StaticObstacle("O2", 6.8, 8.8, 0.50),
-            StaticObstacle("O3", 3.2, 10.2, 0.55),
+            StaticObstacle("O1", 4.2, 8.8, 0.95, 0.55, 25.0),
+            StaticObstacle("O2", 6.6, 9.2, 0.85, 0.50, -10.0),
+            StaticObstacle("O3", 2.6, 10.4, 0.75, 0.45, 40.0),
         ),
-        notes="Direct corridor from drone to A is clear; should allow direct go_to.",
+        notes="Rightward target lane is clear; designed to strongly favor direct_go_to to A.",
     ),
     "SCENE_2_OBSTACLE_BLOCKS": BaselineScene(
         id="SCENE_2_OBSTACLE_BLOCKS",
-        drone_initial_pose=(1.2, 2.0, -1.5),
-        drone_initial_yaw_rad=0.0,
-        user_position=(10.2, 8.8, 0.0),
+        drone_initial_pose=(1.3, 2.4, -1.5),
+        drone_initial_yaw_rad=0.05,
+        user_position=(10.0, 9.4, 0.0),
         task_points=(
-            TaskPoint("A", 9.3, 2.0, -1.5),
-            TaskPoint("B", 8.8, 5.2, -1.5),
-            TaskPoint("C", 9.0, 8.3, -1.5),
+            TaskPoint("A", 9.6, 2.4, -1.5),
+            TaskPoint("B", 8.8, 5.3, -1.5),
+            TaskPoint("C", 8.5, 8.1, -1.5),
         ),
         obstacles=(
-            StaticObstacle("O1", 5.1, 2.0, 0.95),
-            StaticObstacle("O2", 6.2, 5.7, 0.65),
-            StaticObstacle("O3", 2.2, 7.2, 0.55),
+            StaticObstacle("O1", 5.2, 2.5, 1.45, 0.82, 10.0),
+            StaticObstacle("O2", 6.6, 5.8, 1.00, 0.60, 35.0),
+            StaticObstacle("O3", 3.0, 7.4, 0.85, 0.52, -20.0),
         ),
-        notes="Obstacle O1 intersects direct corridor to A; side detour should be chosen.",
+        notes="Obstacle O1 cuts through the main corridor to A while side-space remains for detour.",
     ),
     "SCENE_3_USER_NEAR_CORRIDOR": BaselineScene(
         id="SCENE_3_USER_NEAR_CORRIDOR",
-        drone_initial_pose=(1.5, 3.0, -1.5),
-        drone_initial_yaw_rad=0.10,
-        user_position=(5.2, 3.1, 0.0),
+        drone_initial_pose=(1.4, 3.1, -1.5),
+        drone_initial_yaw_rad=0.0,
+        user_position=(5.2, 3.15, 0.0),
         task_points=(
-            TaskPoint("A", 9.0, 3.2, -1.5),
-            TaskPoint("B", 8.7, 6.4, -1.5),
-            TaskPoint("C", 9.2, 9.2, -1.5),
+            TaskPoint("A", 9.4, 3.2, -1.5),
+            TaskPoint("B", 8.8, 6.1, -1.5),
+            TaskPoint("C", 8.4, 8.9, -1.5),
         ),
         obstacles=(
-            StaticObstacle("O1", 6.4, 7.2, 0.60),
-            StaticObstacle("O2", 3.2, 8.4, 0.70),
-            StaticObstacle("O3", 10.2, 5.4, 0.55),
+            StaticObstacle("O1", 2.4, 8.6, 0.95, 0.55, 0.0),
+            StaticObstacle("O2", 6.8, 8.0, 1.05, 0.60, 20.0),
+            StaticObstacle("O3", 10.4, 5.8, 0.90, 0.50, -30.0),
         ),
-        notes="User safety envelope intersects corridor to A; detour should be used.",
+        notes="User envelope is the intended blocker for path to A; validates user-as-blocker behavior.",
     ),
     "SCENE_4_CORNER_CONSTRAINED": BaselineScene(
         id="SCENE_4_CORNER_CONSTRAINED",
         drone_initial_pose=(0.9, 10.8, -1.5),
-        drone_initial_yaw_rad=-0.35,
-        user_position=(2.4, 9.6, 0.0),
+        drone_initial_yaw_rad=-0.65,
+        user_position=(2.2, 9.6, 0.0),
         task_points=(
-            TaskPoint("A", 1.4, 8.1, -1.5),
-            TaskPoint("B", 3.0, 7.0, -1.5),
-            TaskPoint("C", 4.3, 6.2, -1.5),
+            TaskPoint("A", 1.6, 8.4, -1.5),
+            TaskPoint("B", 2.9, 7.3, -1.5),
+            TaskPoint("C", 4.1, 6.3, -1.5),
         ),
         obstacles=(
-            StaticObstacle("O1", 1.5, 9.5, 0.70),
-            StaticObstacle("O2", 2.8, 8.5, 0.75),
-            StaticObstacle("O3", 3.7, 9.7, 0.60),
+            StaticObstacle("O1", 1.6, 9.7, 1.05, 0.72, 15.0),
+            StaticObstacle("O2", 2.7, 8.6, 1.20, 0.75, 42.0),
+            StaticObstacle("O3", 3.8, 9.7, 0.95, 0.62, -35.0),
         ),
-        notes="Corner-constrained geometry to induce conservative behavior and staged detour.",
+        notes="Corner + compressed obstacles create constrained geometry that should prefer conservative detour.",
     ),
 }
 

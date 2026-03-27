@@ -28,6 +28,7 @@ from .task_run_logger import TaskRunLogger
 from .baseline_scenes import (
     BASELINE_SCENES,
     BaselineScene,
+    build_scene_expectations,
     evaluate_path_clear,
     get_task_point,
     normalize_baseline_scene_id,
@@ -792,6 +793,7 @@ class LLMController():
                 else str(self.latest_baseline_decision.get("target_task_point") or "A")
             ),
             "baseline_decision": self.latest_baseline_decision,
+            "baseline_expectation_summary": self.get_baseline_expectation_summary(safety_context),
         }
         if safety_state is not None and safety_context is not None:
             consistency_from_gap = bool(float(safety_state.envelope_gap_m) < 0.0)
@@ -883,16 +885,31 @@ class LLMController():
             plan = f"goto_estimated_xy({target.x:.3f},{target.y:.3f});"
             mode = "direct_go_to"
         else:
-            mx = (float(drone_pos[0]) + float(target.x)) / 2.0
-            my = (float(drone_pos[1]) + float(target.y)) / 2.0 + 1.2
-            plan = f"tcc(20);mf(0.8);goto_estimated_xy({mx:.3f},{my:.3f});tc(20);goto_estimated_xy({target.x:.3f},{target.y:.3f});"
+            side = "left"
+            if path_eval.blocking_entity.startswith("O"):
+                obstacle = next((o for o in scene.obstacles if o.id == path_eval.blocking_entity), None)
+                if obstacle is not None:
+                    side = "left" if float(obstacle.center_y) <= float(drone_pos[1]) else "right"
+            elif path_eval.blocking_entity == "user" and user_pos is not None:
+                side = "left" if float(user_pos[1]) <= float(drone_pos[1]) else "right"
+            if side == "left":
+                plan = "tcc(35);mf(0.9);tc(35);mf(0.9);d(0.2);"
+            else:
+                plan = "tc(35);mf(0.9);tcc(35);mf(0.9);d(0.2);"
             mode = "staged_detour"
         note = (
             f"target={target.id}; path_clear={path_eval.path_clear}; "
             f"blocked_by={path_eval.blocking_entity}; direct_go_to={direct_go_to}; chosen={mode}"
         )
         obstacle_summary = [
-            {"id": obs.id, "x": float(obs.x), "y": float(obs.y), "radius_m": float(obs.radius_m)}
+            {
+                "id": obs.id,
+                "center_x": float(obs.center_x),
+                "center_y": float(obs.center_y),
+                "major_axis_m": float(obs.major_axis_m),
+                "minor_axis_m": float(obs.minor_axis_m),
+                "orientation_deg": float(obs.orientation_deg),
+            }
             for obs in scene.obstacles
         ]
         task_points_summary = [
@@ -917,6 +934,27 @@ class LLMController():
             "decision_note": note,
             "plan": plan,
         }
+
+    def get_baseline_expectation_summary(self, safety_context=None):
+        scene = self.get_baseline_scene()
+        risk_high = bool(safety_context is not None and str(safety_context.safety_level) in {"WARNING", "DANGER"})
+        user_radius = max(0.45, float(getattr(safety_context, "uncertainty_scale_m", 1.0)) * 0.5)
+        expectations = build_scene_expectations(
+            scene=scene,
+            user_radius_m=user_radius,
+            corridor_half_width_m=0.35,
+            high_risk=risk_high,
+        )
+        return [
+            {
+                "scene_id": item.scene_id,
+                "target_task_point": item.target_task_point,
+                "expected_path_clear": item.expected_path_clear,
+                "expected_blocking_entity": item.expected_blocking_entity,
+                "expected_motion_mode": item.expected_motion_mode,
+            }
+            for item in expectations
+        ]
 
     def start_robot(self):
         print_t("[C] Connecting to robot...")

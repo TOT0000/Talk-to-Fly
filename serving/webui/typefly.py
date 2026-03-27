@@ -716,14 +716,35 @@ class TypeFly:
             blocking = path_eval.blocking_entity
             path_clear = str(bool(path_eval.path_clear))
             min_gap = f"{float(path_eval.corridor_min_gap):.3f}"
+        expectation_lines = []
+        for row in snapshot.get("baseline_expectation_summary") or []:
+            expectation_lines.append(
+                f"  - {row.get('target_task_point')}: clear={row.get('expected_path_clear')} "
+                f"blocker={row.get('expected_blocking_entity')} mode={row.get('expected_motion_mode')}"
+            )
+        expectation_block = "\n".join(expectation_lines) if expectation_lines else "  - (n/a)"
         return (
             "### Baseline Status\n"
             f"- current scene id: {None if scene is None else scene.id}\n"
             f"- current target task point: {target_task_point}\n"
             f"- path_clear: {path_clear}\n"
             f"- blocking entity: {blocking}\n"
-            f"- corridor_min_gap_m: {min_gap}"
+            f"- corridor_min_gap_m: {min_gap}\n"
+            f"- scene×target expected behavior:\n{expectation_block}"
         )
+
+    def _estimate_heading_from_history(self, primary_key: str, fallback_key: str = None):
+        history = list(self.position_history.get(primary_key, []))
+        if len(history) < 2 and fallback_key:
+            history = list(self.position_history.get(fallback_key, []))
+        if len(history) >= 2:
+            p0 = history[-2]
+            p1 = history[-1]
+            dx = float(p1[0] - p0[0])
+            dy = float(p1[1] - p0[1])
+            if abs(dx) > 1e-6 or abs(dy) > 1e-6:
+                return float(np.arctan2(dy, dx)), "trajectory_history"
+        return 0.0, "fallback_zero"
 
     def _axis_limits_from_snapshot(self, snapshot):
         positions = self._extract_ui_positions(snapshot)
@@ -796,7 +817,7 @@ class TypeFly:
         delay_img = self._render_timing_plot(("drone_delay_s", "user_delay_s"), "Delay Trend", "Delay (s)")
         return aoi_img, delay_img
 
-    def _render_xy_view(self, snapshot, xlim, ylim, title, figsize=(5, 4)):
+    def _render_xy_view(self, snapshot, xlim, ylim, title, figsize=(5, 4), show_legend=True):
         positions = self._extract_ui_positions(snapshot)
         fig_xy, ax_xy = plt.subplots(figsize=figsize)
 
@@ -866,18 +887,20 @@ class TypeFly:
                 ax_xy.scatter([point.x], [point.y], c="#2E7D32", marker="D", s=65, label="Task point")
                 ax_xy.text(point.x + 0.06, point.y + 0.06, f"{point.id}", fontsize=8, color="#1B5E20")
             for obstacle in baseline_scene.obstacles:
-                ax_xy.scatter([obstacle.x], [obstacle.y], c="#6D4C41", marker="s", s=70, label="Obstacle")
-                obstacle_circle = Circle(
-                    xy=(float(obstacle.x), float(obstacle.y)),
-                    radius=float(obstacle.radius_m),
+                ax_xy.scatter([obstacle.center_x], [obstacle.center_y], c="#6D4C41", marker="s", s=70, label="Obstacle")
+                obstacle_ellipse = Ellipse(
+                    xy=(float(obstacle.center_x), float(obstacle.center_y)),
+                    width=2.0 * float(obstacle.major_axis_m),
+                    height=2.0 * float(obstacle.minor_axis_m),
+                    angle=float(obstacle.orientation_deg),
                     edgecolor="#8D6E63",
                     facecolor="none",
                     linestyle=":",
                     linewidth=1.4,
-                    label="Obstacle safety radius",
+                    label="Obstacle envelope",
                 )
-                ax_xy.add_patch(obstacle_circle)
-                ax_xy.text(obstacle.x + 0.08, obstacle.y + 0.08, obstacle.id, fontsize=8, color="#4E342E")
+                ax_xy.add_patch(obstacle_ellipse)
+                ax_xy.text(obstacle.center_x + 0.08, obstacle.center_y + 0.08, obstacle.id, fontsize=8, color="#4E342E")
 
         drone_for_heading = positions.get("drone_gt") or positions.get("drone_est")
         yaw_rad = float(snapshot.get("drone_yaw_rad") or 0.0) if snapshot else 0.0
@@ -890,15 +913,27 @@ class TypeFly:
             ax_xy.arrow(hx, hy, dx, dy, head_width=0.16, head_length=0.18, color="#0B57D0", linewidth=1.6, length_includes_head=True, zorder=5)
             ax_xy.text(hx + dx + 0.05, hy + dy + 0.05, "Heading", fontsize=8, color="#0B57D0")
 
+        user_for_heading = positions.get("user_gt") or positions.get("user_est")
+        if user_for_heading is not None:
+            user_yaw_rad, user_heading_source = self._estimate_heading_from_history("user_gt", fallback_key="user_est")
+            ux = float(user_for_heading[0])
+            uy = float(user_for_heading[1])
+            arrow_len = 0.45
+            udx = arrow_len * float(np.cos(user_yaw_rad))
+            udy = arrow_len * float(np.sin(user_yaw_rad))
+            ax_xy.arrow(ux, uy, udx, udy, head_width=0.14, head_length=0.16, color="#C5221F", linewidth=1.4, length_includes_head=True, zorder=5)
+            ax_xy.text(ux + udx + 0.04, uy + udy + 0.04, f"User Heading ({user_heading_source})", fontsize=7, color="#C5221F")
+
         ax_xy.set_xlim(*xlim)
         ax_xy.set_ylim(*ylim)
         ax_xy.set_xlabel("X (m)")
         ax_xy.set_ylabel("Y (m)")
         ax_xy.set_title(title)
         ax_xy.grid(True, linestyle='--', linewidth=0.5)
-        handles, labels = ax_xy.get_legend_handles_labels()
-        dedup = dict(zip(labels, handles))
-        ax_xy.legend(dedup.values(), dedup.keys(), fontsize=8)
+        if show_legend:
+            handles, labels = ax_xy.get_legend_handles_labels()
+            dedup = dict(zip(labels, handles))
+            ax_xy.legend(dedup.values(), dedup.keys(), fontsize=8)
 
         buf_xy = io.BytesIO()
         fig_xy.savefig(buf_xy, format='png', bbox_inches='tight')
@@ -923,6 +958,7 @@ class TypeFly:
             ylim=(0.0, 12.0),
             title="Global XY Map (Fixed 0-12m Workspace)",
             figsize=(10, 8),
+            show_legend=True,
         )
         local_xy = self._render_xy_view(
             snapshot=snapshot,
@@ -930,6 +966,7 @@ class TypeFly:
             ylim=dynamic_ylim,
             title="Drone / User Localization & Safety Envelope (XY view)",
             figsize=(5, 4),
+            show_legend=False,
         )
 
         series_specs = [
