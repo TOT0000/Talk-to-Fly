@@ -184,32 +184,57 @@ class TypeFly:
 
             # plots
             with gr.Row():
-                with gr.Column(scale=2):
-                    self.xy_plot = gr.Image(
-                        value=self.create_blank_plot("Drone / User Localization & Safety Envelope (XY view)", "X (m)", "Y (m)", xlim=(0, 12), ylim=(0, 12)),
-                        label="XY Plot"
-                    )
-                    self.x_plot = gr.Image(
-                        value=self.create_sequence_plot("X in Sequence", "Index", "X (m)", xlim=(0, 1), ylim=(0, 12)),
-                        label="X in Sequence"
-                    )
-                with gr.Column(scale=2):
-                    self.z_plot = gr.Image(
-                        value=self.create_sequence_plot("Z in Sequence", "Index", "Z (m)", xlim=(0, 1), ylim=(0, 6)),
-                        label="Z in Sequence"
-                    )
-                    self.y_plot = gr.Image(
-                        value=self.create_sequence_plot("Y in Sequence", "Index", "Y (m)", xlim=(0, 1), ylim=(0, 12)),
-                        label="Y in Sequence"
-                    )
+                self.global_xy_plot = gr.Image(
+                    value=self.create_blank_plot(
+                        "Global XY Map (Fixed 0-12m Workspace)",
+                        "X (m)",
+                        "Y (m)",
+                        xlim=(0, 12),
+                        ylim=(0, 12),
+                        figsize=(10, 8),
+                    ),
+                    label="Global XY Map",
+                    height=640,
+                )
+            with gr.Row():
+                self.xy_plot = gr.Image(
+                    value=self.create_blank_plot(
+                        "Drone / User Localization & Safety Envelope (XY view)",
+                        "X (m)",
+                        "Y (m)",
+                        xlim=(0, 12),
+                        ylim=(0, 12),
+                        figsize=(5, 4),
+                    ),
+                    label="XY Plot",
+                    height=320,
+                )
+                self.z_plot = gr.Image(
+                    value=self.create_sequence_plot("Z in Sequence", "Index", "Z (m)", xlim=(0, 1), ylim=(0, 6)),
+                    label="Z in Sequence",
+                    height=320,
+                )
+            with gr.Row():
+                self.x_plot = gr.Image(
+                    value=self.create_sequence_plot("X in Sequence", "Index", "X (m)", xlim=(0, 1), ylim=(0, 12)),
+                    label="X in Sequence",
+                    height=320,
+                )
+                self.y_plot = gr.Image(
+                    value=self.create_sequence_plot("Y in Sequence", "Index", "Y (m)", xlim=(0, 1), ylim=(0, 12)),
+                    label="Y in Sequence",
+                    height=320,
+                )
             with gr.Row():
                 self.aoi_plot = gr.Image(
                     value=self.create_sequence_plot("AoI Trend", "Sample", "AoI (s)", xlim=(0, 1), ylim=(0, 1)),
-                    label="AoI Trend"
+                    label="AoI Trend",
+                    height=320,
                 )
                 self.delay_plot = gr.Image(
                     value=self.create_sequence_plot("Delay Trend", "Sample", "Delay (s)", xlim=(0, 1), ylim=(0, 1)),
-                    label="Delay Trend"
+                    label="Delay Trend",
+                    height=320,
                 )
             with gr.Row():
                 self.coordinate_markdown = gr.Markdown(value="### Coordinates\nWaiting for live data...")
@@ -222,6 +247,7 @@ class TypeFly:
                 fn=self.update_and_step,
                 inputs=[self.counter],
                 outputs=[
+                    self.global_xy_plot,
                     self.xy_plot,
                     self.x_plot,
                     self.y_plot,
@@ -511,8 +537,8 @@ class TypeFly:
         for file in os.listdir(self.cache_folder):
             os.remove(os.path.join(self.cache_folder, file))
 
-    def create_blank_plot(self, title="Empty Plot", xlabel="X", ylabel="Y", xlim=(0, 1), ylim=(0, 1)):
-        fig, ax = plt.subplots(figsize=(5, 4))
+    def create_blank_plot(self, title="Empty Plot", xlabel="X", ylabel="Y", xlim=(0, 1), ylim=(0, 1), figsize=(5, 4)):
+        fig, ax = plt.subplots(figsize=figsize)
         ax.set_xlim(*xlim)
         ax.set_ylim(*ylim)
         ax.set_xticks([round(xlim[0] + i * 0.5, 2) for i in range(int((xlim[1]-xlim[0])/0.5)+1)])
@@ -546,7 +572,7 @@ class TypeFly:
     def update_and_step(self, counter):
         snapshot = self.llm_controller.get_live_ui_snapshot()
         self._append_history(snapshot)
-        xy, x, y, z = self.update_position_plot(snapshot)
+        global_xy, xy, x, y, z = self.update_position_plot(snapshot)
         aoi_img, delay_img = self.update_timing_plots()
         coordinate_md = self.render_coordinate_markdown(snapshot)
         safety_md = self.render_safety_markdown(snapshot)
@@ -554,14 +580,14 @@ class TypeFly:
         counter += 1
         print_debug(
             "[UI-CALLBACK] "
-            "outputs=[xy_plot,x_plot,y_plot,z_plot,aoi_plot,delay_plot,counter,coordinate_markdown,safety_markdown,delay_markdown] "
+            "outputs=[global_xy_plot,xy_plot,x_plot,y_plot,z_plot,aoi_plot,delay_plot,counter,coordinate_markdown,safety_markdown,delay_markdown] "
             f"drone_gt={None if not snapshot else snapshot.get('drone_gt')} "
             f"drone_est={None if not snapshot else snapshot.get('drone_est')} "
             f"user_gt={None if not snapshot else snapshot.get('user_gt')} "
             f"user_est={None if not snapshot else snapshot.get('user_est')} "
             f"counter={counter}"
         )
-        return xy, x, y, z, aoi_img, delay_img, counter, coordinate_md, safety_md, delay_md
+        return global_xy, xy, x, y, z, aoi_img, delay_img, counter, coordinate_md, safety_md, delay_md
 
     def _fmt_vec(self, value):
         if value is None:
@@ -720,17 +746,9 @@ class TypeFly:
         delay_img = self._render_timing_plot(("drone_delay_s", "user_delay_s"), "Delay Trend", "Delay (s)")
         return aoi_img, delay_img
 
-    def update_position_plot(self, snapshot):
+    def _render_xy_view(self, snapshot, xlim, ylim, title, figsize=(5, 4)):
         positions = self._extract_ui_positions(snapshot)
-        xlim, ylim = self._axis_limits_from_snapshot(snapshot)
-        fig_xy, ax_xy = plt.subplots(figsize=(5, 4))
-        print_debug(
-            "[UI-PLOT] "
-            f"drone_gt={positions['drone_gt']} "
-            f"drone_est={positions['drone_est']} "
-            f"user_gt={positions['user_gt']} "
-            f"user_est={positions['user_est']}"
-        )
+        fig_xy, ax_xy = plt.subplots(figsize=figsize)
 
         point_specs = [
             ("drone_gt", "Drone GT", self.plot_style["drone"]["main"], "o", True),
@@ -796,7 +814,7 @@ class TypeFly:
         ax_xy.set_ylim(*ylim)
         ax_xy.set_xlabel("X (m)")
         ax_xy.set_ylabel("Y (m)")
-        ax_xy.set_title("Drone / User Localization & Safety Envelope (XY view)")
+        ax_xy.set_title(title)
         ax_xy.grid(True, linestyle='--', linewidth=0.5)
         handles, labels = ax_xy.get_legend_handles_labels()
         dedup = dict(zip(labels, handles))
@@ -806,7 +824,33 @@ class TypeFly:
         fig_xy.savefig(buf_xy, format='png', bbox_inches='tight')
         buf_xy.seek(0)
         plt.close(fig_xy)
-        img_xy = Image.open(buf_xy)
+        return Image.open(buf_xy)
+
+    def update_position_plot(self, snapshot):
+        positions = self._extract_ui_positions(snapshot)
+        dynamic_xlim, dynamic_ylim = self._axis_limits_from_snapshot(snapshot)
+        print_debug(
+            "[UI-PLOT] "
+            f"drone_gt={positions['drone_gt']} "
+            f"drone_est={positions['drone_est']} "
+            f"user_gt={positions['user_gt']} "
+            f"user_est={positions['user_est']}"
+        )
+
+        global_xy = self._render_xy_view(
+            snapshot=snapshot,
+            xlim=(0.0, 12.0),
+            ylim=(0.0, 12.0),
+            title="Global XY Map (Fixed 0-12m Workspace)",
+            figsize=(10, 8),
+        )
+        local_xy = self._render_xy_view(
+            snapshot=snapshot,
+            xlim=dynamic_xlim,
+            ylim=dynamic_ylim,
+            title="Drone / User Localization & Safety Envelope (XY view)",
+            figsize=(5, 4),
+        )
 
         series_specs = [
             ("drone_gt", "Drone GT", self.plot_style["drone"]["main"], "-"),
@@ -864,7 +908,7 @@ class TypeFly:
             plt.close(fig)
             imgs.append(Image.open(buf))
 
-        return img_xy, imgs[0], imgs[1], imgs[2]
+        return global_xy, local_xy, imgs[0], imgs[1], imgs[2]
 
 
 if __name__ == "__main__":
