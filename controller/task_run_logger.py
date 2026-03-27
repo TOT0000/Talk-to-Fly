@@ -22,6 +22,12 @@ RUNS_SHEET = "runs"
 EVENTS_SHEET = "events"
 
 RUN_COLUMNS = [
+    "timestamp", "scene_id", "target_task_point", "drone_initial_position", "user_position",
+    "obstacle_positions_summary", "task_point_positions_summary", "path_clear", "blocking_entity", "corridor_min_gap",
+    "chosen_motion_mode", "direct_go_to", "staged_detour", "recovery_first", "unknown",
+    "generated_control_plan", "task_start_time", "task_end_time", "task_success",
+    "min_clearance_during_run", "any_overlap", "any_collision", "notes", "debug_reason",
+    "decision_note",
     "run_id", "task_id", "task_text", "scenario_name", "start_timestamp", "end_timestamp", "task_completion_time_sec",
     "task_completed_bool", "timeout_bool", "collision_or_abort_bool", "run_status", "failure_reason",
     "plan_generation_success", "plan_execution_success", "actual_plan_text",
@@ -83,6 +89,7 @@ class _RunRecord:
     _level_trace: list = field(default_factory=list)
     _last_overlap_state: bool = False
     _last_collision_state: bool = False
+    baseline_info: Dict = field(default_factory=dict)
 
 
 class TaskRunLogger:
@@ -173,6 +180,14 @@ class TaskRunLogger:
             self._active.task_completed_bool = bool(task_completed)
             if failure_reason:
                 self._active.failure_reason = str(failure_reason)
+
+    def update_baseline_info(self, baseline_info: Dict):
+        if not self._enabled:
+            return
+        with self._lock:
+            if self._active is None:
+                return
+            self._active.baseline_info = dict(baseline_info or {})
 
     def consume_runtime_snapshot(self, snapshot: Dict):
         if not self._enabled:
@@ -292,6 +307,31 @@ class TaskRunLogger:
 
         collision_or_abort_bool = bool(active.any_collision_during_run or run_status in {"abort", "exception", "failed"})
         row = {
+            "timestamp": active.start_iso,
+            "scene_id": active.baseline_info.get("scene_id", active.scenario_name),
+            "target_task_point": active.baseline_info.get("target_task_point", ""),
+            "drone_initial_position": self._to_pos(initial.get("drone_gt") if initial else None),
+            "user_position": self._to_pos(initial.get("user_gt") if initial else None),
+            "obstacle_positions_summary": self._json_text(active.baseline_info.get("obstacle_positions_summary", "")),
+            "task_point_positions_summary": self._json_text(active.baseline_info.get("task_point_positions_summary", "")),
+            "path_clear": active.baseline_info.get("path_clear", ""),
+            "blocking_entity": active.baseline_info.get("blocking_entity", ""),
+            "corridor_min_gap": active.baseline_info.get("corridor_min_gap", ""),
+            "chosen_motion_mode": active.baseline_info.get("chosen_motion_mode", ""),
+            "direct_go_to": active.baseline_info.get("direct_go_to", ""),
+            "staged_detour": active.baseline_info.get("staged_detour", ""),
+            "recovery_first": active.baseline_info.get("recovery_first", ""),
+            "unknown": active.baseline_info.get("unknown", ""),
+            "generated_control_plan": active.baseline_info.get("generated_control_plan", active.actual_plan_text),
+            "task_start_time": active.start_iso,
+            "task_end_time": self._to_iso(end_ts),
+            "task_success": bool(active.task_completed_bool and active.plan_execution_success),
+            "min_clearance_during_run": "" if active.min_distance_xy_m_during_run is None else float(active.min_distance_xy_m_during_run),
+            "any_overlap": bool(active.any_envelope_overlap_during_run),
+            "any_collision": bool(active.any_collision_during_run),
+            "notes": active.baseline_info.get("decision_note", ""),
+            "debug_reason": active.failure_reason or "",
+            "decision_note": active.baseline_info.get("decision_note", ""),
             "run_id": active.run_id,
             "task_id": active.task_id,
             "task_text": active.task_text,

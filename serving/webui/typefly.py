@@ -7,10 +7,11 @@ from collections import deque
 import gradio as gr
 import argparse
 import pandas as pd
+import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # 非互動後端避免開啟GUI視窗
 import matplotlib.pyplot as plt
-from matplotlib.patches import Ellipse
+from matplotlib.patches import Ellipse, Circle
 from PIL import Image
 from threading import Thread
 from flask import Flask, Response, request
@@ -23,6 +24,7 @@ from controller.utils import print_debug, print_t
 from controller.llm_wrapper import GPT4, LLAMA3
 from controller.abs.robot_wrapper import RobotType
 from controller.experiment_scenarios import SCENARIOS, normalize_scenario_name
+from controller.baseline_scenes import BASELINE_SCENES, normalize_baseline_scene_id
 from gradio import Timer
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +44,9 @@ class TypeFly:
         self.llm_controller = LLMController(controller_robot_type, self.virtual_queue, use_http, self.message_queue, enable_video=enable_video)
         self.llm_controller.register_position_callback(self.receive_position)
         self.active_scenario = self.llm_controller.set_active_scenario(initial_scenario)
+        self.active_baseline_scene = self.llm_controller.set_baseline_scene(
+            normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_1_CLEAR_PATH"))
+        )
         
         self.system_stop = False
         self.ui_css = """
@@ -124,6 +129,12 @@ class TypeFly:
                         label="Scenario Mode",
                     )
                     self.scenario_apply_btn = gr.Button("Apply Scenario")
+                    self.baseline_scene_selector = gr.Dropdown(
+                        choices=list(BASELINE_SCENES.keys()),
+                        value=normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_1_CLEAR_PATH")),
+                        label="Baseline Scene",
+                    )
+                    self.baseline_scene_apply_btn = gr.Button("Apply Baseline Scene")
                 with gr.Column(scale=1, min_width=320, elem_classes="user-move-panel"):
                     self.user_move_step = gr.Slider(
                         minimum=0.1,
@@ -150,6 +161,11 @@ class TypeFly:
             self.scenario_apply_btn.click(
                 fn=self.apply_scenario,
                 inputs=[self.scenario_selector],
+                outputs=[self.scenario_status],
+            )
+            self.baseline_scene_apply_btn.click(
+                fn=self.apply_baseline_scene,
+                inputs=[self.baseline_scene_selector],
                 outputs=[self.scenario_status],
             )
 
@@ -240,6 +256,7 @@ class TypeFly:
                 self.coordinate_markdown = gr.Markdown(value="### Coordinates\nWaiting for live data...")
                 self.safety_markdown = gr.Markdown(value="### Safety / Risk\nWaiting for safety state...")
                 self.delay_markdown = gr.Markdown(value="### AoI / Delay\nWaiting for packets...")
+                self.baseline_markdown = gr.Markdown(value="### Baseline Status\nWaiting for baseline scene...")
 
             self.counter = gr.State(0)
             self.timer = Timer(value=0.08)
@@ -258,6 +275,7 @@ class TypeFly:
                     self.coordinate_markdown,
                     self.safety_markdown,
                     self.delay_markdown,
+                    self.baseline_markdown,
                 ]
             )
 
@@ -407,6 +425,11 @@ class TypeFly:
             f"(score={self._fmt_float(runtime.get('safety_score'))})"
         )
 
+    def apply_baseline_scene(self, scene_id):
+        normalized = self.llm_controller.set_baseline_scene(scene_id)
+        state = self.llm_controller.apply_baseline_scene()
+        return f"Baseline scene `{normalized}` applied. drone_init={self._fmt_vec(state.get('drone_initial_pose'))} user={self._fmt_vec(state.get('user_position'))}"
+
     def _apply_mode_and_collect(self, scenario_name):
         normalized = normalize_scenario_name(scenario_name)
         self.llm_controller.set_active_scenario(normalized)
@@ -485,6 +508,10 @@ class TypeFly:
         asyncio_thread.start()
 
         self.llm_controller.start_robot()
+        try:
+            self.llm_controller.apply_baseline_scene()
+        except Exception:
+            pass
 
         if self.llm_controller.enable_video:
             llmc_thread = Thread(target=self.llm_controller.capture_loop, args=(self.asyncio_loop,))
@@ -577,6 +604,7 @@ class TypeFly:
         coordinate_md = self.render_coordinate_markdown(snapshot)
         safety_md = self.render_safety_markdown(snapshot)
         delay_md = self.render_delay_markdown(snapshot)
+        baseline_md = self.render_baseline_markdown(snapshot)
         counter += 1
         print_debug(
             "[UI-CALLBACK] "
@@ -587,7 +615,7 @@ class TypeFly:
             f"user_est={None if not snapshot else snapshot.get('user_est')} "
             f"counter={counter}"
         )
-        return global_xy, xy, x, y, z, aoi_img, delay_img, counter, coordinate_md, safety_md, delay_md
+        return global_xy, xy, x, y, z, aoi_img, delay_img, counter, coordinate_md, safety_md, delay_md, baseline_md
 
     def _fmt_vec(self, value):
         if value is None:
@@ -673,6 +701,28 @@ class TypeFly:
             f"- drone observed uplink delay (blue): {self._fmt_float(snapshot.get('drone_delay_s'), ' s')}\n"
             f"- user AoI (red): {self._fmt_float(snapshot.get('user_aoi_s'), ' s')}\n"
             f"- user observed uplink delay (red): {self._fmt_float(snapshot.get('user_delay_s'), ' s')}"
+        )
+
+    def render_baseline_markdown(self, snapshot):
+        if not snapshot:
+            return "### Baseline Status\nWaiting for baseline state..."
+        scene = snapshot.get("baseline_scene")
+        path_eval = snapshot.get("path_eval")
+        target_task_point = snapshot.get("target_task_point") or "A"
+        blocking = "none"
+        path_clear = "n/a"
+        min_gap = "n/a"
+        if path_eval is not None:
+            blocking = path_eval.blocking_entity
+            path_clear = str(bool(path_eval.path_clear))
+            min_gap = f"{float(path_eval.corridor_min_gap):.3f}"
+        return (
+            "### Baseline Status\n"
+            f"- current scene id: {None if scene is None else scene.id}\n"
+            f"- current target task point: {target_task_point}\n"
+            f"- path_clear: {path_clear}\n"
+            f"- blocking entity: {blocking}\n"
+            f"- corridor_min_gap_m: {min_gap}"
         )
 
     def _axis_limits_from_snapshot(self, snapshot):
@@ -809,6 +859,36 @@ class TypeFly:
                     label=label,
                 )
                 ax_xy.add_patch(ellipse)
+
+        baseline_scene = snapshot.get("baseline_scene") if snapshot else None
+        if baseline_scene is not None:
+            for point in baseline_scene.task_points:
+                ax_xy.scatter([point.x], [point.y], c="#2E7D32", marker="D", s=65, label="Task point")
+                ax_xy.text(point.x + 0.06, point.y + 0.06, f"{point.id}", fontsize=8, color="#1B5E20")
+            for obstacle in baseline_scene.obstacles:
+                ax_xy.scatter([obstacle.x], [obstacle.y], c="#6D4C41", marker="s", s=70, label="Obstacle")
+                obstacle_circle = Circle(
+                    xy=(float(obstacle.x), float(obstacle.y)),
+                    radius=float(obstacle.radius_m),
+                    edgecolor="#8D6E63",
+                    facecolor="none",
+                    linestyle=":",
+                    linewidth=1.4,
+                    label="Obstacle safety radius",
+                )
+                ax_xy.add_patch(obstacle_circle)
+                ax_xy.text(obstacle.x + 0.08, obstacle.y + 0.08, obstacle.id, fontsize=8, color="#4E342E")
+
+        drone_for_heading = positions.get("drone_gt") or positions.get("drone_est")
+        yaw_rad = float(snapshot.get("drone_yaw_rad") or 0.0) if snapshot else 0.0
+        if drone_for_heading is not None:
+            hx = float(drone_for_heading[0])
+            hy = float(drone_for_heading[1])
+            arrow_len = 0.55
+            dx = arrow_len * float(np.cos(yaw_rad))
+            dy = arrow_len * float(np.sin(yaw_rad))
+            ax_xy.arrow(hx, hy, dx, dy, head_width=0.16, head_length=0.18, color="#0B57D0", linewidth=1.6, length_includes_head=True, zorder=5)
+            ax_xy.text(hx + dx + 0.05, hy + dy + 0.05, "Heading", fontsize=8, color="#0B57D0")
 
         ax_xy.set_xlim(*xlim)
         ax_xy.set_ylim(*ylim)
