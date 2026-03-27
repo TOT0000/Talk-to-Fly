@@ -25,6 +25,14 @@ from .state_provider import StateProvider, UwbStateProvider
 from .sim_state_provider import SimStateProvider
 from .scenario_manager import ScenarioManager
 from .task_run_logger import TaskRunLogger
+from .baseline_scenes import (
+    BASELINE_SCENES,
+    BaselineScene,
+    build_scene_expectations,
+    evaluate_path_clear,
+    get_task_point,
+    normalize_baseline_scene_id,
+)
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -143,6 +151,9 @@ class LLMController():
         self._task_id_counter = 0
         self.latest_scenario_report = None
         self.initial_scenario_state = None
+        self.baseline_scene_id = normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_1_CLEAR_PATH"))
+        self.baseline_scene_state = None
+        self.latest_baseline_decision = None
 
         # PX4_SIM optional managed user-position publisher lifecycle
         self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
@@ -505,13 +516,19 @@ class LLMController():
             self._debug_log_safety_context(safety_context)
             
             try:
-                self.current_plan = self.planner.plan(
-                    task_description=task_description,
-                    scene_description=scene_description,
-                    location_info=location_info,
-                    execution_history=self.execution_history,
-                    safety_context=safety_context,
-                )
+                baseline = self._build_baseline_control_plan(task_description=task_description, snapshot=initial_snapshot)
+                if baseline is not None:
+                    self.current_plan = baseline["plan"]
+                    self.latest_baseline_decision = baseline
+                    self.task_run_logger.update_baseline_info(baseline)
+                else:
+                    self.current_plan = self.planner.plan(
+                        task_description=task_description,
+                        scene_description=scene_description,
+                        location_info=location_info,
+                        execution_history=self.execution_history,
+                        safety_context=safety_context,
+                    )
                 self.latest_safety_context = safety_context
                 self.task_run_logger.update_plan_info(self.current_plan, generation_success=True)
 
@@ -559,6 +576,39 @@ class LLMController():
 
     def get_active_scenario_name(self) -> str:
         return self.scenario_manager.selected_name()
+
+    def get_baseline_scene(self) -> BaselineScene:
+        return BASELINE_SCENES[self.baseline_scene_id]
+
+    def set_baseline_scene(self, scene_id: str) -> str:
+        self.baseline_scene_id = normalize_baseline_scene_id(scene_id)
+        return self.baseline_scene_id
+
+    def apply_baseline_scene(self):
+        scene = self.get_baseline_scene()
+        provider = getattr(self, "state_provider", None)
+        drone = getattr(self, "drone", None)
+        repositioned = False
+        if drone is not None and hasattr(drone, "reposition_for_scenario"):
+            repositioned = bool(drone.reposition_for_scenario(scene))
+        if provider is not None and hasattr(provider, "lock_user_position"):
+            provider.lock_user_position(True, reason=f"baseline_scene:{scene.id}")
+        if provider is not None and hasattr(provider, "set_user_position"):
+            ux, uy, uz = scene.user_position
+            provider.set_user_position(float(ux), float(uy), float(uz), source=f"baseline_scene:{scene.id}")
+        self.baseline_scene_state = {
+            "scene_id": scene.id,
+            "drone_initial_pose": tuple(float(v) for v in scene.drone_initial_pose),
+            "drone_initial_yaw_rad": float(scene.drone_initial_yaw_rad),
+            "user_position": tuple(float(v) for v in scene.user_position),
+            "repositioned": repositioned,
+            "notes": scene.notes,
+            "captured_at": time.time(),
+        }
+        return self.baseline_scene_state
+
+    def get_baseline_scene_state(self):
+        return self.baseline_scene_state
 
     def set_active_scenario(self, scenario_name: str):
         scenario = self.scenario_manager.select(scenario_name)
@@ -732,6 +782,18 @@ class LLMController():
             "user_delay_s": user_delay_s,
             "safety_state": safety_state,
             "safety_context": safety_context,
+            "drone_yaw_rad": self._get_drone_yaw_rad(),
+            "baseline_scene_id": self.baseline_scene_id,
+            "baseline_scene": self.get_baseline_scene(),
+            "baseline_scene_state": self.baseline_scene_state,
+            "path_eval": self._compute_path_eval(self.get_baseline_scene(), drone_est or drone_gt, user_est or user_gt),
+            "target_task_point": (
+                "A"
+                if not isinstance(self.latest_baseline_decision, dict)
+                else str(self.latest_baseline_decision.get("target_task_point") or "A")
+            ),
+            "baseline_decision": self.latest_baseline_decision,
+            "baseline_expectation_summary": self.get_baseline_expectation_summary(safety_context),
         }
         if safety_state is not None and safety_context is not None:
             consistency_from_gap = bool(float(safety_state.envelope_gap_m) < 0.0)
@@ -754,6 +816,145 @@ class LLMController():
             f"user_gt={snapshot['user_gt']} user_est={snapshot['user_est']}"
         )
         return snapshot
+
+    def _get_drone_yaw_rad(self) -> float:
+        get_yaw = getattr(self.drone, "get_drone_yaw", None)
+        if callable(get_yaw):
+            try:
+                return float(get_yaw())
+            except Exception:
+                pass
+        if hasattr(self.drone, "rotation_accumulator"):
+            try:
+                return math.radians(float(self.drone.rotation_accumulator))
+            except Exception:
+                pass
+        return 0.0
+
+    def _extract_target_task_point(self, task_text: str) -> str:
+        text = (task_text or "").upper()
+        for token in ("A", "B", "C"):
+            if f" {token}" in f" {text}" or f"{token} " in text or f"TO {token}" in text:
+                return token
+        return "A"
+
+    def _compute_path_eval(self, scene: BaselineScene, drone_pos, user_pos):
+        target_id = "A"
+        if isinstance(self.latest_baseline_decision, dict):
+            target_id = str(self.latest_baseline_decision.get("target_task_point") or "A")
+        point = get_task_point(scene, target_id) or scene.task_points[0]
+        safety_context = None
+        snapshot = getattr(self, "latest_safety_context", None)
+        if snapshot is not None:
+            safety_context = snapshot
+        user_radius = 0.75
+        if safety_context is not None:
+            user_radius = max(0.45, float(safety_context.uncertainty_scale_m) * 0.5)
+        return evaluate_path_clear(
+            drone_xy=(float(drone_pos[0]), float(drone_pos[1])),
+            target_xy=(float(point.x), float(point.y)),
+            user_xy=(None if user_pos is None else (float(user_pos[0]), float(user_pos[1]))),
+            user_radius_m=user_radius,
+            obstacles=list(scene.obstacles),
+            corridor_half_width_m=0.35,
+        )
+
+    def _build_baseline_control_plan(self, task_description: str, snapshot):
+        scene = self.get_baseline_scene()
+        target_id = self._extract_target_task_point(task_description)
+        target = get_task_point(scene, target_id)
+        if target is None:
+            return None
+        drone_pos = snapshot.get("drone_est") or snapshot.get("drone_gt")
+        user_pos = snapshot.get("user_est") or snapshot.get("user_gt")
+        if drone_pos is None:
+            return None
+        safety_context = snapshot.get("safety_context")
+        user_radius = max(0.45, float(getattr(safety_context, "uncertainty_scale_m", 1.0)) * 0.5)
+        path_eval = evaluate_path_clear(
+            drone_xy=(float(drone_pos[0]), float(drone_pos[1])),
+            target_xy=(float(target.x), float(target.y)),
+            user_xy=(None if user_pos is None else (float(user_pos[0]), float(user_pos[1]))),
+            user_radius_m=user_radius,
+            obstacles=list(scene.obstacles),
+            corridor_half_width_m=0.35,
+        )
+        risk_high = bool(safety_context is not None and str(safety_context.safety_level) in {"WARNING", "DANGER"})
+        direct_go_to = bool(path_eval.path_clear and not risk_high)
+        if direct_go_to:
+            plan = f"goto_estimated_xy({target.x:.3f},{target.y:.3f});"
+            mode = "direct_go_to"
+        else:
+            side = "left"
+            if path_eval.blocking_entity.startswith("O"):
+                obstacle = next((o for o in scene.obstacles if o.id == path_eval.blocking_entity), None)
+                if obstacle is not None:
+                    side = "left" if float(obstacle.center_y) <= float(drone_pos[1]) else "right"
+            elif path_eval.blocking_entity == "user" and user_pos is not None:
+                side = "left" if float(user_pos[1]) <= float(drone_pos[1]) else "right"
+            if side == "left":
+                plan = "tcc(35);mf(0.9);tc(35);mf(0.9);d(0.2);"
+            else:
+                plan = "tc(35);mf(0.9);tcc(35);mf(0.9);d(0.2);"
+            mode = "staged_detour"
+        note = (
+            f"target={target.id}; path_clear={path_eval.path_clear}; "
+            f"blocked_by={path_eval.blocking_entity}; direct_go_to={direct_go_to}; chosen={mode}"
+        )
+        obstacle_summary = [
+            {
+                "id": obs.id,
+                "center_x": float(obs.center_x),
+                "center_y": float(obs.center_y),
+                "major_axis_m": float(obs.major_axis_m),
+                "minor_axis_m": float(obs.minor_axis_m),
+                "orientation_deg": float(obs.orientation_deg),
+            }
+            for obs in scene.obstacles
+        ]
+        task_points_summary = [
+            {"id": pt.id, "x": float(pt.x), "y": float(pt.y), "z": float(pt.z)}
+            for pt in scene.task_points
+        ]
+        return {
+            "scene_id": scene.id,
+            "target_task_point": target.id,
+            "task_text": task_description,
+            "obstacle_positions_summary": obstacle_summary,
+            "task_point_positions_summary": task_points_summary,
+            "path_clear": bool(path_eval.path_clear),
+            "blocking_entity": path_eval.blocking_entity,
+            "corridor_min_gap": float(path_eval.corridor_min_gap),
+            "chosen_motion_mode": mode,
+            "direct_go_to": direct_go_to,
+            "staged_detour": not direct_go_to,
+            "recovery_first": False,
+            "unknown": False,
+            "generated_control_plan": plan,
+            "decision_note": note,
+            "plan": plan,
+        }
+
+    def get_baseline_expectation_summary(self, safety_context=None):
+        scene = self.get_baseline_scene()
+        risk_high = bool(safety_context is not None and str(safety_context.safety_level) in {"WARNING", "DANGER"})
+        user_radius = max(0.45, float(getattr(safety_context, "uncertainty_scale_m", 1.0)) * 0.5)
+        expectations = build_scene_expectations(
+            scene=scene,
+            user_radius_m=user_radius,
+            corridor_half_width_m=0.35,
+            high_risk=risk_high,
+        )
+        return [
+            {
+                "scene_id": item.scene_id,
+                "target_task_point": item.target_task_point,
+                "expected_path_clear": item.expected_path_clear,
+                "expected_blocking_entity": item.expected_blocking_entity,
+                "expected_motion_mode": item.expected_motion_mode,
+            }
+            for item in expectations
+        ]
 
     def start_robot(self):
         print_t("[C] Connecting to robot...")
