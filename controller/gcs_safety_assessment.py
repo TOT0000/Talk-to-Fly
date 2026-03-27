@@ -41,6 +41,7 @@ class GcsSafetyAssessmentService:
             now - float(safety_state.drone_packet.state_generation_timestamp),
             now - float(safety_state.user_packet.state_generation_timestamp),
         )
+        # Uses centerline ray radii from both envelopes (same geometry as envelope_gap_m).
         geometric_uncertainty_m = (
             safety_state.drone_radius_along_user_direction
             + safety_state.user_radius_along_drone_direction
