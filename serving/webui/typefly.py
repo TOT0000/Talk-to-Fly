@@ -658,9 +658,9 @@ class TypeFly:
                 "### Safety / Risk",
                 f"- safety_score: {safety_context.safety_score:.3f}",
                 f"- safety_level: {safety_context.safety_level}",
-                f"- envelope_gap_m: {safety_context.envelope_gap_m:.3f} m",
+                f"- envelope_gap_m (centerline ray-gap): {safety_context.envelope_gap_m:.3f} m",
                 f"- uncertainty_scale_m: {safety_context.uncertainty_scale_m:.3f} m",
-                f"- envelopes_overlap: {safety_context.envelopes_overlap}",
+                f"- envelopes_overlap (centerline): {safety_context.envelopes_overlap}",
             ]
         )
 

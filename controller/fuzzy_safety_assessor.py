@@ -57,10 +57,13 @@ class FuzzySafetyAssessor:
 
     @staticmethod
     def gap_memberships(envelope_gap_m: float) -> Dict[str, float]:
+        # envelope_gap_m now follows centerline ray-gap semantics:
+        #   gap = d_centers - (rho_drone_to_user + rho_user_to_drone)
+        # where rho are ellipse ray radii along the line-of-centers.
         return {
-            "OVERLAP_OR_NEGATIVE": trapezoid(envelope_gap_m, -5.0, -0.10, 0.10, 0.60),
-            "TIGHT": triangle(envelope_gap_m, 0.15, 0.80, 1.60),
-            "CLEAR": trapezoid(envelope_gap_m, 1.10, 1.80, 12.0, 20.0),
+            "OVERLAP_OR_NEGATIVE": trapezoid(envelope_gap_m, -4.0, -0.25, 0.05, 0.35),
+            "TIGHT": triangle(envelope_gap_m, 0.05, 0.45, 1.10),
+            "CLEAR": trapezoid(envelope_gap_m, 0.75, 1.40, 10.0, 14.0),
         }
 
     @staticmethod

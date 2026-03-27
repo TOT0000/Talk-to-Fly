@@ -46,8 +46,9 @@ class GcsSafetyStateService:
         else:
             unit_vec = delta_xy / distance_xy
 
-        drone_radius = drone_envelope.directional_radius(unit_vec)
-        user_radius = user_envelope.directional_radius(-unit_vec)
+        # Centerline ray radii: shoot from each center along the line-of-centers.
+        drone_radius = drone_envelope.ray_radius(unit_vec)
+        user_radius = user_envelope.ray_radius(-unit_vec)
         envelope_gap_m = float(distance_xy - (drone_radius + user_radius))
 
         receive_candidates = [
@@ -69,6 +70,7 @@ class GcsSafetyStateService:
             drone_radius_along_user_direction=drone_radius,
             user_radius_along_drone_direction=user_radius,
             envelope_gap_m=envelope_gap_m,
+            # NOTE: this is centerline (line-of-centers) overlap, not full 2D ellipse intersection truth.
             envelopes_overlap=bool(envelope_gap_m < 0.0),
             latest_generation_timestamp=float(
                 max(drone_packet.state_generation_timestamp, user_packet.state_generation_timestamp)

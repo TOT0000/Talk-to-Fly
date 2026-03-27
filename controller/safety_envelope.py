@@ -27,15 +27,28 @@ class SafetyEnvelope2D:
     packet_receive_timestamp: Optional[float]
     sequence_number: int
 
-    def directional_radius(self, unit_vec_xy: np.ndarray) -> float:
-        direction = np.asarray(unit_vec_xy, dtype=float).reshape(2)
+    def ray_radius(self, direction_xy: np.ndarray) -> float:
+        """
+        Center-to-boundary distance along a ray direction for the ellipse
+        defined by (x-c)^T M_xy^{-1} (x-c) = chi2_val.
+
+        For unit direction u, the ray radius is:
+            rho(u) = sqrt(chi2_val / (u^T M_xy^{-1} u))
+        """
+        direction = np.asarray(direction_xy, dtype=float).reshape(2)
         norm = float(np.linalg.norm(direction))
         if norm < 1e-9:
             return 0.0
         u = direction / norm
-        value = float(u.T @ self.matrix_xy @ u)
-        value = max(value, 0.0)
-        return float(np.sqrt(self.chi2_val * value))
+        inv_matrix = np.linalg.pinv(self.matrix_xy)
+        quad = float(u.T @ inv_matrix @ u)
+        quad = max(quad, 1e-12)
+        return float(np.sqrt(self.chi2_val / quad))
+
+    def directional_radius(self, unit_vec_xy: np.ndarray) -> float:
+        # Backward-compatible alias; now returns the centerline ray radius
+        # instead of support/projection radius semantics.
+        return self.ray_radius(unit_vec_xy)
 
 
 def build_safety_envelope(packet: LocalizedStatePacket, chi2_val: float = CHI2_2_095) -> SafetyEnvelope2D:
