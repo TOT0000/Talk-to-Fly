@@ -5,6 +5,9 @@ from typing import Dict, List, Optional, Tuple
 import math
 import numpy as np
 
+from .anchor_provider import AnchorGeometryProvider
+from .localization_error_model import LocalizationErrorModel
+from .localization_estimator import IterativeLeastSquaresEstimator3D
 from .state_packet import LocalizedStatePacket
 from .safety_envelope import build_safety_envelope, SafetyEnvelope2D
 
@@ -33,6 +36,9 @@ class ObstacleEnvelopeState:
     gt_xy: Tuple[float, float]
     est_xy: Tuple[float, float]
     matrix_xy: Tuple[Tuple[float, float], Tuple[float, float]]
+    localization_packet: LocalizedStatePacket
+    localization_pipeline_function: str
+    envelope_builder_function: str
     envelope: SafetyEnvelope2D
 
 
@@ -119,43 +125,64 @@ def _signed_gap_segment_to_obstacle_envelope(
     return (math.sqrt(min_f) - 1.0) * min(inflated_major, inflated_minor)
 
 
-def _build_obstacle_packet(
-    obstacle: StaticObstacle,
-    est_xy: Tuple[float, float],
+_BASELINE_ANCHOR_PROVIDER = AnchorGeometryProvider()
+_BASELINE_LOCALIZATION_ERROR_MODEL = LocalizationErrorModel()
+_BASELINE_LOCALIZATION_ESTIMATOR = IterativeLeastSquaresEstimator3D()
+
+
+def _build_localized_packet_from_anchor_pipeline(
+    *,
+    entity_type: str,
+    entity_key: str,
+    gt_position_3d: np.ndarray,
     now_s: float,
     sequence_number: int,
+    rng: np.random.Generator,
 ) -> LocalizedStatePacket:
-    gt = np.asarray([float(obstacle.gt_x), float(obstacle.gt_y), 0.0], dtype=float)
-    est = np.asarray([float(est_xy[0]), float(est_xy[1]), 0.0], dtype=float)
-    matrix_xy = np.asarray(obstacle.cov_xy, dtype=float)
-
+    anchors = _BASELINE_ANCHOR_PROVIDER.get_anchor_positions()
+    true_ranges = np.linalg.norm(gt_position_3d[None, :] - anchors, axis=1)
+    range_result = _BASELINE_LOCALIZATION_ERROR_MODEL.perturb_ranges(
+        true_ranges,
+        rng,
+        entity_key=entity_key,
+        timestamp=now_s,
+    )
+    estimate = _BASELINE_LOCALIZATION_ESTIMATOR.estimate(
+        anchors=anchors,
+        measured_ranges=range_result.measured_ranges,
+        sigma_values=range_result.sigma_values,
+        bias_values=range_result.bias_values,
+        initial_guess=_BASELINE_ANCHOR_PROVIDER.get_workspace_center(),
+        true_ranges=true_ranges,
+    )
+    est_position = np.asarray(estimate.est_position_3d, dtype=float).copy()
     return LocalizedStatePacket(
-        entity_type="obstacle",
+        entity_type=str(entity_type),
         sequence_number=int(sequence_number),
         state_generation_timestamp=float(now_s),
-        gt_position_3d=gt,
-        estimated_position_3d=est,
-        localization_error_vector_3d=np.zeros(3, dtype=float),
-        range_residuals=np.zeros(1, dtype=float),
-        range_residual_rms_m=0.0,
-        normalized_range_residual_rms=0.0,
+        gt_position_3d=gt_position_3d.copy(),
+        estimated_position_3d=est_position,
+        localization_error_vector_3d=(est_position - gt_position_3d).copy(),
+        range_residuals=np.asarray(estimate.range_residuals, dtype=float).copy(),
+        range_residual_rms_m=float(estimate.range_residual_rms_m),
+        normalized_range_residual_rms=float(estimate.normalized_range_residual_rms),
         gt_user_position_3d=np.zeros(3, dtype=float),
         est_user_position_3d=None,
-        anchor_positions_3d=np.zeros((1, 3), dtype=float),
-        true_ranges=np.zeros(1, dtype=float),
-        measured_ranges=np.zeros(1, dtype=float),
-        bias_values=np.zeros(1, dtype=float),
-        sigma_values=np.zeros(1, dtype=float),
-        drift_values=np.zeros(1, dtype=float),
-        burst_values=np.zeros(1, dtype=float),
-        random_noise_values=np.zeros(1, dtype=float),
-        jacobian_h_3d=np.zeros((1, 3), dtype=float),
-        P_3d=np.eye(3, dtype=float),
-        b_3d=np.zeros(3, dtype=float),
-        M_3d=np.eye(3, dtype=float),
-        P_xy=np.eye(2, dtype=float),
-        b_xy=np.zeros(2, dtype=float),
-        M_xy=matrix_xy,
+        anchor_positions_3d=anchors.copy(),
+        true_ranges=range_result.true_ranges.copy(),
+        measured_ranges=range_result.measured_ranges.copy(),
+        bias_values=range_result.bias_values.copy(),
+        sigma_values=range_result.sigma_values.copy(),
+        drift_values=range_result.drift_values.copy(),
+        burst_values=range_result.burst_values.copy(),
+        random_noise_values=range_result.random_noise_values.copy(),
+        jacobian_h_3d=np.asarray(estimate.jacobian_h_3d, dtype=float).copy(),
+        P_3d=np.asarray(estimate.P_3d, dtype=float).copy(),
+        b_3d=np.asarray(estimate.b_3d, dtype=float).copy(),
+        M_3d=np.asarray(estimate.M_3d, dtype=float).copy(),
+        P_xy=np.asarray(estimate.P_xy, dtype=float).copy(),
+        b_xy=np.asarray(estimate.b_xy, dtype=float).copy(),
+        M_xy=np.asarray(estimate.M_xy, dtype=float).copy(),
         confidence_alpha=0.95,
         est_position_timestamp=float(now_s),
         received_packet_timestamp=float(now_s),
@@ -164,13 +191,22 @@ def _build_obstacle_packet(
 
 def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float) -> List[ObstacleEnvelopeState]:
     states: List[ObstacleEnvelopeState] = []
+    seed = int(abs(now_s) * 1_000_000) ^ 0x0B57AC1E
+    rng = np.random.default_rng(seed)
     for idx, obstacle in enumerate(scene.obstacles):
-        phase = float(now_s * 0.35 + idx * 0.9)
-        est_x = float(obstacle.gt_x + obstacle.est_bias_x_m + 0.01 * math.sin(phase))
-        est_y = float(obstacle.gt_y + obstacle.est_bias_y_m + 0.01 * math.cos(phase * 0.8))
-
-        packet = _build_obstacle_packet(obstacle, est_xy=(est_x, est_y), now_s=now_s, sequence_number=idx + 1)
+        _ = obstacle  # explicit: no obstacle-specific localization shortcut is used.
+        gt = np.asarray([float(obstacle.gt_x), float(obstacle.gt_y), 0.0], dtype=float)
+        packet = _build_localized_packet_from_anchor_pipeline(
+            entity_type="obstacle",
+            entity_key=f"obstacle:{obstacle.id}",
+            gt_position_3d=gt,
+            now_s=now_s,
+            sequence_number=idx + 1,
+            rng=rng,
+        )
         envelope = build_safety_envelope(packet)
+        est_x = float(packet.estimated_position_3d[0])
+        est_y = float(packet.estimated_position_3d[1])
 
         states.append(
             ObstacleEnvelopeState(
@@ -178,6 +214,9 @@ def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float) -> List
                 gt_xy=(float(obstacle.gt_x), float(obstacle.gt_y)),
                 est_xy=(est_x, est_y),
                 matrix_xy=((float(packet.M_xy[0][0]), float(packet.M_xy[0][1])), (float(packet.M_xy[1][0]), float(packet.M_xy[1][1]))),
+                localization_packet=packet,
+                localization_pipeline_function="IterativeLeastSquaresEstimator3D.estimate",
+                envelope_builder_function="build_safety_envelope",
                 envelope=envelope,
             )
         )
