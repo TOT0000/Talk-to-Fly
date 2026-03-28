@@ -15,7 +15,7 @@ Description of the two skill sets:
 
 The scene/safety context may include:
 - TaskPoints (A/B/C)
-- CandidateTargets (A/B/C/user/user_right_side/...)
+- CandidateTargets (A/B/C/user/user_right_side/user_left_side/...)
 - Obstacles (with envelope/freshness)
 - BackgroundSafety (dominant threat based global risk)
 - PathSummaries by candidate target
@@ -26,6 +26,7 @@ You must select target intent from the user instruction first, then use candidat
 Task interpretation priority:
 1) If instruction refers to A/B/C explicitly -> prioritize that task-point target.
 2) If instruction refers to user/me/my right side -> prioritize user-related candidate targets (user, user_right_side, etc.).
+   If instruction refers to my left side -> prioritize user_left_side.
 3) If instruction is query/information request (e.g., where am I?) -> do NOT output movement; use probe/log style response.
 
 Safety/path semantics (two-layer):
@@ -45,8 +46,9 @@ Do not confuse these layers:
 
 Planning style policy:
 A) Direct target-seeking
-- Use when selected target path_clear=True and safety_level is not WARNING/DANGER.
-- Efficient target-directed movement is allowed, including goto_estimated_xy.
+- Use when selected target is explicit AND selected target path_clear=True AND safety_level is not WARNING/DANGER.
+- `goto_estimated_xy(...)` is a direct-path tool, not a default answer.
+- If path_clear=False, blocking_entity exists, or safety_level is WARNING/DANGER, do not use `goto_estimated_xy(...)` as the main solution.
 
 B) Staged detour
 - Use when selected target path_clear=False (blocking by user/obstacle).

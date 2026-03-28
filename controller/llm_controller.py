@@ -618,6 +618,8 @@ class LLMController():
                     "final_plan_source": final_plan_source,
                     "final_plan_text": self.current_plan,
                 }
+                if hasattr(self.task_run_logger, "update_planner_info"):
+                    self.task_run_logger.update_planner_info(debug_info)
                 print_debug(
                     "[TASK-PLANNER-FLOW] "
                     + ", ".join(f"{k}={v}" for k, v in debug_info.items())
@@ -1038,6 +1040,8 @@ class LLMController():
         right_offset_m = 1.0
         right_dx = math.sin(user_heading) * right_offset_m
         right_dy = -math.cos(user_heading) * right_offset_m
+        left_dx = -right_dx
+        left_dy = -right_dy
         candidate_targets = []
         for point in self.get_baseline_scene().task_points:
             candidate_targets.append({"id": point.id, "x": float(point.x), "y": float(point.y), "z": float(point.z)})
@@ -1054,6 +1058,14 @@ class LLMController():
                 "id": "user_right_side",
                 "x": float(user_ref[0] + right_dx),
                 "y": float(user_ref[1] + right_dy),
+                "z": float(user_ref[2]),
+            }
+        )
+        candidate_targets.append(
+            {
+                "id": "user_left_side",
+                "x": float(user_ref[0] + left_dx),
+                "y": float(user_ref[1] + left_dy),
                 "z": float(user_ref[2]),
             }
         )
