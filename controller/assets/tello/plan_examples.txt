@@ -6,8 +6,8 @@ Obstacles: O1 est=(4.2,4.5) env=(major=0.72,minor=0.41,yaw=28,freshness=0.10), O
 BackgroundSafety: safety_score=0.86, safety_level=SAFE, planning_bias=efficiency, dominant_threat_type=obstacle, dominant_threat_id=O2, dominant_gap_m=2.50, dominant_uncertainty_scale_m=0.86, dominant_freshness_s=0.11
 PathSummaries: to A(path_clear=True,blocking_entity=none,corridor_min_gap=1.28), to user(path_clear=True,blocking_entity=none,corridor_min_gap=0.95)
 Task: [A] Go to A.
-Rationale: Task explicitly names A and path to A is clear, so direct target-seeking is appropriate.
-Response: mf(1.0);d(0.2);tu(8);mf(0.8);
+Rationale: Explicit target A with clear path -> direct completion-oriented script.
+Response: _1=p('Return drone estimated position [x,y,z].');_2=p('Return candidate target A estimated position [x,y,z].');_3=_2[0]-_1[0];_4=_2[1]-_1[1];_5=p('Estimate heading correction in degrees so drone forward aligns with vector [_3,_4].');tc(_5);_6=p('Estimate forward distance in meters to approach A with small stop margin.');mf(_6);d(0.2);_7=p('Return updated drone estimated position [x,y,z].');_8=_2[0]-_7[0];_9=_2[1]-_7[1];_10=p('Estimate small heading correction in degrees for vector [_8,_9].');tc(_10);_11=p('Estimate final short forward distance in meters to arrive near A and stop.');mf(_11);
 
 Example 2 (Task-point Direct):
 Scene:
@@ -17,8 +17,8 @@ Obstacles: O1 est=(4.0,4.9) env=(major=0.69,minor=0.40,yaw=25,freshness=0.09), O
 BackgroundSafety: safety_score=0.71, safety_level=CAUTION, planning_bias=balanced, dominant_threat_type=user, dominant_threat_id=user, dominant_gap_m=1.72, dominant_uncertainty_scale_m=0.96, dominant_freshness_s=0.12
 PathSummaries: to B(path_clear=True,blocking_entity=none,corridor_min_gap=0.90), to C(path_clear=True,blocking_entity=none,corridor_min_gap=1.12)
 Task: [A] Go to B and stop there.
-Rationale: Task-point target B is explicit and clear; controlled direct movement is valid.
-Response: tu(20);mf(0.9);d(0.2);tc(10);mf(0.7);
+Rationale: Explicit B and clear path -> complete direct script with correction before final stop.
+Response: _1=p('Return drone estimated position [x,y,z].');_2=p('Return candidate target B estimated position [x,y,z].');_3=_2[0]-_1[0];_4=_2[1]-_1[1];_5=p('Estimate heading correction in degrees to align with vector [_3,_4].');tu(_5);_6=p('Estimate forward distance in meters to reach about 80 percent of B distance.');mf(_6);d(0.2);_7=p('Return updated drone estimated position [x,y,z].');_8=_2[0]-_7[0];_9=_2[1]-_7[1];_10=p('Estimate residual heading correction in degrees for [_8,_9].');tu(_10);_11=p('Estimate remaining forward distance in meters to stop near B.');mf(_11);
 
 Example 3 (Task-point Detour):
 Scene:
@@ -28,8 +28,8 @@ Obstacles: O1 est=(5.9,3.4) env=(major=0.88,minor=0.50,yaw=19,freshness=0.14), O
 BackgroundSafety: safety_score=0.66, safety_level=CAUTION, planning_bias=balanced, dominant_threat_type=obstacle, dominant_threat_id=O1, dominant_gap_m=1.45, dominant_uncertainty_scale_m=1.05, dominant_freshness_s=0.14
 PathSummaries: to A(path_clear=False,blocking_entity=O1,corridor_min_gap=-0.22), to user(path_clear=True,blocking_entity=none,corridor_min_gap=0.64)
 Task: [A] Go to A.
-Rationale: Selected target A is blocked by O1, so staged detour is preferred over direct movement.
-Response: tc(30);mf(0.9);d(0.2);tu(35);mf(1.0);d(0.2);mf(0.6);
+Rationale: A is blocked by O1 -> detour stage first, then resume toward A until completion.
+Response: _1=p('Blocking entity for target A is O1. Suggest safer bypass direction: left or right.');?_1=='left'{ml(0.8)};?_1=='right'{mr(0.8)};_2=p('After lateral detour, estimate heading correction degrees toward A.');tc(_2);_3=p('Estimate forward distance in meters to pass blocker corridor.');mf(_3);d(0.2);_4=p('Return updated drone estimated position [x,y,z].');_5=p('Return candidate target A estimated position [x,y,z].');_6=_5[0]-_4[0];_7=_5[1]-_4[1];_8=p('Estimate heading correction in degrees for vector [_6,_7].');tc(_8);_9=p('Estimate remaining forward distance in meters to arrive near A.');mf(_9);
 
 Example 4 (Task-point Detour):
 Scene:
@@ -39,8 +39,8 @@ Obstacles: O1 est=(4.6,4.7) env=(major=0.71,minor=0.43,yaw=24,freshness=0.12), O
 BackgroundSafety: safety_score=0.62, safety_level=CAUTION, planning_bias=balanced, dominant_threat_type=user, dominant_threat_id=user, dominant_gap_m=1.34, dominant_uncertainty_scale_m=1.01, dominant_freshness_s=0.13
 PathSummaries: to B(path_clear=False,blocking_entity=user,corridor_min_gap=-0.18), to A(path_clear=True,blocking_entity=none,corridor_min_gap=0.77)
 Task: [A] Go to B.
-Rationale: User blocks corridor to B; planner should detour instead of forcing direct path.
-Response: tu(30);mf(0.8);d(0.2);tc(35);mf(1.0);d(0.2);ml(0.4);mf(0.5);
+Rationale: User blocks direct corridor to B -> detour around user then continue to B.
+Response: _1=p('Target B corridor blocked by user. Estimate safe lateral sidestep meters.');mr(_1);_2=p('Estimate heading correction degrees toward B after sidestep.');tu(_2);_3=p('Estimate forward distance in meters to clear user envelope.');mf(_3);d(0.2);_4=p('Return updated drone estimated position [x,y,z].');_5=p('Return candidate target B estimated position [x,y,z].');_6=_5[0]-_4[0];_7=_5[1]-_4[1];_8=p('Estimate heading correction degrees for vector [_6,_7].');tu(_8);_9=p('Estimate remaining forward distance in meters to reach B and stop.');mf(_9);
 
 Example 5 (High-risk task-point WARNING):
 Scene:
@@ -50,8 +50,8 @@ Obstacles: O1 est=(5.1,4.2) env=(major=0.86,minor=0.52,yaw=21,freshness=0.27), O
 BackgroundSafety: safety_score=0.42, safety_level=WARNING, planning_bias=safety, dominant_threat_type=obstacle, dominant_threat_id=O2, dominant_gap_m=0.92, dominant_uncertainty_scale_m=1.42, dominant_freshness_s=0.30
 PathSummaries: to C(path_clear=True,blocking_entity=none,corridor_min_gap=0.38), to user(path_clear=False,blocking_entity=O1,corridor_min_gap=-0.05)
 Task: [A] Go to C.
-Rationale: WARNING risk requires cautious progression, but the plan should still progress toward C.
-Response: d(0.3);tc(12);mf(0.4);d(0.3);tu(10);mf(0.4);d(0.2);mf(0.3);
+Rationale: WARNING requires cautious staged completion, not a single aggressive push.
+Response: d(0.3);_1=p('Return drone estimated position [x,y,z].');_2=p('Return candidate target C estimated position [x,y,z].');_3=_2[0]-_1[0];_4=_2[1]-_1[1];_5=p('Estimate conservative heading correction in degrees for [_3,_4].');tc(_5);_6=p('Estimate safe short forward distance in meters under WARNING level.');mf(_6);d(0.3);_7=p('Estimate second conservative heading correction toward C.');tc(_7);_8=p('Estimate second safe short forward distance in meters toward C.');mf(_8);d(0.2);_9=p('Estimate final short forward distance in meters to stop near C.');mf(_9);
 
 Example 6 (High-risk task-point DANGER):
 Scene:
@@ -61,10 +61,10 @@ Obstacles: O1 est=(5.7,3.3) env=(major=1.02,minor=0.61,yaw=17,freshness=0.34), O
 BackgroundSafety: safety_score=0.19, safety_level=DANGER, planning_bias=safety, dominant_threat_type=user, dominant_threat_id=user, dominant_gap_m=0.28, dominant_uncertainty_scale_m=1.78, dominant_freshness_s=0.35
 PathSummaries: to A(path_clear=True,blocking_entity=none,corridor_min_gap=0.31), to B(path_clear=False,blocking_entity=O1,corridor_min_gap=-0.16)
 Task: [A] Go to A.
-Rationale: DANGER needs recovery-first cautious movement, but still should move toward A step-by-step.
-Response: d(0.4);tu(15);mf(0.3);d(0.4);tc(15);mf(0.3);d(0.4);mf(0.2);
+Rationale: DANGER still targets completion, but with recovery-first micro-steps and repeated checks.
+Response: d(0.4);_1=p('Return candidate target A estimated position [x,y,z].');_2=p('Return drone estimated position [x,y,z].');_3=_1[0]-_2[0];_4=_1[1]-_2[1];_5=p('Estimate very small heading correction in degrees for [_3,_4].');tc(_5);_6=p('Estimate very short safe forward distance in meters in DANGER.');mf(_6);d(0.4);_7=p('Return updated drone estimated position [x,y,z].');_8=_1[0]-_7[0];_9=_1[1]-_7[1];_10=p('Estimate next very small heading correction in degrees for [_8,_9].');tc(_10);_11=p('Estimate next short safe forward distance in meters toward A.');mf(_11);d(0.3);_12=p('Estimate final tiny forward distance to settle near A.');mf(_12);
 
-Example 7 (User-relative):
+Example 7 (User-relative target):
 Scene:
 TaskPoints: A=(6.1,2.2,-1.5), B=(2.0,6.4,-1.5), C=(8.8,8.4,-1.5)
 CandidateTargets: A est=(6.1,2.2,-1.5), B est=(2.0,6.4,-1.5), C est=(8.8,8.4,-1.5), user est=(5.3,5.1,0.0), user_right_side est=(6.2,4.8,0.0), user_left_side est=(4.4,5.4,0.0)
@@ -72,19 +72,19 @@ Obstacles: O1 est=(4.8,4.5) env=(major=0.79,minor=0.47,yaw=20,freshness=0.16), O
 BackgroundSafety: safety_score=0.68, safety_level=CAUTION, planning_bias=balanced, dominant_threat_type=obstacle, dominant_threat_id=O1, dominant_gap_m=1.40, dominant_uncertainty_scale_m=1.09, dominant_freshness_s=0.16
 PathSummaries: to user(path_clear=True,blocking_entity=none,corridor_min_gap=0.62), to A(path_clear=False,blocking_entity=O1,corridor_min_gap=-0.08)
 Task: [A] Fly to the user.
-Rationale: User-referenced instruction should select user target, not default to task-point A/B/C.
-Response: mf(0.6);d(0.2);tu(12);mf(0.6);d(0.2);
+Rationale: Select user candidate target and complete approach with correction.
+Response: _1=p('Return drone estimated position [x,y,z].');_2=p('Return candidate target user estimated position [x,y,z].');_3=_2[0]-_1[0];_4=_2[1]-_1[1];_5=p('Estimate heading correction in degrees toward user using [_3,_4].');tu(_5);_6=p('Estimate forward distance in meters to reach near user with a safe margin.');mf(_6);d(0.2);_7=p('Return updated drone estimated position [x,y,z].');_8=_2[0]-_7[0];_9=_2[1]-_7[1];_10=p('Estimate final correction in degrees toward user.');tu(_10);_11=p('Estimate short final forward distance in meters to settle near user.');mf(_11);
 
-Example 8 (User-relative left side):
+Example 8 (User-relative side target):
 Scene:
 TaskPoints: A=(6.3,2.0,-1.5), B=(2.4,6.2,-1.5), C=(8.7,8.3,-1.5)
 CandidateTargets: A est=(6.3,2.0,-1.5), B est=(2.4,6.2,-1.5), C est=(8.7,8.3,-1.5), user est=(5.0,5.0,0.0), user_right_side est=(5.9,4.6,0.0), user_left_side est=(4.1,5.4,0.0)
 Obstacles: O1 est=(4.9,4.6) env=(major=0.82,minor=0.48,yaw=18,freshness=0.15), O2 est=(7.1,5.1) env=(major=0.71,minor=0.42,yaw=-10,freshness=0.14)
 BackgroundSafety: safety_score=0.60, safety_level=CAUTION, planning_bias=balanced, dominant_threat_type=user, dominant_threat_id=user, dominant_gap_m=1.24, dominant_uncertainty_scale_m=1.18, dominant_freshness_s=0.15
-PathSummaries: to user_left_side(path_clear=True,blocking_entity=none,corridor_min_gap=0.55), to user(path_clear=False,blocking_entity=O1,corridor_min_gap=-0.04)
-Task: [A] Fly to my left side.
-Rationale: Instruction explicitly asks for user-left-side target; planner should select user_left_side candidate.
-Response: tc(18);mf(0.6);d(0.2);tu(18);mf(0.6);
+PathSummaries: to user_right_side(path_clear=True,blocking_entity=none,corridor_min_gap=0.55), to user_left_side(path_clear=True,blocking_entity=none,corridor_min_gap=0.58), to user(path_clear=False,blocking_entity=O1,corridor_min_gap=-0.04)
+Task: [A] Come back to my right side.
+Rationale: Select user_right_side candidate and complete movement to that relative position.
+Response: _1=p('Return drone estimated position [x,y,z].');_2=p('Return candidate target user_right_side estimated position [x,y,z].');_3=_2[0]-_1[0];_4=_2[1]-_1[1];_5=p('Estimate heading correction in degrees toward user_right_side using [_3,_4].');tc(_5);_6=p('Estimate forward distance in meters to approach user_right_side.');mf(_6);d(0.2);_7=p('Return updated drone estimated position [x,y,z].');_8=_2[0]-_7[0];_9=_2[1]-_7[1];_10=p('Estimate residual correction in degrees toward user_right_side.');tc(_10);_11=p('Estimate final short forward distance in meters to settle at user_right_side.');mf(_11);
 
 Example 9 (Query):
 Scene:
@@ -94,8 +94,8 @@ Obstacles: O1 est=(4.5,4.4) env=(major=0.73,minor=0.43,yaw=22,freshness=0.11)
 BackgroundSafety: safety_score=0.77, safety_level=SAFE, planning_bias=efficiency, dominant_threat_type=obstacle, dominant_threat_id=O1, dominant_gap_m=2.10, dominant_uncertainty_scale_m=0.88, dominant_freshness_s=0.12
 PathSummaries: to A(path_clear=True,blocking_entity=none,corridor_min_gap=1.00), to user(path_clear=True,blocking_entity=none,corridor_min_gap=0.82)
 Task: [Q] Where am I?
-Rationale: This is an information query, not a navigation request; answer via probe/log without movement.
-Response: _1=p('What is the current estimated drone position?');lo(_1);
+Rationale: Query task -> non-movement answer with probe/log only.
+Response: _1=p('Return current estimated drone position [x,y,z] with two decimals.');lo(_1);
 
 Example 10 (Multi-step target-type switch):
 Scene:
@@ -105,5 +105,5 @@ Obstacles: O1 est=(4.8,4.5) env=(major=0.79,minor=0.47,yaw=20,freshness=0.16), O
 BackgroundSafety: safety_score=0.58, safety_level=CAUTION, planning_bias=balanced, dominant_threat_type=obstacle, dominant_threat_id=O1, dominant_gap_m=1.22, dominant_uncertainty_scale_m=1.16, dominant_freshness_s=0.16
 PathSummaries: to C(path_clear=False,blocking_entity=O2,corridor_min_gap=-0.12), to B(path_clear=True,blocking_entity=none,corridor_min_gap=0.67), to user_right_side(path_clear=True,blocking_entity=none,corridor_min_gap=0.51)
 Task: [A] Go to C, then B, then come back to my right side.
-Rationale: Multi-step task requires target-type switch: task-point C -> task-point B -> user-relative user_right_side.
-Response: tu(25);mf(0.9);tc(25);mf(1.0);d(0.2);tc(30);mf(0.9);tu(20);mf(0.9);d(0.2);mf(0.6);tc(18);mf(0.6);
+Rationale: Complete all sub-targets in order: detour to C, then direct to B, then user_right_side.
+Response: _1=p('For target C blocked by O2, suggest safer bypass side left or right.');?_1=='left'{ml(0.7)};?_1=='right'{mr(0.7)};_2=p('Estimate heading correction toward C after bypass setup.');tc(_2);_3=p('Estimate forward distance in meters to reach near C.');mf(_3);d(0.2);_4=p('Estimate heading correction from current position toward B.');tu(_4);_5=p('Estimate forward distance in meters to reach near B.');mf(_5);d(0.2);_6=p('Estimate heading correction from current position toward user_right_side.');tc(_6);_7=p('Estimate forward distance in meters to reach near user_right_side.');mf(_7);d(0.2);_8=p('Estimate final short forward distance in meters to settle at user_right_side.');mf(_8);
