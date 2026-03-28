@@ -563,8 +563,22 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             if not self._state_provider.wait_for_position(timeout_s=3.0):
                 return False
 
-        tx, ty, tz = [float(v) for v in scenario.drone_position_3d]
-        target_yaw = float(getattr(scenario, "drone_yaw_rad", 0.0))
+        # Support both ScenarioConfig fields (`drone_position_3d`, `drone_yaw_rad`)
+        # and BaselineScene fields (`drone_initial_pose`, `drone_initial_yaw_rad`).
+        target_pose = getattr(scenario, "drone_position_3d", None)
+        if target_pose is None:
+            target_pose = getattr(scenario, "drone_initial_pose", None)
+        if target_pose is None:
+            raise AttributeError(
+                "scenario must define drone_position_3d or drone_initial_pose"
+            )
+
+        target_yaw = getattr(scenario, "drone_yaw_rad", None)
+        if target_yaw is None:
+            target_yaw = getattr(scenario, "drone_initial_yaw_rad", 0.0)
+
+        tx, ty, tz = [float(v) for v in target_pose]
+        target_yaw = float(target_yaw)
         (x, y, z), yaw = self._get_state()
 
         # If scenario wants airborne state but current vehicle is on/near ground, lift first.

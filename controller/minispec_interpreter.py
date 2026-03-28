@@ -156,6 +156,33 @@ class Statement:
             raise Exception(f'Variable {var} is not defined')
         return self.env[var]
 
+    def _coerce_string_to_numeric_list(self, value: str) -> Optional[list]:
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            literal = ast.literal_eval(text)
+            if isinstance(literal, (list, tuple)) and len(literal) >= 2:
+                out = []
+                for item in literal:
+                    if isinstance(item, (int, float)):
+                        out.append(float(item))
+                    else:
+                        return None
+                return out
+        except Exception:
+            pass
+
+        nums = re.findall(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', text)
+        if len(nums) >= 2:
+            try:
+                return [float(nums[0]), float(nums[1])]
+            except Exception:
+                return None
+        return None
+
     def parse(self, code: str, exec: bool = False) -> bool:
         for c in code:
             match self.parsing_state:
@@ -437,6 +464,11 @@ class Statement:
                 base, idx_str = var.split('[', 1)
                 idx_str = idx_str[:-1]
                 base_val = self.get_env_value(base)
+                if isinstance(base_val, str):
+                    coerced = self._coerce_string_to_numeric_list(base_val)
+                    if coerced is not None:
+                        base_val = coerced
+                        self.env[base] = base_val
                 index_val = self.eval_expr(idx_str).value
                 return MiniSpecReturnValue(base_val[index_val], False)
             else:
