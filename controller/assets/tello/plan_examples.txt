@@ -7,7 +7,7 @@ BackgroundSafety: safety_score=0.86, safety_level=SAFE, planning_bias=efficiency
 PathSummaries: to A(path_clear=True,blocking_entity=none,corridor_min_gap=1.28), to user(path_clear=True,blocking_entity=none,corridor_min_gap=0.95)
 Task: [A] Go to A.
 Rationale: Task explicitly names A and path to A is clear, so direct target-seeking is appropriate.
-Response: _1=6.0;_2=2.0;ge(_1,_2);
+Response: mf(1.0);d(0.2);tu(8);mf(0.8);
 
 Example 2 (Task-point Direct):
 Scene:
@@ -18,7 +18,7 @@ BackgroundSafety: safety_score=0.71, safety_level=CAUTION, planning_bias=balance
 PathSummaries: to B(path_clear=True,blocking_entity=none,corridor_min_gap=0.90), to C(path_clear=True,blocking_entity=none,corridor_min_gap=1.12)
 Task: [A] Go to B and stop there.
 Rationale: Task-point target B is explicit and clear; controlled direct movement is valid.
-Response: _1=1.6;_2=6.5;ge(_1,_2);d(0.2);
+Response: tu(20);mf(0.9);d(0.2);tc(10);mf(0.7);
 
 Example 3 (Task-point Detour):
 Scene:
@@ -106,4 +106,4 @@ BackgroundSafety: safety_score=0.58, safety_level=CAUTION, planning_bias=balance
 PathSummaries: to C(path_clear=False,blocking_entity=O2,corridor_min_gap=-0.12), to B(path_clear=True,blocking_entity=none,corridor_min_gap=0.67), to user_right_side(path_clear=True,blocking_entity=none,corridor_min_gap=0.51)
 Task: [A] Go to C, then B, then come back to my right side.
 Rationale: Multi-step task requires target-type switch: task-point C -> task-point B -> user-relative user_right_side.
-Response: tu(25);mf(0.9);tc(25);mf(1.0);_1=8.8;_2=8.4;ge(_1,_2);_3=2.0;_4=6.4;ge(_3,_4);_5=6.2;_6=4.8;ge(_5,_6);
+Response: tu(25);mf(0.9);tc(25);mf(1.0);d(0.2);tc(30);mf(0.9);tu(20);mf(0.9);d(0.2);mf(0.6);tc(18);mf(0.6);

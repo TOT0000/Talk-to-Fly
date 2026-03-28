@@ -40,7 +40,6 @@ class SafetyContext:
         obstacles = self.obstacles_summary or []
         candidate_targets = self.candidate_targets_summary or []
         candidate_paths = self.candidate_path_summaries or []
-        path_summary = self.path_summary or {}
         task_points_block = (
             "\n".join(
                 f"- {row.get('id')}: x={float(row.get('x')):.2f}, y={float(row.get('y')):.2f}, z={float(row.get('z')):.2f}"
@@ -102,10 +101,5 @@ class SafetyContext:
             f"TaskPoints:\n{task_points_block}\n"
             f"CandidateTargets:\n{candidate_targets_block}\n"
             f"Obstacles:\n{obstacle_block}\n"
-            f"PathSummaries:\n{candidate_paths_block}\n"
-            f"current_target_path_summary: "
-            f"target={path_summary.get('target_task_point', 'n/a')}, "
-            f"path_clear={path_summary.get('path_clear', 'n/a')}, "
-            f"blocking_entity={path_summary.get('blocking_entity', 'n/a')}, "
-            f"corridor_min_gap_m={path_summary.get('corridor_min_gap', 'n/a')}"
+            f"PathSummaries:\n{candidate_paths_block}"
         )

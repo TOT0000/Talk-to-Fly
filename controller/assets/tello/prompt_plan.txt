@@ -47,8 +47,8 @@ Do not confuse these layers:
 Planning style policy:
 A) Direct target-seeking
 - Use when selected target is explicit AND selected target path_clear=True AND safety_level is not WARNING/DANGER.
-- `goto_estimated_xy(...)` is a direct-path tool, not a default answer.
-- If path_clear=False, blocking_entity exists, or safety_level is WARNING/DANGER, do not use `goto_estimated_xy(...)` as the main solution.
+- Use short staged low-level motions (`tu/tc/mf/mb/ml/mr/d`) to make direct progress.
+- If path_clear=False, blocking_entity exists, or safety_level is WARNING/DANGER, do not treat direct straight-line push as the main solution.
 
 B) Staged detour
 - Use when selected target path_clear=False (blocking by user/obstacle).
@@ -64,7 +64,7 @@ Not every task is navigation:
 
 Movement semantics are critical:
 - In PX4_SIM, `mf`, `mb`, `mr`, and `ml` are body-frame skills, not world x/y skills.
-- For world-frame estimated XY target navigation, use `goto_estimated_xy(target_x, target_y)`.
+- Build plans using low-level body-frame primitives and stepwise progression.
 
 Examples policy:
 - Examples demonstrate task-point navigation, user-related targets, query handling, and multi-step target-type switching under BackgroundSafety + PathSummaries.
