@@ -160,6 +160,9 @@ class LLMController():
         self.baseline_scene_id = normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_1_CLEAR_PATH"))
         self.baseline_scene_state = None
         self.latest_baseline_decision = None
+        self.planner_mode = str(os.getenv("TYPEFLY_PLANNER_MODE", "llm_baseline")).strip().lower()
+        if self.planner_mode not in {"llm_baseline", "rule_baseline"}:
+            self.planner_mode = "llm_baseline"
         self._obstacle_delay_models = {}
         self._obstacle_sequence_numbers = {}
         self._latest_received_obstacle_states = {}
@@ -529,9 +532,17 @@ class LLMController():
             try:
                 baseline = self._build_baseline_control_plan(task_description=task_description, snapshot=initial_snapshot)
                 if baseline is not None:
-                    self.current_plan = baseline["plan"]
                     self.latest_baseline_decision = baseline
                     self.task_run_logger.update_baseline_info(baseline)
+
+                llm_called = False
+                final_plan_source = "llm"
+                baseline_shortcut_triggered = False
+                if self.planner_mode == "rule_baseline" and baseline is not None:
+                    self.current_plan = baseline["plan"]
+                    llm_called = False
+                    final_plan_source = "baseline_rule"
+                    baseline_shortcut_triggered = True
                 else:
                     self.current_plan = self.planner.plan(
                         task_description=task_description,
@@ -540,8 +551,26 @@ class LLMController():
                         execution_history=self.execution_history,
                         safety_context=safety_context,
                     )
+                    llm_called = True
+                    final_plan_source = "llm"
                 self.latest_safety_context = safety_context
                 self.task_run_logger.update_plan_info(self.current_plan, generation_success=True)
+                debug_info = {
+                    "task_text": task_description,
+                    "planner_mode": self.planner_mode,
+                    "llm_called": llm_called,
+                    "llm_function": "LLMPlanner.plan" if llm_called else "None",
+                    "baseline_shortcut_triggered": baseline_shortcut_triggered,
+                    "selected_target": None if baseline is None else baseline.get("target_task_point"),
+                    "path_clear": None if baseline is None else baseline.get("path_clear"),
+                    "blocking_entity": None if baseline is None else baseline.get("blocking_entity"),
+                    "final_plan_source": final_plan_source,
+                    "final_plan_text": self.current_plan,
+                }
+                print_debug(
+                    "[TASK-PLANNER-FLOW] "
+                    + ", ".join(f"{k}={v}" for k, v in debug_info.items())
+                )
 
                 self.append_message(f'[Plan]: \\\\')
                 self.execution_time = time.time()
