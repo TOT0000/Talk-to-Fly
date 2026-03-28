@@ -22,16 +22,20 @@ class LLMPlanner():
             type_folder_name = 'gear'
 
         # read prompt from txt
-        with open(os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/prompt_plan.txt"), "r") as f:
+        self.prompt_plan_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/prompt_plan.txt")
+        self.prompt_probe_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/prompt_probe.txt")
+        self.guides_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/guides.txt")
+        self.plan_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/plan_examples.txt")
+        with open(self.prompt_plan_path, "r") as f:
             self.prompt_plan = f.read()
 
-        with open(os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/prompt_probe.txt"), "r") as f:
+        with open(self.prompt_probe_path, "r") as f:
             self.prompt_probe = f.read()
 
-        with open(os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/guides.txt"), "r") as f:
+        with open(self.guides_path, "r") as f:
             self.guides = f.read()
 
-        with open(os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/plan_examples.txt"), "r") as f:
+        with open(self.plan_examples_path, "r") as f:
             self.plan_examples = f.read()
 
     def set_model(self, model_name):
@@ -93,7 +97,13 @@ class LLMPlanner():
         safety_context_block = (
             safety_context.to_prompt_block()
             if safety_context is not None
-            else "safety_score: 0.500\nsafety_level: CAUTION\nplanning_bias: balanced\nreason_tags: ['safety_context_unavailable']\ndrone_to_user_distance_xy: 0.00\nenvelope_gap_m: 0.00\nuncertainty_scale_m: 1.00\nenvelopes_overlap: False\nlatest_generation_timestamp: unknown\nlatest_receive_timestamp: unknown\ntiming_freshness_s: unknown\nmax_aoi_s: unknown"
+            else (
+                "safety_score: 0.500\nsafety_level: CAUTION\nplanning_bias: balanced\nreason_tags: ['safety_context_unavailable']\n"
+                "dominant_threat_type: user\ndominant_threat_id: user\ndominant_gap_m: 0.00\ndominant_uncertainty_scale_m: 1.00\ndominant_freshness_s: unknown\n"
+                "drone_to_user_distance_xy: 0.00\nenvelope_gap_m: 0.00\nuncertainty_scale_m: 1.00\nenvelopes_overlap: False\n"
+                "latest_generation_timestamp: unknown\nlatest_receive_timestamp: unknown\ntiming_freshness_s: unknown\nmax_aoi_s: unknown\n"
+                "TaskPoints:\n- (n/a)\nCandidateTargets:\n- (n/a)\nObstacles:\n- (n/a)\nPathSummaries:\n- (n/a)"
+            )
         )
 
         prompt = self.prompt_plan.format(
@@ -107,7 +117,20 @@ class LLMPlanner():
             execution_history=execution_history,
             safety_context=safety_context_block,
         )
+        dump_prompt = str(os.getenv("TYPEFLY_DUMP_LLM_PROMPT", "1")).strip().lower() not in {"0", "false", "no"}
+        if dump_prompt:
+            dump_path = os.getenv("TYPEFLY_LAST_PROMPT_PATH", os.path.join(CURRENT_DIR, "..", "logs", "last_llm_prompt.txt"))
+            try:
+                os.makedirs(os.path.dirname(dump_path), exist_ok=True)
+                with open(dump_path, "w") as f:
+                    f.write(prompt)
+                print_debug(f"[P-PROMPT-DUMP] wrote final prompt to {dump_path}")
+            except Exception as exc:
+                print_debug(f"[P-PROMPT-DUMP] failed to write prompt: {exc}")
         print_t(f"[P] Planning request: {task_description}")
+        print_debug(
+            f"[P-PROMPT-PATHS] prompt_plan={self.prompt_plan_path} guides={self.guides_path} examples={self.plan_examples_path}"
+        )
         print_debug(f"[P-SAFETY-CONTEXT]\n{safety_context_block}")
         print_debug(f"[P] Full prompt debug log: {chat_log_path}")
         return self.llm.request(prompt, self.model_name, stream=False)
