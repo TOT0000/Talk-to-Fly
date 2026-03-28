@@ -19,7 +19,7 @@ from .px4_sim_robot_wrapper import Px4SimRobotWrapper
 from .abs.robot_wrapper import RobotWrapper
 from .vision_skill_wrapper import VisionSkillWrapper
 from .llm_planner import LLMPlanner
-from .skillset import SkillSet, LowLevelSkillItem, HighLevelSkillItem, SkillArg
+from .skillset import SkillSet, LowLevelSkillItem, SkillArg
 from .utils import print_debug, print_t
 from .minispec_interpreter import MiniSpecInterpreter, Statement
 from .abs.robot_wrapper import RobotType
@@ -129,20 +129,11 @@ class LLMController():
         self.low_level_skillset.add_skill(LowLevelSkillItem("take_picture", self.skill_take_picture, "Take a picture"))
         self.low_level_skillset.add_skill(LowLevelSkillItem("re_plan", self.skill_re_plan, "Replanning"))
 
-      # self.low_level_skillset.add_skill(LowLevelSkillItem("goto", self.skill_goto, "goto the object", args=[SkillArg("object_name[*x-value]", str)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("time", self.skill_time, "Get current execution time", args=[]))
       
 
-        # load high-level skills
+        # keep high-level skillset empty for one-shot low-level planning mode
         self.high_level_skillset = SkillSet(level="high", lower_level_skillset=self.low_level_skillset)
-
-        type_folder_name = 'tello'
-        if robot_type == RobotType.GEAR:
-            type_folder_name = 'gear'
-        with open(os.path.join(CURRENT_DIR, f"assets/{type_folder_name}/high_level_skills copy.json"), "r") as f:
-            json_data = json.load(f)
-            for skill in json_data:
-                self.high_level_skillset.add_skill(HighLevelSkillItem.load_from_dict(skill))
 
         Statement.low_level_skillset = self.low_level_skillset
         Statement.high_level_skillset = self.high_level_skillset
@@ -319,23 +310,6 @@ class LLMController():
 
     def skill_time(self) -> Tuple[float, bool]:
         return time.time() - self.execution_time, False
-
-    def skill_goto(self, object_name: str) -> Tuple[None, bool]:
-        print(f'Goto {object_name}')
-        if '[' in object_name:
-            x = float(object_name.split('[')[1].split(']')[0])
-        else:
-            x = self.vision.object_x(object_name)[0]
-
-        print(f'>> GOTO x {x} {type(x)}')
-
-        if x > 0.55:
-            self.drone.turn_cw(int((x - 0.5) * 70))
-        elif x < 0.45:
-            self.drone.turn_ccw(int((0.5 - x) * 70))
-
-        self.drone.move_forward(110)
-        return None, False
 
     def skill_take_picture(self) -> Tuple[None, bool]:
         img_path = os.path.join(self.cache_folder, f"{uuid.uuid4()}.jpg")
