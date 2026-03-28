@@ -768,6 +768,17 @@ class TypeFly:
         for scene_id, items in all_scene_block.items():
             all_scene_lines.append(f"  - {scene_id}: " + ", ".join(items))
         all_scene_summary = "\n".join(all_scene_lines) if all_scene_lines else "  - (n/a)"
+        audit = snapshot.get("envelope_audit") or {}
+        major_minor_lines = []
+        for entity in audit.get("entities", []):
+            major_minor_lines.append(
+                f"  - {entity.get('id')}: major={float(entity.get('major_axis')):.3f}, minor={float(entity.get('minor_axis')):.3f}"
+            )
+        ratio_lines = []
+        for key, value in sorted((audit.get("ratios") or {}).items()):
+            ratio_lines.append(f"  - {key}: {float(value):.3f}")
+        major_minor_block = "\n".join(major_minor_lines) if major_minor_lines else "  - (n/a)"
+        ratio_block = "\n".join(ratio_lines) if ratio_lines else "  - (n/a)"
         return (
             "### Baseline Status\n"
             f"- current scene id: {None if scene is None else scene.id}\n"
@@ -776,6 +787,8 @@ class TypeFly:
             f"- blocking entity: {blocking}\n"
             f"- corridor_min_gap_m: {min_gap}\n"
             f"- user_heading_yaw_deg: {math.degrees(float(snapshot.get('user_heading_yaw_rad') or 0.0)):.1f}\n"
+            f"- envelope major/minor audit:\n{major_minor_block}\n"
+            f"- obstacle/drone-user major ratios:\n{ratio_block}\n"
             f"- current scene expected behavior:\n{expectation_block}\n"
             f"- all scenes quick matrix (mode/blocker):\n{all_scene_summary}"
         )

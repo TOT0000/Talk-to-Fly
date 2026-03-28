@@ -813,6 +813,7 @@ class LLMController():
             "baseline_expectation_summary": self.get_baseline_expectation_summary(safety_context),
             "baseline_all_scene_expectations": self.get_all_scene_expectation_summary(safety_context),
         }
+        snapshot["envelope_audit"] = self._build_envelope_audit_summary(snapshot)
         if safety_state is not None and safety_context is not None:
             consistency_from_gap = bool(float(safety_state.envelope_gap_m) < 0.0)
             print_debug(
@@ -829,6 +830,7 @@ class LLMController():
                 f"reason_tags={safety_context.reason_tags}"
             )
         self._debug_log_obstacle_envelopes(snapshot.get("obstacle_envelope_states"))
+        self._debug_log_envelope_audit(snapshot.get("envelope_audit"))
         print_debug(
             "[UI-SNAPSHOT] "
             f"drone_gt={snapshot['drone_gt']} drone_est={snapshot['drone_est']} "
@@ -1013,6 +1015,100 @@ class LLMController():
                 f"ori={obs.orientation_deg:.1f}"
             )
         print_debug("[BASELINE-OBS] " + " | ".join(parts))
+
+    def _build_envelope_audit_summary(self, snapshot):
+        safety_state = snapshot.get("safety_state")
+        scene = snapshot.get("baseline_scene")
+        obstacle_states = snapshot.get("obstacle_envelope_states") or []
+        result = {"entities": []}
+        if safety_state is None:
+            return result
+
+        drone_matrix = getattr(safety_state.drone_packet, "M_xy", None)
+        user_matrix = getattr(safety_state.user_packet, "M_xy", None)
+        result["entities"].append(
+            {
+                "id": "drone",
+                "gt": snapshot.get("drone_gt"),
+                "est": snapshot.get("drone_est"),
+                "matrix_xy": drone_matrix,
+                "matrix_source": "provider_packet.M_xy",
+                "base_sigma": "packet covariance",
+                "nominal_size_used": False,
+                "bias_used": False,
+                "extra_inflation": "none",
+                "chi2": getattr(safety_state.drone_envelope, "chi2_val", None),
+                "major_axis": float(safety_state.drone_envelope.major_axis_radius),
+                "minor_axis": float(safety_state.drone_envelope.minor_axis_radius),
+                "orientation_deg": float(safety_state.drone_envelope.orientation_deg),
+            }
+        )
+        result["entities"].append(
+            {
+                "id": "user",
+                "gt": snapshot.get("user_gt"),
+                "est": snapshot.get("user_est"),
+                "matrix_xy": user_matrix,
+                "matrix_source": "provider_packet.M_xy",
+                "base_sigma": "packet covariance",
+                "nominal_size_used": False,
+                "bias_used": False,
+                "extra_inflation": "none",
+                "chi2": getattr(safety_state.user_envelope, "chi2_val", None),
+                "major_axis": float(safety_state.user_envelope.major_axis_radius),
+                "minor_axis": float(safety_state.user_envelope.minor_axis_radius),
+                "orientation_deg": float(safety_state.user_envelope.orientation_deg),
+            }
+        )
+        obstacles_by_id = {}
+        if scene is not None:
+            obstacles_by_id = {obs.id: obs for obs in scene.obstacles}
+        for obs_state in obstacle_states:
+            base = obstacles_by_id.get(obs_state.id)
+            result["entities"].append(
+                {
+                    "id": obs_state.id,
+                    "gt": [float(obs_state.gt_xy[0]), float(obs_state.gt_xy[1])],
+                    "est": [float(obs_state.est_xy[0]), float(obs_state.est_xy[1])],
+                    "matrix_xy": obs_state.matrix_xy,
+                    "matrix_source": "covariance_like from base_uncertainty + temporal jitter",
+                    "base_sigma": None if base is None else float(base.base_uncertainty_m),
+                    "nominal_size_used": False,
+                    "bias_used": None if base is None else [float(base.est_bias_x_m), float(base.est_bias_y_m)],
+                    "extra_inflation": "none (single chi2 expansion)",
+                    "chi2": float(obs_state.chi2_val),
+                    "major_axis": float(obs_state.envelope_major_axis_m),
+                    "minor_axis": float(obs_state.envelope_minor_axis_m),
+                    "orientation_deg": float(obs_state.orientation_deg),
+                }
+            )
+
+        drone_major = float(safety_state.drone_envelope.major_axis_radius)
+        user_major = float(safety_state.user_envelope.major_axis_radius)
+        ratios = {}
+        for obs_state in obstacle_states:
+            ratios[f"{obs_state.id}_to_drone_major"] = float(obs_state.envelope_major_axis_m / max(1e-6, drone_major))
+            ratios[f"{obs_state.id}_to_user_major"] = float(obs_state.envelope_major_axis_m / max(1e-6, user_major))
+        result["ratios"] = ratios
+        return result
+
+    def _debug_log_envelope_audit(self, audit):
+        if not audit or not audit.get("entities"):
+            return
+        lines = []
+        for entity in audit["entities"]:
+            lines.append(
+                f"{entity['id']}: gt={entity['gt']} est={entity['est']} "
+                f"matrix={entity['matrix_xy']} source={entity['matrix_source']} "
+                f"base_sigma={entity['base_sigma']} nominal_size_used={entity['nominal_size_used']} "
+                f"bias={entity['bias_used']} inflate={entity['extra_inflation']} "
+                f"chi2={entity['chi2']} major={entity['major_axis']:.3f} "
+                f"minor={entity['minor_axis']:.3f} ori={entity['orientation_deg']:.2f}"
+            )
+        ratio_text = ", ".join(f"{k}={v:.3f}" for k, v in sorted((audit.get("ratios") or {}).items()))
+        print_debug("[ENVELOPE-AUDIT] " + " || ".join(lines))
+        if ratio_text:
+            print_debug("[ENVELOPE-RATIOS] " + ratio_text)
 
     def start_robot(self):
         print_t("[C] Connecting to robot...")

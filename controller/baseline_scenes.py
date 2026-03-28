@@ -114,16 +114,16 @@ def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float, chi2_va
     states: List[ObstacleEnvelopeState] = []
     for idx, obstacle in enumerate(scene.obstacles):
         phase = float(now_s * 0.35 + idx * 0.9)
-        jitter_x = 0.04 * math.sin(phase)
-        jitter_y = 0.04 * math.cos(phase * 0.8)
+        jitter_x = 0.015 * math.sin(phase)
+        jitter_y = 0.015 * math.cos(phase * 0.8)
         est_x = float(obstacle.gt_x + obstacle.est_bias_x_m + jitter_x)
         est_y = float(obstacle.gt_y + obstacle.est_bias_y_m + jitter_y)
 
         sigma_x = float(obstacle.base_uncertainty_m * (1.0 + 0.25 * abs(math.sin(phase * 0.7))))
         sigma_y = float(obstacle.base_uncertainty_m * (1.0 + 0.25 * abs(math.cos(phase * 0.6))))
 
-        sigma_major = max(0.05, float(obstacle.nominal_major_m) * 0.30 + sigma_x)
-        sigma_minor = max(0.05, float(obstacle.nominal_minor_m) * 0.30 + sigma_y)
+        sigma_major = max(0.05, sigma_x)
+        sigma_minor = max(0.05, sigma_y)
         matrix_xy = _build_covariance_matrix_2d(sigma_major, sigma_minor, obstacle.base_orientation_deg)
 
         eigenvalues, major_vec = _eigen_decompose_2x2_sym(matrix_xy)
