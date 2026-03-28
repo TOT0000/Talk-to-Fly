@@ -2,6 +2,7 @@ from PIL import Image
 from dataclasses import replace
 import math
 import queue, time, os, json, sys, subprocess
+import re
 from typing import Optional, Tuple
 import asyncio
 import uuid
@@ -427,6 +428,52 @@ class LLMController():
         ret_val = interpreter.ret_queue.get()
         return ret_val
 
+    def _sanitize_minispec_plan(self, raw_plan: str) -> str:
+        if raw_plan is None:
+            return ""
+        text = str(raw_plan).strip()
+        if not text:
+            return ""
+
+        response_match = re.search(r"(?is)\bresponse\s*:\s*(.+)$", text)
+        if response_match:
+            text = response_match.group(1).strip()
+
+        lines = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("```"):
+                continue
+            if re.match(r"(?is)^(plan|analysis|thought|reasoning)\s*:", stripped):
+                continue
+            lines.append(stripped)
+        text = " ".join(lines).strip()
+
+        allowed_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.,;:?!&|<>=(){}[]'\"+-*/% \t")
+        filtered = "".join(ch for ch in text if ch in allowed_chars).strip()
+        if filtered:
+            text = filtered
+
+        command_pattern = re.compile(
+            r"([A-Za-z_][A-Za-z0-9_-]*\s*\([^;{}]*\)|->[A-Za-z0-9_.'\"+\-*/%()]+|[A-Za-z_][A-Za-z0-9_]*\s*=\s*[^;{}]+|\d+\s*\{|[{}])\s*;?",
+        )
+        matches = [m.group(1).strip() for m in command_pattern.finditer(text)]
+        if matches:
+            rebuilt = []
+            for token in matches:
+                if token in {"{", "}"}:
+                    rebuilt.append(token)
+                elif token.endswith("{"):
+                    rebuilt.append(token)
+                else:
+                    rebuilt.append(f"{token};")
+            candidate = "".join(rebuilt).strip()
+            if candidate:
+                return candidate
+        return text
+
     def _has_live_sim_user_position(self) -> bool:
         if not hasattr(self, "state_provider"):
             return False
@@ -556,6 +603,7 @@ class LLMController():
                     )
                     llm_called = True
                     final_plan_source = "llm"
+                self.current_plan = self._sanitize_minispec_plan(self.current_plan)
                 self.latest_safety_context = safety_context
                 self.task_run_logger.update_plan_info(self.current_plan, generation_success=True)
                 debug_info = {
