@@ -786,6 +786,7 @@ class LLMController():
         drone_aoi_s, drone_delay_s = _timing(drone_packet)
         user_aoi_s, user_delay_s = _timing(user_packet)
 
+        obstacle_states = compute_obstacle_envelope_states(self.get_baseline_scene(), now_s=now)
         snapshot = {
             "drone_gt": drone_gt,
             "drone_est": drone_est,
@@ -802,8 +803,14 @@ class LLMController():
             "baseline_scene_id": self.baseline_scene_id,
             "baseline_scene": self.get_baseline_scene(),
             "baseline_scene_state": self.baseline_scene_state,
-            "obstacle_envelope_states": compute_obstacle_envelope_states(self.get_baseline_scene(), now_s=now),
-            "path_eval": self._compute_path_eval(self.get_baseline_scene(), drone_est or drone_gt, user_est or user_gt, now_s=now),
+            "obstacle_envelope_states": obstacle_states,
+            "path_eval": self._compute_path_eval(
+                self.get_baseline_scene(),
+                drone_est or drone_gt,
+                user_est or user_gt,
+                now_s=now,
+                obstacle_envelopes=obstacle_states,
+            ),
             "target_task_point": (
                 "A"
                 if not isinstance(self.latest_baseline_decision, dict)
@@ -859,7 +866,7 @@ class LLMController():
                 return token
         return "A"
 
-    def _compute_path_eval(self, scene: BaselineScene, drone_pos, user_pos, now_s: float = 0.0):
+    def _compute_path_eval(self, scene: BaselineScene, drone_pos, user_pos, now_s: float = 0.0, obstacle_envelopes=None):
         target_id = "A"
         if isinstance(self.latest_baseline_decision, dict):
             target_id = str(self.latest_baseline_decision.get("target_task_point") or "A")
@@ -871,7 +878,7 @@ class LLMController():
         user_radius = 0.75
         if safety_context is not None:
             user_radius = max(0.45, float(safety_context.uncertainty_scale_m) * 0.5)
-        obstacle_envelopes = compute_obstacle_envelope_states(scene, now_s=now_s)
+        obstacle_envelopes = obstacle_envelopes if obstacle_envelopes is not None else compute_obstacle_envelope_states(scene, now_s=now_s)
         return evaluate_path_clear(
             drone_xy=(float(drone_pos[0]), float(drone_pos[1])),
             target_xy=(float(point.x), float(point.y)),
@@ -930,10 +937,10 @@ class LLMController():
                 "id": obs.id,
                 "gt_xy": [float(obs.gt_xy[0]), float(obs.gt_xy[1])],
                 "est_xy": [float(obs.est_xy[0]), float(obs.est_xy[1])],
-                "covariance_like_xy_m": [float(obs.covariance_like_xy_m[0]), float(obs.covariance_like_xy_m[1])],
-                "envelope_major_axis_m": float(obs.envelope_major_axis_m),
-                "envelope_minor_axis_m": float(obs.envelope_minor_axis_m),
-                "orientation_deg": float(obs.orientation_deg),
+                "matrix_xy": obs.matrix_xy,
+                "envelope_major_axis_m": float(obs.envelope.major_axis_radius),
+                "envelope_minor_axis_m": float(obs.envelope.minor_axis_radius),
+                "orientation_deg": float(obs.envelope.orientation_deg),
             }
             for obs in obstacle_envelopes
         ]
@@ -1010,9 +1017,9 @@ class LLMController():
             parts.append(
                 f"{obs.id}:gt=({obs.gt_xy[0]:.2f},{obs.gt_xy[1]:.2f}) "
                 f"est=({obs.est_xy[0]:.2f},{obs.est_xy[1]:.2f}) "
-                f"sigma=({obs.covariance_like_xy_m[0]:.3f},{obs.covariance_like_xy_m[1]:.3f}) "
-                f"axes=({obs.envelope_major_axis_m:.3f},{obs.envelope_minor_axis_m:.3f}) "
-                f"ori={obs.orientation_deg:.1f}"
+                f"matrix={obs.matrix_xy} "
+                f"axes=({obs.envelope.major_axis_radius:.3f},{obs.envelope.minor_axis_radius:.3f}) "
+                f"ori={obs.envelope.orientation_deg:.1f}"
             )
         print_debug("[BASELINE-OBS] " + " | ".join(parts))
 
@@ -1033,6 +1040,7 @@ class LLMController():
                 "est": snapshot.get("drone_est"),
                 "matrix_xy": drone_matrix,
                 "matrix_source": "provider_packet.M_xy",
+                "called_function": "build_safety_envelope",
                 "base_sigma": "packet covariance",
                 "nominal_size_used": False,
                 "bias_used": False,
@@ -1050,6 +1058,7 @@ class LLMController():
                 "est": snapshot.get("user_est"),
                 "matrix_xy": user_matrix,
                 "matrix_source": "provider_packet.M_xy",
+                "called_function": "build_safety_envelope",
                 "base_sigma": "packet covariance",
                 "nominal_size_used": False,
                 "bias_used": False,
@@ -1071,15 +1080,16 @@ class LLMController():
                     "gt": [float(obs_state.gt_xy[0]), float(obs_state.gt_xy[1])],
                     "est": [float(obs_state.est_xy[0]), float(obs_state.est_xy[1])],
                     "matrix_xy": obs_state.matrix_xy,
-                    "matrix_source": "covariance_like from base_uncertainty + temporal jitter",
-                    "base_sigma": None if base is None else float(base.base_uncertainty_m),
+                    "matrix_source": "obstacle_state_packet.M_xy (consumed by build_safety_envelope)",
+                    "called_function": "build_safety_envelope",
+                    "base_sigma": "n/a (direct covariance input)",
                     "nominal_size_used": False,
                     "bias_used": None if base is None else [float(base.est_bias_x_m), float(base.est_bias_y_m)],
                     "extra_inflation": "none (single chi2 expansion)",
-                    "chi2": float(obs_state.chi2_val),
-                    "major_axis": float(obs_state.envelope_major_axis_m),
-                    "minor_axis": float(obs_state.envelope_minor_axis_m),
-                    "orientation_deg": float(obs_state.orientation_deg),
+                    "chi2": float(obs_state.envelope.chi2_val),
+                    "major_axis": float(obs_state.envelope.major_axis_radius),
+                    "minor_axis": float(obs_state.envelope.minor_axis_radius),
+                    "orientation_deg": float(obs_state.envelope.orientation_deg),
                 }
             )
 
@@ -1087,8 +1097,8 @@ class LLMController():
         user_major = float(safety_state.user_envelope.major_axis_radius)
         ratios = {}
         for obs_state in obstacle_states:
-            ratios[f"{obs_state.id}_to_drone_major"] = float(obs_state.envelope_major_axis_m / max(1e-6, drone_major))
-            ratios[f"{obs_state.id}_to_user_major"] = float(obs_state.envelope_major_axis_m / max(1e-6, user_major))
+            ratios[f"{obs_state.id}_to_drone_major"] = float(obs_state.envelope.major_axis_radius / max(1e-6, drone_major))
+            ratios[f"{obs_state.id}_to_user_major"] = float(obs_state.envelope.major_axis_radius / max(1e-6, user_major))
         result["ratios"] = ratios
         return result
 
@@ -1100,6 +1110,7 @@ class LLMController():
             lines.append(
                 f"{entity['id']}: gt={entity['gt']} est={entity['est']} "
                 f"matrix={entity['matrix_xy']} source={entity['matrix_source']} "
+                f"fn={entity.get('called_function', 'build_safety_envelope(via GCS service)')} "
                 f"base_sigma={entity['base_sigma']} nominal_size_used={entity['nominal_size_used']} "
                 f"bias={entity['bias_used']} inflate={entity['extra_inflation']} "
                 f"chi2={entity['chi2']} major={entity['major_axis']:.3f} "

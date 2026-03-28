@@ -3,9 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 import math
+import numpy as np
 
-
-CHI2_2_095 = 5.991
+from .state_packet import LocalizedStatePacket
+from .safety_envelope import build_safety_envelope, SafetyEnvelope2D
 
 
 @dataclass(frozen=True)
@@ -21,12 +22,9 @@ class StaticObstacle:
     id: str
     gt_x: float
     gt_y: float
-    nominal_major_m: float
-    nominal_minor_m: float
-    base_orientation_deg: float = 0.0
+    cov_xy: Tuple[Tuple[float, float], Tuple[float, float]]
     est_bias_x_m: float = 0.0
     est_bias_y_m: float = 0.0
-    base_uncertainty_m: float = 0.18
 
 
 @dataclass(frozen=True)
@@ -34,12 +32,8 @@ class ObstacleEnvelopeState:
     id: str
     gt_xy: Tuple[float, float]
     est_xy: Tuple[float, float]
-    covariance_like_xy_m: Tuple[float, float]
     matrix_xy: Tuple[Tuple[float, float], Tuple[float, float]]
-    chi2_val: float
-    envelope_major_axis_m: float
-    envelope_minor_axis_m: float
-    orientation_deg: float
+    envelope: SafetyEnvelope2D
 
 
 @dataclass(frozen=True)
@@ -71,125 +65,6 @@ class BaselineExpectation:
     expected_motion_mode: str
 
 
-def _rotate(x: float, y: float, yaw_rad: float) -> Tuple[float, float]:
-    c = math.cos(yaw_rad)
-    s = math.sin(yaw_rad)
-    return (x * c) + (y * s), (-x * s) + (y * c)
-
-
-def _build_covariance_matrix_2d(sigma_major: float, sigma_minor: float, orientation_deg: float):
-    theta = math.radians(float(orientation_deg))
-    c = math.cos(theta)
-    s = math.sin(theta)
-    a2 = float(sigma_major) ** 2
-    b2 = float(sigma_minor) ** 2
-    m00 = (c * c * a2) + (s * s * b2)
-    m01 = (c * s * (a2 - b2))
-    m11 = (s * s * a2) + (c * c * b2)
-    return ((m00, m01), (m01, m11))
-
-
-def _eigen_decompose_2x2_sym(matrix_xy):
-    m00, m01 = matrix_xy[0]
-    _, m11 = matrix_xy[1]
-    trace = m00 + m11
-    det = (m00 * m11) - (m01 * m01)
-    term = math.sqrt(max(0.0, (trace * trace * 0.25) - det))
-    l1 = max(0.0, (trace * 0.5) + term)
-    l2 = max(0.0, (trace * 0.5) - term)
-    # major eigenvector
-    if abs(m01) > 1e-9:
-        vx = l1 - m11
-        vy = m01
-    else:
-        vx, vy = (1.0, 0.0) if m00 >= m11 else (0.0, 1.0)
-    norm = math.hypot(vx, vy)
-    if norm < 1e-9:
-        vx, vy = 1.0, 0.0
-        norm = 1.0
-    return (l1, l2), (vx / norm, vy / norm)
-
-
-def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float, chi2_val: float = CHI2_2_095) -> List[ObstacleEnvelopeState]:
-    states: List[ObstacleEnvelopeState] = []
-    for idx, obstacle in enumerate(scene.obstacles):
-        phase = float(now_s * 0.35 + idx * 0.9)
-        jitter_x = 0.015 * math.sin(phase)
-        jitter_y = 0.015 * math.cos(phase * 0.8)
-        est_x = float(obstacle.gt_x + obstacle.est_bias_x_m + jitter_x)
-        est_y = float(obstacle.gt_y + obstacle.est_bias_y_m + jitter_y)
-
-        sigma_x = float(obstacle.base_uncertainty_m * (1.0 + 0.25 * abs(math.sin(phase * 0.7))))
-        sigma_y = float(obstacle.base_uncertainty_m * (1.0 + 0.25 * abs(math.cos(phase * 0.6))))
-
-        sigma_major = max(0.05, sigma_x)
-        sigma_minor = max(0.05, sigma_y)
-        matrix_xy = _build_covariance_matrix_2d(sigma_major, sigma_minor, obstacle.base_orientation_deg)
-
-        eigenvalues, major_vec = _eigen_decompose_2x2_sym(matrix_xy)
-        envelope_major = float(math.sqrt(float(chi2_val) * float(eigenvalues[0])))
-        envelope_minor = float(math.sqrt(float(chi2_val) * float(eigenvalues[1])))
-        orientation_rad = float(math.atan2(major_vec[1], major_vec[0]))
-        orientation_deg = float(math.degrees(orientation_rad))
-
-        states.append(
-            ObstacleEnvelopeState(
-                id=obstacle.id,
-                gt_xy=(float(obstacle.gt_x), float(obstacle.gt_y)),
-                est_xy=(est_x, est_y),
-                covariance_like_xy_m=(sigma_x, sigma_y),
-                matrix_xy=matrix_xy,
-                chi2_val=float(chi2_val),
-                envelope_major_axis_m=max(0.05, envelope_major),
-                envelope_minor_axis_m=max(0.05, envelope_minor),
-                orientation_deg=orientation_deg,
-            )
-        )
-    return states
-
-
-def _point_to_obstacle_local(x: float, y: float, obstacle: ObstacleEnvelopeState) -> Tuple[float, float]:
-    dx = float(x - obstacle.est_xy[0])
-    dy = float(y - obstacle.est_xy[1])
-    return _rotate(dx, dy, math.radians(float(obstacle.orientation_deg)))
-
-
-def _segment_min_f_on_inflated_ellipse(
-    ax: float,
-    ay: float,
-    bx: float,
-    by: float,
-    obstacle: ObstacleEnvelopeState,
-    corridor_half_width_m: float,
-    samples: int = 81,
-) -> float:
-    inflated_major = max(1e-4, float(obstacle.envelope_major_axis_m) + float(corridor_half_width_m))
-    inflated_minor = max(1e-4, float(obstacle.envelope_minor_axis_m) + float(corridor_half_width_m))
-    min_f = float("inf")
-    for i in range(max(3, samples)):
-        t = float(i / (samples - 1))
-        px = ax + (bx - ax) * t
-        py = ay + (by - ay) * t
-        lx, ly = _point_to_obstacle_local(px, py, obstacle)
-        f = ((lx / inflated_major) ** 2) + ((ly / inflated_minor) ** 2)
-        if f < min_f:
-            min_f = f
-    return min_f
-
-
-def _signed_gap_for_obstacle(
-    ax: float,
-    ay: float,
-    bx: float,
-    by: float,
-    obstacle: ObstacleEnvelopeState,
-    corridor_half_width_m: float,
-) -> float:
-    min_f = _segment_min_f_on_inflated_ellipse(ax, ay, bx, by, obstacle, corridor_half_width_m)
-    min_axis = min(float(obstacle.envelope_major_axis_m), float(obstacle.envelope_minor_axis_m))
-    return (math.sqrt(min_f) - 1.0) * max(1e-4, min_axis)
-
-
 def _distance_point_to_segment(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
     abx = bx - ax
     aby = by - ay
@@ -202,6 +77,111 @@ def _distance_point_to_segment(px: float, py: float, ax: float, ay: float, bx: f
     qx = ax + t * abx
     qy = ay + t * aby
     return math.hypot(px - qx, py - qy)
+
+
+def _rotate_to_obstacle_local(x: float, y: float, center_x: float, center_y: float, orientation_deg: float) -> Tuple[float, float]:
+    dx = float(x - center_x)
+    dy = float(y - center_y)
+    theta = math.radians(float(orientation_deg))
+    c = math.cos(theta)
+    s = math.sin(theta)
+    return ((dx * c) + (dy * s), (-dx * s) + (dy * c))
+
+
+def _signed_gap_segment_to_obstacle_envelope(
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+    obstacle_state: ObstacleEnvelopeState,
+    corridor_half_width_m: float,
+    samples: int = 81,
+) -> float:
+    env = obstacle_state.envelope
+    inflated_major = max(1e-4, float(env.major_axis_radius) + float(corridor_half_width_m))
+    inflated_minor = max(1e-4, float(env.minor_axis_radius) + float(corridor_half_width_m))
+
+    min_f = float("inf")
+    for i in range(max(3, samples)):
+        t = float(i / (samples - 1))
+        px = ax + (bx - ax) * t
+        py = ay + (by - ay) * t
+        lx, ly = _rotate_to_obstacle_local(
+            px,
+            py,
+            center_x=float(env.center_xy[0]),
+            center_y=float(env.center_xy[1]),
+            orientation_deg=float(env.orientation_deg),
+        )
+        f = ((lx / inflated_major) ** 2) + ((ly / inflated_minor) ** 2)
+        if f < min_f:
+            min_f = f
+    return (math.sqrt(min_f) - 1.0) * min(inflated_major, inflated_minor)
+
+
+def _build_obstacle_packet(
+    obstacle: StaticObstacle,
+    est_xy: Tuple[float, float],
+    now_s: float,
+    sequence_number: int,
+) -> LocalizedStatePacket:
+    gt = np.asarray([float(obstacle.gt_x), float(obstacle.gt_y), 0.0], dtype=float)
+    est = np.asarray([float(est_xy[0]), float(est_xy[1]), 0.0], dtype=float)
+    matrix_xy = np.asarray(obstacle.cov_xy, dtype=float)
+
+    return LocalizedStatePacket(
+        entity_type="obstacle",
+        sequence_number=int(sequence_number),
+        state_generation_timestamp=float(now_s),
+        gt_position_3d=gt,
+        estimated_position_3d=est,
+        localization_error_vector_3d=np.zeros(3, dtype=float),
+        range_residuals=np.zeros(1, dtype=float),
+        range_residual_rms_m=0.0,
+        normalized_range_residual_rms=0.0,
+        gt_user_position_3d=np.zeros(3, dtype=float),
+        est_user_position_3d=None,
+        anchor_positions_3d=np.zeros((1, 3), dtype=float),
+        true_ranges=np.zeros(1, dtype=float),
+        measured_ranges=np.zeros(1, dtype=float),
+        bias_values=np.zeros(1, dtype=float),
+        sigma_values=np.zeros(1, dtype=float),
+        drift_values=np.zeros(1, dtype=float),
+        burst_values=np.zeros(1, dtype=float),
+        random_noise_values=np.zeros(1, dtype=float),
+        jacobian_h_3d=np.zeros((1, 3), dtype=float),
+        P_3d=np.eye(3, dtype=float),
+        b_3d=np.zeros(3, dtype=float),
+        M_3d=np.eye(3, dtype=float),
+        P_xy=np.eye(2, dtype=float),
+        b_xy=np.zeros(2, dtype=float),
+        M_xy=matrix_xy,
+        confidence_alpha=0.95,
+        est_position_timestamp=float(now_s),
+        received_packet_timestamp=float(now_s),
+    )
+
+
+def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float) -> List[ObstacleEnvelopeState]:
+    states: List[ObstacleEnvelopeState] = []
+    for idx, obstacle in enumerate(scene.obstacles):
+        phase = float(now_s * 0.35 + idx * 0.9)
+        est_x = float(obstacle.gt_x + obstacle.est_bias_x_m + 0.01 * math.sin(phase))
+        est_y = float(obstacle.gt_y + obstacle.est_bias_y_m + 0.01 * math.cos(phase * 0.8))
+
+        packet = _build_obstacle_packet(obstacle, est_xy=(est_x, est_y), now_s=now_s, sequence_number=idx + 1)
+        envelope = build_safety_envelope(packet)
+
+        states.append(
+            ObstacleEnvelopeState(
+                id=obstacle.id,
+                gt_xy=(float(obstacle.gt_x), float(obstacle.gt_y)),
+                est_xy=(est_x, est_y),
+                matrix_xy=((float(packet.M_xy[0][0]), float(packet.M_xy[0][1])), (float(packet.M_xy[1][0]), float(packet.M_xy[1][1]))),
+                envelope=envelope,
+            )
+        )
+    return states
 
 
 def evaluate_path_clear(
@@ -221,8 +201,20 @@ def evaluate_path_clear(
         center_distance = _distance_point_to_segment(float(user_xy[0]), float(user_xy[1]), ax, ay, bx, by)
         blockers.append(("user", center_distance - (float(user_radius_m) + float(corridor_half_width_m))))
 
-    for obstacle in obstacle_envelopes:
-        blockers.append((obstacle.id, _signed_gap_for_obstacle(ax, ay, bx, by, obstacle, corridor_half_width_m)))
+    for obstacle_state in obstacle_envelopes:
+        blockers.append(
+            (
+                obstacle_state.id,
+                _signed_gap_segment_to_obstacle_envelope(
+                    ax,
+                    ay,
+                    bx,
+                    by,
+                    obstacle_state=obstacle_state,
+                    corridor_half_width_m=float(corridor_half_width_m),
+                ),
+            )
+        )
 
     if not blockers:
         return PathClearResult(True, "none", float("inf"), tuple())
@@ -242,7 +234,8 @@ def build_scene_expectations(
 ) -> List[BaselineExpectation]:
     drone_xy = (float(scene.drone_initial_pose[0]), float(scene.drone_initial_pose[1]))
     user_xy = (float(scene.user_position[0]), float(scene.user_position[1]))
-    obstacle_envelopes = compute_obstacle_envelope_states(scene, now_s=now_s)
+    obstacle_states = compute_obstacle_envelope_states(scene, now_s=now_s)
+
     rows: List[BaselineExpectation] = []
     for point in scene.task_points:
         result = evaluate_path_clear(
@@ -250,7 +243,7 @@ def build_scene_expectations(
             target_xy=(float(point.x), float(point.y)),
             user_xy=user_xy,
             user_radius_m=float(user_radius_m),
-            obstacle_envelopes=obstacle_envelopes,
+            obstacle_envelopes=obstacle_states,
             corridor_half_width_m=float(corridor_half_width_m),
         )
         direct = bool(result.path_clear and not high_risk)
@@ -299,9 +292,9 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
             TaskPoint("C", 9.4, 7.9, -1.5),
         ),
         obstacles=(
-            StaticObstacle("O1", 3.2, 9.8, 0.80, 0.48, 20.0, est_bias_x_m=0.04, est_bias_y_m=-0.03, base_uncertainty_m=0.12),
-            StaticObstacle("O2", 5.8, 10.0, 0.85, 0.50, -15.0, est_bias_x_m=-0.03, est_bias_y_m=0.04, base_uncertainty_m=0.12),
-            StaticObstacle("O3", 8.0, 9.3, 0.75, 0.46, 40.0, est_bias_x_m=0.02, est_bias_y_m=0.02, base_uncertainty_m=0.11),
+            StaticObstacle("O1", 3.2, 9.8, cov_xy=((0.010, 0.001), (0.001, 0.008)), est_bias_x_m=0.03, est_bias_y_m=-0.02),
+            StaticObstacle("O2", 5.8, 10.0, cov_xy=((0.011, -0.001), (-0.001, 0.009)), est_bias_x_m=-0.02, est_bias_y_m=0.03),
+            StaticObstacle("O3", 8.0, 9.3, cov_xy=((0.009, 0.0015), (0.0015, 0.008)), est_bias_x_m=0.02, est_bias_y_m=0.02),
         ),
         notes="Bottom corridor to A is intentionally clear from user and obstacle envelopes.",
     ),
@@ -317,9 +310,9 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
             TaskPoint("C", 8.5, 8.3, -1.5),
         ),
         obstacles=(
-            StaticObstacle("O1", 5.1, 2.5, 1.25, 0.75, 8.0, est_bias_x_m=0.02, est_bias_y_m=0.01, base_uncertainty_m=0.14),
-            StaticObstacle("O2", 6.5, 5.9, 1.00, 0.60, 35.0, est_bias_x_m=-0.04, est_bias_y_m=0.02, base_uncertainty_m=0.13),
-            StaticObstacle("O3", 3.1, 7.6, 0.90, 0.52, -20.0, est_bias_x_m=0.01, est_bias_y_m=-0.03, base_uncertainty_m=0.12),
+            StaticObstacle("O1", 5.1, 2.5, cov_xy=((0.015, 0.001), (0.001, 0.012)), est_bias_x_m=0.02, est_bias_y_m=0.01),
+            StaticObstacle("O2", 6.5, 5.9, cov_xy=((0.014, 0.002), (0.002, 0.012)), est_bias_x_m=-0.03, est_bias_y_m=0.01),
+            StaticObstacle("O3", 3.1, 7.6, cov_xy=((0.012, -0.001), (-0.001, 0.010)), est_bias_x_m=0.01, est_bias_y_m=-0.02),
         ),
         notes="Obstacle O1 is positioned to cut the direct A corridor but still leaves side detour room.",
     ),
@@ -335,9 +328,9 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
             TaskPoint("C", 8.6, 8.9, -1.5),
         ),
         obstacles=(
-            StaticObstacle("O1", 2.3, 8.7, 0.90, 0.55, 0.0, est_bias_x_m=-0.02, est_bias_y_m=0.03, base_uncertainty_m=0.12),
-            StaticObstacle("O2", 6.8, 8.2, 1.00, 0.60, 18.0, est_bias_x_m=0.03, est_bias_y_m=-0.02, base_uncertainty_m=0.13),
-            StaticObstacle("O3", 10.2, 5.9, 0.85, 0.50, -30.0, est_bias_x_m=0.02, est_bias_y_m=0.03, base_uncertainty_m=0.12),
+            StaticObstacle("O1", 2.3, 8.7, cov_xy=((0.011, 0.000), (0.000, 0.009)), est_bias_x_m=-0.02, est_bias_y_m=0.02),
+            StaticObstacle("O2", 6.8, 8.2, cov_xy=((0.014, 0.001), (0.001, 0.011)), est_bias_x_m=0.02, est_bias_y_m=-0.01),
+            StaticObstacle("O3", 10.2, 5.9, cov_xy=((0.012, -0.001), (-0.001, 0.010)), est_bias_x_m=0.02, est_bias_y_m=0.02),
         ),
         notes="User envelope is intentionally near the A corridor to make user the primary blocker.",
     ),
@@ -353,9 +346,9 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
             TaskPoint("C", 3.6, 6.5, -1.5),
         ),
         obstacles=(
-            StaticObstacle("O1", 1.3, 10.1, 1.10, 0.72, 12.0, est_bias_x_m=0.03, est_bias_y_m=-0.02, base_uncertainty_m=0.14),
-            StaticObstacle("O2", 2.3, 8.9, 1.22, 0.78, 48.0, est_bias_x_m=-0.03, est_bias_y_m=0.04, base_uncertainty_m=0.15),
-            StaticObstacle("O3", 3.2, 9.7, 1.08, 0.66, -40.0, est_bias_x_m=0.02, est_bias_y_m=0.03, base_uncertainty_m=0.14),
+            StaticObstacle("O1", 1.3, 10.1, cov_xy=((0.015, 0.001), (0.001, 0.012)), est_bias_x_m=0.02, est_bias_y_m=-0.01),
+            StaticObstacle("O2", 2.3, 8.9, cov_xy=((0.018, 0.002), (0.002, 0.014)), est_bias_x_m=-0.02, est_bias_y_m=0.03),
+            StaticObstacle("O3", 3.2, 9.7, cov_xy=((0.016, -0.002), (-0.002, 0.013)), est_bias_x_m=0.02, est_bias_y_m=0.02),
         ),
         notes="Upper-left corner compression + clustered obstacles create clear constrained geometry.",
     ),

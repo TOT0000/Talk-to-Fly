@@ -951,10 +951,10 @@ class TypeFly:
                 ax_xy.scatter([obstacle.gt_xy[0]], [obstacle.gt_xy[1]], c="#5D4037", marker="s", s=62, label="Obstacle GT")
                 ax_xy.scatter([obstacle.est_xy[0]], [obstacle.est_xy[1]], c="#8D6E63", marker="X", s=58, label="Obstacle EST")
                 obstacle_ellipse = Ellipse(
-                    xy=(float(obstacle.est_xy[0]), float(obstacle.est_xy[1])),
-                    width=2.0 * float(obstacle.envelope_major_axis_m),
-                    height=2.0 * float(obstacle.envelope_minor_axis_m),
-                    angle=float(obstacle.orientation_deg),
+                    xy=(float(obstacle.envelope.center_xy[0]), float(obstacle.envelope.center_xy[1])),
+                    width=2.0 * float(obstacle.envelope.major_axis_radius),
+                    height=2.0 * float(obstacle.envelope.minor_axis_radius),
+                    angle=float(obstacle.envelope.orientation_deg),
                     edgecolor="#8D6E63",
                     facecolor="none",
                     linestyle=":",
