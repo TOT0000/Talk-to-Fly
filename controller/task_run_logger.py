@@ -414,7 +414,7 @@ class TaskRunLogger:
         wb.save(self.excel_path)
         os.makedirs(os.path.dirname(self.debug_jsonl_path) or ".", exist_ok=True)
         with open(self.debug_jsonl_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(debug_payload, ensure_ascii=False) + "\n")
+            f.write(self._json_text(debug_payload) + "\n")
 
     def _warn_once_disabled(self):
         if self._warned_disabled:
