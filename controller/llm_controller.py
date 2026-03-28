@@ -1,4 +1,5 @@
 from PIL import Image
+from dataclasses import replace
 import math
 import queue, time, os, json, sys, subprocess
 from typing import Optional, Tuple
@@ -25,7 +26,9 @@ from .uwb_wrapper import UWBWrapper
 from .state_provider import StateProvider, UwbStateProvider
 from .sim_state_provider import SimStateProvider
 from .scenario_manager import ScenarioManager
+from .safety_context import SafetyContext
 from .task_run_logger import TaskRunLogger
+from .uplink_delay_model import UplinkDelayModel
 from .baseline_scenes import (
     BASELINE_SCENES,
     BaselineScene,
@@ -157,6 +160,10 @@ class LLMController():
         self.baseline_scene_id = normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_1_CLEAR_PATH"))
         self.baseline_scene_state = None
         self.latest_baseline_decision = None
+        self._obstacle_delay_models = {}
+        self._obstacle_sequence_numbers = {}
+        self._latest_received_obstacle_states = {}
+        self._obstacle_rng = np.random.default_rng(int(os.getenv("SIM_LOCALIZATION_RNG_SEED", "12345")) + 2026)
         self.user_heading_yaw_rad = 0.0
 
         # PX4_SIM optional managed user-position publisher lifecycle
@@ -713,7 +720,142 @@ class LLMController():
             f"  level={safety_context.safety_level}\n"
             f"  bias={safety_context.planning_bias}\n"
             f"  standoff={safety_context.preferred_standoff_m:.3f}\n"
+            f"  dominant_threat={safety_context.dominant_threat_type}:{safety_context.dominant_threat_id}\n"
+            f"  dominant_gap={safety_context.dominant_gap_m:.3f}\n"
+            f"  dominant_uncertainty={safety_context.dominant_uncertainty_scale_m:.3f}\n"
+            f"  dominant_freshness={safety_context.dominant_freshness_s}\n"
             f"  reasons={safety_context.reason_tags}"
+        )
+
+    def _simulate_obstacle_returns(self, obstacle_states, now: float):
+        simulated = []
+        for obs in obstacle_states or []:
+            model = self._obstacle_delay_models.setdefault(obs.id, UplinkDelayModel())
+            seq = int(self._obstacle_sequence_numbers.get(obs.id, 0))
+            self._obstacle_sequence_numbers[obs.id] = seq + 1
+            tx_packet = obs.localization_packet.copy()
+            tx_packet.sequence_number = seq
+            tx_state = replace(obs, localization_packet=tx_packet)
+            arrival = model.enqueue(
+                packet=tx_state,
+                generation_timestamp=float(tx_packet.state_generation_timestamp),
+                sequence_number=seq,
+                rng=self._obstacle_rng,
+            )
+            ready = model.pop_ready(float(now))
+            if ready:
+                delivered_arrival, _, delivered_state = ready[-1]
+                delivered_packet = delivered_state.localization_packet.copy()
+                delivered_packet.received_packet_timestamp = float(delivered_arrival)
+                self._latest_received_obstacle_states[obs.id] = replace(delivered_state, localization_packet=delivered_packet)
+            latest_state = self._latest_received_obstacle_states.get(obs.id)
+            effective = latest_state if latest_state is not None else tx_state
+            if arrival is None:
+                effective = replace(
+                    effective,
+                    localization_packet=replace(effective.localization_packet, received_packet_timestamp=None),
+                )
+            simulated.append(effective)
+        return simulated
+
+    def _build_dominant_threat_context(self, safety_state, obstacle_states, scene, now: float):
+        if safety_state is None:
+            return None
+
+        drone_envelope = safety_state.drone_envelope
+        drone_packet = safety_state.drone_packet
+
+        candidates = []
+
+        def _build_candidate(entity_type: str, entity_id: str, entity_envelope, entity_packet):
+            delta = drone_envelope.center_xy - entity_envelope.center_xy
+            distance_xy = float(np.linalg.norm(delta))
+            unit_vec = np.array([1.0, 0.0], dtype=float) if distance_xy < 1e-9 else (delta / distance_xy)
+            drone_radius = float(drone_envelope.ray_radius(unit_vec))
+            entity_radius = float(entity_envelope.ray_radius(-unit_vec))
+            gap = float(distance_xy - (drone_radius + entity_radius))
+            uncertainty = float(drone_radius + entity_radius)
+            freshness = float(
+                max(
+                    now - float(drone_packet.state_generation_timestamp),
+                    now - float(entity_packet.state_generation_timestamp),
+                )
+            )
+            return {
+                "type": entity_type,
+                "id": entity_id,
+                "gap": gap,
+                "uncertainty": uncertainty,
+                "freshness": freshness,
+                "distance_xy": distance_xy,
+                "entity_packet": entity_packet,
+            }
+
+        candidates.append(
+            _build_candidate("user", "user", safety_state.user_envelope, safety_state.user_packet)
+        )
+        for obs in obstacle_states or []:
+            candidates.append(
+                _build_candidate("obstacle", str(obs.id), obs.envelope, obs.localization_packet)
+            )
+        if not candidates:
+            return self.safety_assessor.build_from_safety_state(safety_state, now=now)
+
+        candidates.sort(key=lambda item: (item["gap"], -item["uncertainty"], -item["freshness"], item["id"]))
+        dominant = candidates[0]
+        assessed = self.safety_assessor.assessor.assess(
+            envelope_gap_m=float(dominant["gap"]),
+            uncertainty_scale_m=float(dominant["uncertainty"]),
+            envelopes_overlap=bool(float(dominant["gap"]) < 0.0),
+            freshness_aoi_s=float(dominant["freshness"]),
+        )
+        dom_packet = dominant["entity_packet"]
+        latest_gen_ts = float(max(drone_packet.state_generation_timestamp, dom_packet.state_generation_timestamp))
+        receive_candidates = [drone_packet.received_packet_timestamp, dom_packet.received_packet_timestamp]
+        receive_candidates = [float(ts) for ts in receive_candidates if ts is not None]
+        latest_recv_ts = max(receive_candidates) if receive_candidates else None
+        timing_freshness = None if latest_recv_ts is None else float(now - latest_recv_ts)
+        reason_tags = list(assessed.reason_tags) + [f"dominant_threat_{dominant['id']}"]
+
+        task_points_summary = []
+        for point in scene.task_points if scene is not None else []:
+            task_points_summary.append({"id": point.id, "x": float(point.x), "y": float(point.y), "z": float(point.z)})
+        obstacles_summary = []
+        for obs in obstacle_states or []:
+            obs_packet = obs.localization_packet
+            obstacles_summary.append(
+                {
+                    "id": obs.id,
+                    "est_x": float(obs_packet.estimated_position_3d[0]),
+                    "est_y": float(obs_packet.estimated_position_3d[1]),
+                    "major_axis_m": float(obs.envelope.major_axis_radius),
+                    "minor_axis_m": float(obs.envelope.minor_axis_radius),
+                    "orientation_deg": float(obs.envelope.orientation_deg),
+                    "freshness_s": float(now - float(obs_packet.state_generation_timestamp)),
+                }
+            )
+        return SafetyContext(
+            safety_score=float(assessed.safety_score),
+            safety_level=str(assessed.safety_level),
+            planning_bias=str(assessed.planning_bias),
+            preferred_standoff_m=float(assessed.preferred_standoff_m),
+            reason_tags=reason_tags,
+            envelope_gap_m=float(dominant["gap"]),
+            uncertainty_scale_m=float(dominant["uncertainty"]),
+            drone_to_user_distance_xy=float(safety_state.drone_to_user_distance_xy),
+            envelopes_overlap=bool(float(dominant["gap"]) < 0.0),
+            latest_generation_timestamp=latest_gen_ts,
+            latest_receive_timestamp=latest_recv_ts,
+            timing_freshness_s=timing_freshness,
+            max_aoi_s=float(dominant["freshness"]),
+            dominant_threat_type=str(dominant["type"]),
+            dominant_threat_id=str(dominant["id"]),
+            dominant_gap_m=float(dominant["gap"]),
+            dominant_uncertainty_scale_m=float(dominant["uncertainty"]),
+            dominant_freshness_s=float(dominant["freshness"]),
+            task_points_summary=task_points_summary,
+            obstacles_summary=obstacles_summary,
+            path_summary=None,
         )
 
     def get_live_ui_snapshot(self):
@@ -787,7 +929,34 @@ class LLMController():
         drone_aoi_s, drone_delay_s = _timing(drone_packet)
         user_aoi_s, user_delay_s = _timing(user_packet)
 
-        obstacle_states = compute_obstacle_envelope_states(self.get_baseline_scene(), now_s=now)
+        obstacle_states_generated = compute_obstacle_envelope_states(self.get_baseline_scene(), now_s=now)
+        obstacle_states = self._simulate_obstacle_returns(obstacle_states_generated, now=now)
+        target_task_point = (
+            "A"
+            if not isinstance(self.latest_baseline_decision, dict)
+            else str(self.latest_baseline_decision.get("target_task_point") or "A")
+        )
+        path_eval = self._compute_path_eval(
+            self.get_baseline_scene(),
+            drone_est or drone_gt,
+            user_est or user_gt,
+            now_s=now,
+            obstacle_envelopes=obstacle_states,
+        )
+        dominant_safety_context = self._build_dominant_threat_context(
+            safety_state=safety_state,
+            obstacle_states=obstacle_states,
+            scene=self.get_baseline_scene(),
+            now=now,
+        )
+        if dominant_safety_context is not None:
+            dominant_safety_context.path_summary = {
+                "target_task_point": target_task_point,
+                "path_clear": None if path_eval is None else bool(path_eval.path_clear),
+                "blocking_entity": None if path_eval is None else str(path_eval.blocking_entity),
+                "corridor_min_gap": None if path_eval is None else float(path_eval.corridor_min_gap),
+            }
+            safety_context = dominant_safety_context
         snapshot = {
             "drone_gt": drone_gt,
             "drone_est": drone_est,
@@ -805,18 +974,8 @@ class LLMController():
             "baseline_scene": self.get_baseline_scene(),
             "baseline_scene_state": self.baseline_scene_state,
             "obstacle_envelope_states": obstacle_states,
-            "path_eval": self._compute_path_eval(
-                self.get_baseline_scene(),
-                drone_est or drone_gt,
-                user_est or user_gt,
-                now_s=now,
-                obstacle_envelopes=obstacle_states,
-            ),
-            "target_task_point": (
-                "A"
-                if not isinstance(self.latest_baseline_decision, dict)
-                else str(self.latest_baseline_decision.get("target_task_point") or "A")
-            ),
+            "path_eval": path_eval,
+            "target_task_point": target_task_point,
             "baseline_decision": self.latest_baseline_decision,
             "baseline_expectation_summary": self.get_baseline_expectation_summary(safety_context),
             "baseline_all_scene_expectations": self.get_all_scene_expectation_summary(safety_context),
@@ -1013,14 +1172,19 @@ class LLMController():
     def _debug_log_obstacle_envelopes(self, obstacle_states):
         if not obstacle_states:
             return
+        now = time.time()
         parts = []
         for obs in obstacle_states:
+            packet = obs.localization_packet
+            aoi = float(now - float(packet.state_generation_timestamp))
             parts.append(
                 f"{obs.id}:gt=({obs.gt_xy[0]:.2f},{obs.gt_xy[1]:.2f}) "
                 f"est=({obs.est_xy[0]:.2f},{obs.est_xy[1]:.2f}) "
                 f"matrix={obs.matrix_xy} "
                 f"axes=({obs.envelope.major_axis_radius:.3f},{obs.envelope.minor_axis_radius:.3f}) "
-                f"ori={obs.envelope.orientation_deg:.1f}"
+                f"ori={obs.envelope.orientation_deg:.1f} "
+                f"aoi={aoi:.3f}s "
+                f"rx={'None' if packet.received_packet_timestamp is None else f'{float(packet.received_packet_timestamp):.3f}'}"
             )
         print_debug("[BASELINE-OBS] " + " | ".join(parts))
 

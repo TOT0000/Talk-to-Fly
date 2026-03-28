@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -19,17 +19,54 @@ class SafetyContext:
     latest_receive_timestamp: Optional[float] = None
     timing_freshness_s: Optional[float] = None
     max_aoi_s: Optional[float] = None
+    dominant_threat_type: str = "user"
+    dominant_threat_id: str = "user"
+    dominant_gap_m: float = 0.0
+    dominant_uncertainty_scale_m: float = 1.0
+    dominant_freshness_s: Optional[float] = None
+    task_points_summary: Optional[List[Dict[str, Any]]] = None
+    obstacles_summary: Optional[List[Dict[str, Any]]] = None
+    path_summary: Optional[Dict[str, Any]] = None
 
     def to_prompt_block(self) -> str:
         freshness = "unknown" if self.timing_freshness_s is None else f"{self.timing_freshness_s:.2f} s"
         max_aoi = "unknown" if self.max_aoi_s is None else f"{self.max_aoi_s:.2f} s"
         latest_gen = "unknown" if self.latest_generation_timestamp is None else f"{self.latest_generation_timestamp:.3f}"
         latest_recv = "unknown" if self.latest_receive_timestamp is None else f"{self.latest_receive_timestamp:.3f}"
+        dominant_freshness = "unknown" if self.dominant_freshness_s is None else f"{self.dominant_freshness_s:.2f} s"
+        task_points = self.task_points_summary or []
+        obstacles = self.obstacles_summary or []
+        path_summary = self.path_summary or {}
+        task_points_block = (
+            "\n".join(
+                f"- {row.get('id')}: x={float(row.get('x')):.2f}, y={float(row.get('y')):.2f}, z={float(row.get('z')):.2f}"
+                for row in task_points
+            )
+            if task_points
+            else "- (n/a)"
+        )
+        obstacle_block = (
+            "\n".join(
+                (
+                    f"- {row.get('id')}: est=({float(row.get('est_x')):.2f},{float(row.get('est_y')):.2f}), "
+                    f"env=major:{float(row.get('major_axis_m')):.2f}/minor:{float(row.get('minor_axis_m')):.2f}/ori:{float(row.get('orientation_deg')):.1f}, "
+                    f"freshness_s={float(row.get('freshness_s', 0.0)):.2f}"
+                )
+                for row in obstacles
+            )
+            if obstacles
+            else "- (n/a)"
+        )
         return (
             f"safety_score: {self.safety_score:.3f}\n"
             f"safety_level: {self.safety_level}\n"
             f"planning_bias: {self.planning_bias}\n"
             f"reason_tags: {self.reason_tags}\n"
+            f"dominant_threat_type: {self.dominant_threat_type}\n"
+            f"dominant_threat_id: {self.dominant_threat_id}\n"
+            f"dominant_gap_m: {self.dominant_gap_m:.2f}\n"
+            f"dominant_uncertainty_scale_m: {self.dominant_uncertainty_scale_m:.2f}\n"
+            f"dominant_freshness_s: {dominant_freshness}\n"
             f"drone_to_user_distance_xy: {self.drone_to_user_distance_xy:.2f}\n"
             f"envelope_gap_m(centerline_ray_gap): {self.envelope_gap_m:.2f}\n"
             f"uncertainty_scale_m: {self.uncertainty_scale_m:.2f}\n"
@@ -37,5 +74,12 @@ class SafetyContext:
             f"latest_generation_timestamp: {latest_gen}\n"
             f"latest_receive_timestamp: {latest_recv}\n"
             f"timing_freshness_s: {freshness}\n"
-            f"max_aoi_s: {max_aoi}"
+            f"max_aoi_s: {max_aoi}\n"
+            f"task_points_estimated_xy:\n{task_points_block}\n"
+            f"obstacle_envelopes_and_freshness:\n{obstacle_block}\n"
+            f"current_target_path_summary: "
+            f"target={path_summary.get('target_task_point', 'n/a')}, "
+            f"path_clear={path_summary.get('path_clear', 'n/a')}, "
+            f"blocking_entity={path_summary.get('blocking_entity', 'n/a')}, "
+            f"corridor_min_gap_m={path_summary.get('corridor_min_gap', 'n/a')}"
         )
