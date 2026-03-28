@@ -29,7 +29,7 @@ BackgroundSafety: safety_score=0.66, safety_level=CAUTION, planning_bias=balance
 PathSummaries: to A(path_clear=False,blocking_entity=O1,corridor_min_gap=-0.22), to user(path_clear=True,blocking_entity=none,corridor_min_gap=0.64)
 Task: [A] Go to A.
 Rationale: Selected target A is blocked by O1, so staged detour is preferred over direct movement.
-Response: tc(30);mf(0.9);tu(35);mf(1.0);d(0.2);
+Response: tc(30);mf(0.9);tu(35);mf(1.0);d(0.2);_1=7.5;_2=3.2;ge(_1,_2);
 
 Example 4 (Task-point Detour):
 Scene:
@@ -40,7 +40,7 @@ BackgroundSafety: safety_score=0.62, safety_level=CAUTION, planning_bias=balance
 PathSummaries: to B(path_clear=False,blocking_entity=user,corridor_min_gap=-0.18), to A(path_clear=True,blocking_entity=none,corridor_min_gap=0.77)
 Task: [A] Go to B.
 Rationale: User blocks corridor to B; planner should detour instead of forcing direct path.
-Response: tu(30);mf(0.8);tc(35);mf(1.0);d(0.2);
+Response: tu(30);mf(0.8);tc(35);mf(1.0);d(0.2);_1=2.4;_2=7.0;ge(_1,_2);
 
 Example 5 (High-risk task-point WARNING):
 Scene:

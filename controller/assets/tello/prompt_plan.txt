@@ -20,7 +20,7 @@ The scene/safety context may include:
 - BackgroundSafety (dominant threat based global risk)
 - PathSummaries by candidate target
 
-CRITICAL: do not use a single fixed current-target viewpoint.
+CRITICAL: do not use a single fixed default-target viewpoint.
 You must select target intent from the user instruction first, then use candidate targets/path summaries accordingly.
 
 Task interpretation priority:

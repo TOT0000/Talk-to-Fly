@@ -1148,9 +1148,9 @@ class LLMController():
             elif path_eval.blocking_entity == "user" and user_pos is not None:
                 side = "left" if float(user_pos[1]) <= float(drone_pos[1]) else "right"
             if side == "left":
-                plan = "tcc(35);mf(0.9);tc(35);mf(0.9);d(0.2);"
+                plan = "tu(35);mf(0.9);tc(35);mf(0.9);d(0.2);"
             else:
-                plan = "tc(35);mf(0.9);tcc(35);mf(0.9);d(0.2);"
+                plan = "tc(35);mf(0.9);tu(35);mf(0.9);d(0.2);"
             mode = "staged_detour"
         note = (
             f"target={target.id}; path_clear={path_eval.path_clear}; "
