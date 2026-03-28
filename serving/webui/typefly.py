@@ -461,9 +461,12 @@ class TypeFly:
         self.active_scenario = normalized
         return normalized, report, runtime
 
-    def _move_user(self, dx: float, dy: float, step_m: float):
+    def _move_user(self, local_forward: float, local_right: float, step_m: float):
         step = float(step_m)
-        updated = self.llm_controller.move_user_world(dx=dx * step, dy=dy * step, dz=0.0)
+        yaw = float(self.llm_controller.get_user_heading_yaw())
+        dx_world = ((local_forward * math.cos(yaw)) + (local_right * math.sin(yaw))) * step
+        dy_world = ((local_forward * math.sin(yaw)) - (local_right * math.cos(yaw))) * step
+        updated = self.llm_controller.move_user_world(dx=dx_world, dy=dy_world, dz=0.0)
         if updated is None:
             return "User move failed: no simulation user-position provider."
         runtime = self.llm_controller.get_scenario_runtime_status()
@@ -474,16 +477,16 @@ class TypeFly:
         )
 
     def move_user_forward(self, step_m: float):
-        return self._move_user(dx=0.0, dy=1.0, step_m=step_m)
+        return self._move_user(local_forward=1.0, local_right=0.0, step_m=step_m)
 
     def move_user_backward(self, step_m: float):
-        return self._move_user(dx=0.0, dy=-1.0, step_m=step_m)
+        return self._move_user(local_forward=-1.0, local_right=0.0, step_m=step_m)
 
     def move_user_left(self, step_m: float):
-        return self._move_user(dx=-1.0, dy=0.0, step_m=step_m)
+        return self._move_user(local_forward=0.0, local_right=-1.0, step_m=step_m)
 
     def move_user_right(self, step_m: float):
-        return self._move_user(dx=1.0, dy=0.0, step_m=step_m)
+        return self._move_user(local_forward=0.0, local_right=1.0, step_m=step_m)
 
     def turn_user_cw(self, deg_step: float):
         yaw = self.llm_controller.turn_user_heading(-float(deg_step))
@@ -717,6 +720,12 @@ class TypeFly:
                 "### Safety / Risk",
                 f"- safety_score: {safety_context.safety_score:.3f}",
                 f"- safety_level: {safety_context.safety_level}",
+                f"- planning_bias: {safety_context.planning_bias}",
+                f"- dominant_threat_type: {getattr(safety_context, 'dominant_threat_type', 'user')}",
+                f"- dominant_threat_id: {getattr(safety_context, 'dominant_threat_id', 'user')}",
+                f"- dominant_gap_m: {float(getattr(safety_context, 'dominant_gap_m', safety_context.envelope_gap_m)):.3f} m",
+                f"- dominant_uncertainty_scale_m: {float(getattr(safety_context, 'dominant_uncertainty_scale_m', safety_context.uncertainty_scale_m)):.3f} m",
+                f"- dominant_freshness_s: {self._fmt_float(getattr(safety_context, 'dominant_freshness_s', None), ' s')}",
                 f"- envelope_gap_m (centerline ray-gap): {safety_context.envelope_gap_m:.3f} m",
                 f"- uncertainty_scale_m: {safety_context.uncertainty_scale_m:.3f} m",
                 f"- envelopes_overlap (centerline): {safety_context.envelopes_overlap}",
