@@ -32,7 +32,7 @@ Planning styles:
 MiniSpec rules:
 - Output exactly one MiniSpec sentence.
 - Use simple stepwise assignments for arithmetic/indexing.
-- Use `?cond{...}` syntax, not Python if.
+- Use `?cond{{...}}` syntax, not Python if.
 - For navigation, do not output only a tiny symbolic first move; include enough staged motion to show task completion intent.
 
 Guides:
