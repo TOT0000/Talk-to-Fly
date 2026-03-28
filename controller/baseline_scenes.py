@@ -104,8 +104,36 @@ def _signed_gap_segment_to_obstacle_envelope(
     samples: int = 81,
 ) -> float:
     env = obstacle_state.envelope
-    inflated_major = max(1e-4, float(env.major_axis_radius) + float(corridor_half_width_m))
-    inflated_minor = max(1e-4, float(env.minor_axis_radius) + float(corridor_half_width_m))
+    return _signed_gap_segment_to_ellipse_envelope(
+        ax=ax,
+        ay=ay,
+        bx=bx,
+        by=by,
+        center_x=float(env.center_xy[0]),
+        center_y=float(env.center_xy[1]),
+        major_axis_radius=float(env.major_axis_radius),
+        minor_axis_radius=float(env.minor_axis_radius),
+        orientation_deg=float(env.orientation_deg),
+        corridor_half_width_m=float(corridor_half_width_m),
+        samples=samples,
+    )
+
+
+def _signed_gap_segment_to_ellipse_envelope(
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+    center_x: float,
+    center_y: float,
+    major_axis_radius: float,
+    minor_axis_radius: float,
+    orientation_deg: float,
+    corridor_half_width_m: float,
+    samples: int = 81,
+) -> float:
+    inflated_major = max(1e-4, float(major_axis_radius) + float(corridor_half_width_m))
+    inflated_minor = max(1e-4, float(minor_axis_radius) + float(corridor_half_width_m))
 
     min_f = float("inf")
     for i in range(max(3, samples)):
@@ -115,9 +143,9 @@ def _signed_gap_segment_to_obstacle_envelope(
         lx, ly = _rotate_to_obstacle_local(
             px,
             py,
-            center_x=float(env.center_xy[0]),
-            center_y=float(env.center_xy[1]),
-            orientation_deg=float(env.orientation_deg),
+            center_x=float(center_x),
+            center_y=float(center_y),
+            orientation_deg=float(orientation_deg),
         )
         f = ((lx / inflated_major) ** 2) + ((ly / inflated_minor) ** 2)
         if f < min_f:
@@ -228,6 +256,7 @@ def evaluate_path_clear(
     target_xy: Tuple[float, float],
     user_xy: Optional[Tuple[float, float]],
     user_radius_m: float,
+    user_envelope: Optional[SafetyEnvelope2D],
     obstacle_envelopes: List[ObstacleEnvelopeState],
     corridor_half_width_m: float = 0.35,
 ) -> PathClearResult:
@@ -236,7 +265,25 @@ def evaluate_path_clear(
 
     blockers: List[Tuple[str, float]] = []
 
-    if user_xy is not None:
+    if user_envelope is not None:
+        blockers.append(
+            (
+                "user",
+                _signed_gap_segment_to_ellipse_envelope(
+                    ax=ax,
+                    ay=ay,
+                    bx=bx,
+                    by=by,
+                    center_x=float(user_envelope.center_xy[0]),
+                    center_y=float(user_envelope.center_xy[1]),
+                    major_axis_radius=float(user_envelope.major_axis_radius),
+                    minor_axis_radius=float(user_envelope.minor_axis_radius),
+                    orientation_deg=float(user_envelope.orientation_deg),
+                    corridor_half_width_m=float(corridor_half_width_m),
+                ),
+            )
+        )
+    elif user_xy is not None:
         center_distance = _distance_point_to_segment(float(user_xy[0]), float(user_xy[1]), ax, ay, bx, by)
         blockers.append(("user", center_distance - (float(user_radius_m) + float(corridor_half_width_m))))
 
@@ -282,6 +329,7 @@ def build_scene_expectations(
             target_xy=(float(point.x), float(point.y)),
             user_xy=user_xy,
             user_radius_m=float(user_radius_m),
+            user_envelope=None,
             obstacle_envelopes=obstacle_states,
             corridor_half_width_m=float(corridor_half_width_m),
         )
