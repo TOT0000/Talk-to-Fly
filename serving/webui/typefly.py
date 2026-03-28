@@ -3,6 +3,7 @@ import time
 import sys, os
 import asyncio
 import io, time
+import math
 from collections import deque
 import gradio as gr
 import argparse
@@ -23,6 +24,7 @@ from controller.utils import print_debug, print_t
 from controller.llm_wrapper import GPT4, LLAMA3
 from controller.abs.robot_wrapper import RobotType
 from controller.experiment_scenarios import SCENARIOS, normalize_scenario_name
+from controller.baseline_scenes import BASELINE_SCENES, normalize_baseline_scene_id
 from gradio import Timer
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +44,9 @@ class TypeFly:
         self.llm_controller = LLMController(controller_robot_type, self.virtual_queue, use_http, self.message_queue, enable_video=enable_video)
         self.llm_controller.register_position_callback(self.receive_position)
         self.active_scenario = self.llm_controller.set_active_scenario(initial_scenario)
+        self.active_baseline_scene = self.llm_controller.set_baseline_scene(
+            normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_1_CLEAR_PATH"))
+        )
         
         self.system_stop = False
         self.ui_css = """
@@ -124,6 +129,12 @@ class TypeFly:
                         label="Scenario Mode",
                     )
                     self.scenario_apply_btn = gr.Button("Apply Scenario")
+                    self.baseline_scene_selector = gr.Dropdown(
+                        choices=list(BASELINE_SCENES.keys()),
+                        value=normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_1_CLEAR_PATH")),
+                        label="Baseline Scene",
+                    )
+                    self.baseline_scene_apply_btn = gr.Button("Apply Baseline Scene")
                 with gr.Column(scale=1, min_width=320, elem_classes="user-move-panel"):
                     self.user_move_step = gr.Slider(
                         minimum=0.1,
@@ -131,6 +142,14 @@ class TypeFly:
                         value=0.5,
                         step=0.1,
                         label="User Move Step (m)",
+                        elem_classes="user-move-step",
+                    )
+                    self.user_turn_step = gr.Slider(
+                        minimum=5,
+                        maximum=90,
+                        value=15,
+                        step=5,
+                        label="User Turn Step (deg)",
                         elem_classes="user-move-step",
                     )
                     with gr.Row(elem_classes="user-move-row"):
@@ -145,11 +164,19 @@ class TypeFly:
                         gr.Markdown("")
                         self.user_move_backward_btn = gr.Button("Backward", elem_classes="user-move-btn")
                         gr.Markdown("")
+                    with gr.Row(elem_classes="user-move-row"):
+                        self.user_turn_ccw_btn = gr.Button("Turn Counter Clockwise", elem_classes="user-move-btn")
+                        self.user_turn_cw_btn = gr.Button("Turn Clockwise", elem_classes="user-move-btn")
             self.scenario_status = gr.Markdown(value="")
 
             self.scenario_apply_btn.click(
                 fn=self.apply_scenario,
                 inputs=[self.scenario_selector],
+                outputs=[self.scenario_status],
+            )
+            self.baseline_scene_apply_btn.click(
+                fn=self.apply_baseline_scene,
+                inputs=[self.baseline_scene_selector],
                 outputs=[self.scenario_status],
             )
 
@@ -171,6 +198,16 @@ class TypeFly:
             self.user_move_right_btn.click(
                 fn=self.move_user_right,
                 inputs=[self.user_move_step],
+                outputs=[self.scenario_status],
+            )
+            self.user_turn_cw_btn.click(
+                fn=self.turn_user_cw,
+                inputs=[self.user_turn_step],
+                outputs=[self.scenario_status],
+            )
+            self.user_turn_ccw_btn.click(
+                fn=self.turn_user_ccw,
+                inputs=[self.user_turn_step],
                 outputs=[self.scenario_status],
             )
 
@@ -240,6 +277,7 @@ class TypeFly:
                 self.coordinate_markdown = gr.Markdown(value="### Coordinates\nWaiting for live data...")
                 self.safety_markdown = gr.Markdown(value="### Safety / Risk\nWaiting for safety state...")
                 self.delay_markdown = gr.Markdown(value="### AoI / Delay\nWaiting for packets...")
+                self.baseline_markdown = gr.Markdown(value="### Baseline Status\nWaiting for baseline scene...")
 
             self.counter = gr.State(0)
             self.timer = Timer(value=0.08)
@@ -258,6 +296,7 @@ class TypeFly:
                     self.coordinate_markdown,
                     self.safety_markdown,
                     self.delay_markdown,
+                    self.baseline_markdown,
                 ]
             )
 
@@ -407,6 +446,12 @@ class TypeFly:
             f"(score={self._fmt_float(runtime.get('safety_score'))})"
         )
 
+    def apply_baseline_scene(self, scene_id):
+        normalized = self.llm_controller.set_baseline_scene(scene_id)
+        state = self.llm_controller.apply_baseline_scene()
+        user_yaw_deg = math.degrees(self.llm_controller.get_user_heading_yaw())
+        return f"Baseline scene `{normalized}` applied. drone_init={self._fmt_vec(state.get('drone_initial_pose'))} user={self._fmt_vec(state.get('user_position'))} user_yaw={user_yaw_deg:.1f}deg"
+
     def _apply_mode_and_collect(self, scenario_name):
         normalized = normalize_scenario_name(scenario_name)
         self.llm_controller.set_active_scenario(normalized)
@@ -438,6 +483,14 @@ class TypeFly:
 
     def move_user_right(self, step_m: float):
         return self._move_user(dx=1.0, dy=0.0, step_m=step_m)
+
+    def turn_user_cw(self, deg_step: float):
+        yaw = self.llm_controller.turn_user_heading(-float(deg_step))
+        return f"User heading turned CW by {deg_step:.1f}°. new_yaw={math.degrees(yaw):.1f}°"
+
+    def turn_user_ccw(self, deg_step: float):
+        yaw = self.llm_controller.turn_user_heading(float(deg_step))
+        return f"User heading turned CCW by {deg_step:.1f}°. new_yaw={math.degrees(yaw):.1f}°"
 
     def process_message(self, message, history):
         print_t(f"[S] Receiving task description: {message}")
@@ -485,6 +538,10 @@ class TypeFly:
         asyncio_thread.start()
 
         self.llm_controller.start_robot()
+        try:
+            self.llm_controller.apply_baseline_scene()
+        except Exception:
+            pass
 
         if self.llm_controller.enable_video:
             llmc_thread = Thread(target=self.llm_controller.capture_loop, args=(self.asyncio_loop,))
@@ -577,6 +634,7 @@ class TypeFly:
         coordinate_md = self.render_coordinate_markdown(snapshot)
         safety_md = self.render_safety_markdown(snapshot)
         delay_md = self.render_delay_markdown(snapshot)
+        baseline_md = self.render_baseline_markdown(snapshot)
         counter += 1
         print_debug(
             "[UI-CALLBACK] "
@@ -587,7 +645,7 @@ class TypeFly:
             f"user_est={None if not snapshot else snapshot.get('user_est')} "
             f"counter={counter}"
         )
-        return global_xy, xy, x, y, z, aoi_img, delay_img, counter, coordinate_md, safety_md, delay_md
+        return global_xy, xy, x, y, z, aoi_img, delay_img, counter, coordinate_md, safety_md, delay_md, baseline_md
 
     def _fmt_vec(self, value):
         if value is None:
@@ -675,6 +733,65 @@ class TypeFly:
             f"- user observed uplink delay (red): {self._fmt_float(snapshot.get('user_delay_s'), ' s')}"
         )
 
+    def render_baseline_markdown(self, snapshot):
+        if not snapshot:
+            return "### Baseline Status\nWaiting for baseline state..."
+        scene = snapshot.get("baseline_scene")
+        path_eval = snapshot.get("path_eval")
+        target_task_point = snapshot.get("target_task_point") or "A"
+        blocking = "none"
+        path_clear = "n/a"
+        min_gap = "n/a"
+        if path_eval is not None:
+            blocking = path_eval.blocking_entity
+            path_clear = str(bool(path_eval.path_clear))
+            min_gap = f"{float(path_eval.corridor_min_gap):.3f}"
+        expectation_lines = []
+        for row in snapshot.get("baseline_expectation_summary") or []:
+            expectation_lines.append(
+                f"  - {row.get('target_task_point')}: clear={row.get('expected_path_clear')} "
+                f"blocker={row.get('expected_blocking_entity')} mode={row.get('expected_motion_mode')}"
+            )
+        expectation_block = "\n".join(expectation_lines) if expectation_lines else "  - (n/a)"
+        all_rows = snapshot.get("baseline_all_scene_expectations") or []
+        all_scene_block = {}
+        for row in all_rows:
+            scene_id = row.get("scene_id")
+            item = (
+                f"{row.get('target_task_point')}="
+                f"{row.get('expected_motion_mode')}/"
+                f"{row.get('expected_blocking_entity')}"
+            )
+            all_scene_block.setdefault(scene_id, []).append(item)
+        all_scene_lines = []
+        for scene_id, items in all_scene_block.items():
+            all_scene_lines.append(f"  - {scene_id}: " + ", ".join(items))
+        all_scene_summary = "\n".join(all_scene_lines) if all_scene_lines else "  - (n/a)"
+        return (
+            "### Baseline Status\n"
+            f"- current scene id: {None if scene is None else scene.id}\n"
+            f"- current target task point: {target_task_point}\n"
+            f"- path_clear: {path_clear}\n"
+            f"- blocking entity: {blocking}\n"
+            f"- corridor_min_gap_m: {min_gap}\n"
+            f"- user_heading_yaw_deg: {math.degrees(float(snapshot.get('user_heading_yaw_rad') or 0.0)):.1f}\n"
+            f"- current scene expected behavior:\n{expectation_block}\n"
+            f"- all scenes quick matrix (mode/blocker):\n{all_scene_summary}"
+        )
+
+    def _estimate_heading_from_history(self, primary_key: str, fallback_key: str = None):
+        history = list(self.position_history.get(primary_key, []))
+        if len(history) < 2 and fallback_key:
+            history = list(self.position_history.get(fallback_key, []))
+        if len(history) >= 2:
+            p0 = history[-2]
+            p1 = history[-1]
+            dx = float(p1[0] - p0[0])
+            dy = float(p1[1] - p0[1])
+            if abs(dx) > 1e-6 or abs(dy) > 1e-6:
+                return float(math.atan2(dy, dx)), "trajectory_history"
+        return 0.0, "fallback_zero"
+
     def _axis_limits_from_snapshot(self, snapshot):
         positions = self._extract_ui_positions(snapshot)
         xs, ys = [], []
@@ -746,7 +863,7 @@ class TypeFly:
         delay_img = self._render_timing_plot(("drone_delay_s", "user_delay_s"), "Delay Trend", "Delay (s)")
         return aoi_img, delay_img
 
-    def _render_xy_view(self, snapshot, xlim, ylim, title, figsize=(5, 4)):
+    def _render_xy_view(self, snapshot, xlim, ylim, title, figsize=(5, 4), show_legend=True):
         positions = self._extract_ui_positions(snapshot)
         fig_xy, ax_xy = plt.subplots(figsize=figsize)
 
@@ -810,18 +927,69 @@ class TypeFly:
                 )
                 ax_xy.add_patch(ellipse)
 
+        baseline_scene = snapshot.get("baseline_scene") if snapshot else None
+        obstacle_states = snapshot.get("obstacle_envelope_states") if snapshot else None
+        if baseline_scene is not None:
+            for point in baseline_scene.task_points:
+                ax_xy.scatter([point.x], [point.y], c="#2E7D32", marker="D", s=65, label="Task point")
+                ax_xy.text(point.x + 0.06, point.y + 0.06, f"{point.id}", fontsize=8, color="#1B5E20")
+            for obstacle in obstacle_states or []:
+                ax_xy.scatter([obstacle.gt_xy[0]], [obstacle.gt_xy[1]], c="#5D4037", marker="s", s=62, label="Obstacle GT")
+                ax_xy.scatter([obstacle.est_xy[0]], [obstacle.est_xy[1]], c="#8D6E63", marker="X", s=58, label="Obstacle EST")
+                obstacle_ellipse = Ellipse(
+                    xy=(float(obstacle.est_xy[0]), float(obstacle.est_xy[1])),
+                    width=2.0 * float(obstacle.envelope_major_axis_m),
+                    height=2.0 * float(obstacle.envelope_minor_axis_m),
+                    angle=float(obstacle.orientation_deg),
+                    edgecolor="#8D6E63",
+                    facecolor="none",
+                    linestyle=":",
+                    linewidth=1.4,
+                    label="Obstacle envelope",
+                )
+                ax_xy.add_patch(obstacle_ellipse)
+                ax_xy.text(obstacle.est_xy[0] + 0.08, obstacle.est_xy[1] + 0.08, obstacle.id, fontsize=8, color="#4E342E")
+
+        drone_for_heading = positions.get("drone_gt") or positions.get("drone_est")
+        yaw_rad = float(snapshot.get("drone_yaw_rad") or 0.0) if snapshot else 0.0
+        if drone_for_heading is not None:
+            hx = float(drone_for_heading[0])
+            hy = float(drone_for_heading[1])
+            arrow_len = 0.55
+            dx = arrow_len * float(math.cos(yaw_rad))
+            dy = arrow_len * float(math.sin(yaw_rad))
+            ax_xy.arrow(hx, hy, dx, dy, head_width=0.16, head_length=0.18, color="#0B57D0", linewidth=1.6, length_includes_head=True, zorder=5)
+            ax_xy.text(hx + dx + 0.05, hy + dy + 0.05, "Heading", fontsize=8, color="#0B57D0")
+
+        user_for_heading = positions.get("user_gt") or positions.get("user_est")
+        if user_for_heading is not None:
+            explicit_user_yaw = snapshot.get("user_heading_yaw_rad") if snapshot else None
+            if explicit_user_yaw is not None:
+                user_yaw_rad = float(explicit_user_yaw)
+                user_heading_source = "explicit_state"
+            else:
+                user_yaw_rad, user_heading_source = self._estimate_heading_from_history("user_gt", fallback_key="user_est")
+            ux = float(user_for_heading[0])
+            uy = float(user_for_heading[1])
+            arrow_len = 0.45
+            udx = arrow_len * float(math.cos(user_yaw_rad))
+            udy = arrow_len * float(math.sin(user_yaw_rad))
+            ax_xy.arrow(ux, uy, udx, udy, head_width=0.14, head_length=0.16, color="#C5221F", linewidth=1.4, length_includes_head=True, zorder=5)
+            ax_xy.text(ux + udx + 0.04, uy + udy + 0.04, f"User Heading ({user_heading_source})", fontsize=7, color="#C5221F")
+
         ax_xy.set_xlim(*xlim)
         ax_xy.set_ylim(*ylim)
         ax_xy.set_xlabel("X (m)")
         ax_xy.set_ylabel("Y (m)")
         ax_xy.set_title(title)
         ax_xy.grid(True, linestyle='--', linewidth=0.5)
-        handles, labels = ax_xy.get_legend_handles_labels()
-        dedup = dict(zip(labels, handles))
-        ax_xy.legend(dedup.values(), dedup.keys(), fontsize=8)
+        if show_legend:
+            handles, labels = ax_xy.get_legend_handles_labels()
+            dedup = dict(zip(labels, handles))
+            ax_xy.legend(dedup.values(), dedup.keys(), fontsize=8)
 
         buf_xy = io.BytesIO()
-        fig_xy.savefig(buf_xy, format='png', bbox_inches='tight')
+        fig_xy.savefig(buf_xy, format='png')
         buf_xy.seek(0)
         plt.close(fig_xy)
         return Image.open(buf_xy)
@@ -843,13 +1011,15 @@ class TypeFly:
             ylim=(0.0, 12.0),
             title="Global XY Map (Fixed 0-12m Workspace)",
             figsize=(10, 8),
+            show_legend=True,
         )
         local_xy = self._render_xy_view(
             snapshot=snapshot,
             xlim=dynamic_xlim,
             ylim=dynamic_ylim,
             title="Drone / User Localization & Safety Envelope (XY view)",
-            figsize=(5, 4),
+            figsize=(5.8, 4.4),
+            show_legend=False,
         )
 
         series_specs = [
