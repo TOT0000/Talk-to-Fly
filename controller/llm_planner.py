@@ -93,7 +93,14 @@ class LLMPlanner():
         safety_context_block = (
             safety_context.to_prompt_block()
             if safety_context is not None
-            else "safety_score: 0.500\nsafety_level: CAUTION\nplanning_bias: balanced\nreason_tags: ['safety_context_unavailable']\ndrone_to_user_distance_xy: 0.00\nenvelope_gap_m: 0.00\nuncertainty_scale_m: 1.00\nenvelopes_overlap: False\nlatest_generation_timestamp: unknown\nlatest_receive_timestamp: unknown\ntiming_freshness_s: unknown\nmax_aoi_s: unknown"
+            else (
+                "safety_score: 0.500\nsafety_level: CAUTION\nplanning_bias: balanced\nreason_tags: ['safety_context_unavailable']\n"
+                "dominant_threat_type: user\ndominant_threat_id: user\ndominant_gap_m: 0.00\ndominant_uncertainty_scale_m: 1.00\ndominant_freshness_s: unknown\n"
+                "drone_to_user_distance_xy: 0.00\nenvelope_gap_m: 0.00\nuncertainty_scale_m: 1.00\nenvelopes_overlap: False\n"
+                "latest_generation_timestamp: unknown\nlatest_receive_timestamp: unknown\ntiming_freshness_s: unknown\nmax_aoi_s: unknown\n"
+                "task_points_estimated_xy:\n- (n/a)\ncandidate_targets_estimated:\n- (n/a)\nobstacle_envelopes_and_freshness:\n- (n/a)\npath_summaries_by_candidate:\n- (n/a)\n"
+                "current_target_path_summary: target=n/a, path_clear=n/a, blocking_entity=n/a, corridor_min_gap_m=n/a"
+            )
         )
 
         prompt = self.prompt_plan.format(
