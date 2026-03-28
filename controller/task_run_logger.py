@@ -4,7 +4,7 @@ import json
 import os
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from typing import Dict, Optional
 from uuid import uuid4
@@ -125,7 +125,24 @@ class TaskRunLogger:
             return ""
         if isinstance(value, str):
             return value
-        return json.dumps(value, ensure_ascii=False)
+        def _default(o):
+            if is_dataclass(o):
+                return asdict(o)
+            if hasattr(o, "to_dict") and callable(getattr(o, "to_dict")):
+                try:
+                    return o.to_dict()
+                except Exception:
+                    pass
+            if hasattr(o, "__dict__"):
+                try:
+                    return {
+                        k: v for k, v in vars(o).items()
+                        if not str(k).startswith("_")
+                    }
+                except Exception:
+                    pass
+            return str(o)
+        return json.dumps(value, ensure_ascii=False, default=_default)
 
     def _ensure_workbook(self):
         if not self._enabled:
