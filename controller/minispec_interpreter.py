@@ -298,6 +298,27 @@ class Statement:
                 args[i] = args[i].strip().strip('\'"')
                 if args[i].startswith('_') or args[i].startswith('-') or any(op in args[i] for op in '+-*/'):
                     args[i] = self.eval_expr(args[i]).value  # 注意這裡用 eval_expr，並取 .value
+
+            if name == 'p':
+                interpolated_args = []
+                for arg in args:
+                    if not isinstance(arg, str):
+                        interpolated_args.append(arg)
+                        continue
+
+                    def _replace_var(match):
+                        token = match.group(0)
+                        try:
+                            value = self.eval_expr(token).value
+                            if isinstance(value, list):
+                                return str(value)
+                            return str(value)
+                        except Exception:
+                            return token
+
+                    interpolated = re.sub(r'(?<![A-Za-z0-9_])_[A-Za-z0-9_]+(?:\[-?\d+\])?', _replace_var, arg)
+                    interpolated_args.append(interpolated)
+                args = interpolated_args
         else:
             args = []
 
@@ -592,7 +613,17 @@ class MiniSpecInterpreter:
                     print_t(">>> Start execution")
                 statement = Statement.execution_queue.get()
                 print_debug(f'Queue get statement: {statement}')
-                ret_val = statement.eval()
+                try:
+                    ret_val = statement.eval()
+                except Exception as e:
+                    while not Statement.execution_queue.empty():
+                        Statement.execution_queue.get()
+                    self.timestamp_end_execution = time.time()
+                    self.timestamp_start_execution = None
+                    error_message = f"MiniSpec execution error at statement `{statement}`: {e}"
+                    print_t(f"[I] {error_message}")
+                    self.ret_queue.put(MiniSpecReturnValue(error_message, True))
+                    return
                 print_t(f'Queue statement done: {statement}')
                 if statement.ret:
                     while not Statement.execution_queue.empty():
