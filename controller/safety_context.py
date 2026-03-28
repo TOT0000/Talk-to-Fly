@@ -27,6 +27,8 @@ class SafetyContext:
     task_points_summary: Optional[List[Dict[str, Any]]] = None
     obstacles_summary: Optional[List[Dict[str, Any]]] = None
     path_summary: Optional[Dict[str, Any]] = None
+    candidate_targets_summary: Optional[List[Dict[str, Any]]] = None
+    candidate_path_summaries: Optional[List[Dict[str, Any]]] = None
 
     def to_prompt_block(self) -> str:
         freshness = "unknown" if self.timing_freshness_s is None else f"{self.timing_freshness_s:.2f} s"
@@ -36,6 +38,8 @@ class SafetyContext:
         dominant_freshness = "unknown" if self.dominant_freshness_s is None else f"{self.dominant_freshness_s:.2f} s"
         task_points = self.task_points_summary or []
         obstacles = self.obstacles_summary or []
+        candidate_targets = self.candidate_targets_summary or []
+        candidate_paths = self.candidate_path_summaries or []
         path_summary = self.path_summary or {}
         task_points_block = (
             "\n".join(
@@ -57,6 +61,26 @@ class SafetyContext:
             if obstacles
             else "- (n/a)"
         )
+        candidate_targets_block = (
+            "\n".join(
+                f"- {row.get('id')}: est=({float(row.get('x')):.2f},{float(row.get('y')):.2f},{float(row.get('z')):.2f})"
+                for row in candidate_targets
+            )
+            if candidate_targets
+            else "- (n/a)"
+        )
+        candidate_paths_block = (
+            "\n".join(
+                (
+                    f"- to {row.get('target_id')}: path_clear={row.get('path_clear')}, "
+                    f"blocking_entity={row.get('blocking_entity')}, "
+                    f"corridor_min_gap_m={row.get('corridor_min_gap')}"
+                )
+                for row in candidate_paths
+            )
+            if candidate_paths
+            else "- (n/a)"
+        )
         return (
             f"safety_score: {self.safety_score:.3f}\n"
             f"safety_level: {self.safety_level}\n"
@@ -76,7 +100,9 @@ class SafetyContext:
             f"timing_freshness_s: {freshness}\n"
             f"max_aoi_s: {max_aoi}\n"
             f"task_points_estimated_xy:\n{task_points_block}\n"
+            f"candidate_targets_estimated:\n{candidate_targets_block}\n"
             f"obstacle_envelopes_and_freshness:\n{obstacle_block}\n"
+            f"path_summaries_by_candidate:\n{candidate_paths_block}\n"
             f"current_target_path_summary: "
             f"target={path_summary.get('target_task_point', 'n/a')}, "
             f"path_clear={path_summary.get('path_clear', 'n/a')}, "

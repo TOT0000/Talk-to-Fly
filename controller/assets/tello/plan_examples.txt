@@ -1,69 +1,109 @@
-Example 1 (Direct):
+Example 1 (Task-point Direct):
 Scene:
-TaskPoints: A=(6.0, 2.0, -1.5), B=(2.0, 6.0, -1.5), C=(9.0, 8.0, -1.5)
-Obstacles: O1 est=(4.2,4.5) env=(major=0.72,minor=0.41,yaw=28,freshness=0.10), O2 est=(7.4,5.1) env=(major=0.66,minor=0.39,yaw=-10,freshness=0.11), O3 est=(3.6,7.8) env=(major=0.70,minor=0.42,yaw=13,freshness=0.12)
-BackgroundSafety: safety_score=0.88, safety_level=SAFE, planning_bias=efficiency, dominant_threat_type=obstacle, dominant_threat_id=O2, dominant_gap_m=2.60, dominant_uncertainty_scale_m=0.84, dominant_freshness_s=0.11
-PathSummary: current_target=A, path_clear=True, blocking_entity=none, corridor_min_gap=1.35
+TaskPoints: A=(6.0,2.0,-1.5), B=(2.0,6.0,-1.5), C=(9.0,8.0,-1.5)
+CandidateTargets: A est=(6.0,2.0,-1.5), B est=(2.0,6.0,-1.5), C est=(9.0,8.0,-1.5), user est=(5.2,4.8,0.0), user_right_side est=(6.2,4.8,0.0)
+Obstacles: O1 est=(4.2,4.5) env=(major=0.72,minor=0.41,yaw=28,freshness=0.10), O2 est=(7.4,5.1) env=(major=0.66,minor=0.39,yaw=-10,freshness=0.11)
+BackgroundSafety: safety_score=0.86, safety_level=SAFE, planning_bias=efficiency, dominant_threat_type=obstacle, dominant_threat_id=O2, dominant_gap_m=2.50, dominant_uncertainty_scale_m=0.86, dominant_freshness_s=0.11
+PathSummaries: to A(path_clear=True,blocking_entity=none,corridor_min_gap=1.28), to user(path_clear=True,blocking_entity=none,corridor_min_gap=0.95)
 Task: [A] Go to A.
-Rationale: Path to A is clear and background risk is SAFE, so direct target-seeking is appropriate.
+Rationale: Task explicitly names A and path to A is clear, so direct target-seeking is appropriate.
 Response: _1=6.0;_2=2.0;ge(_1,_2);
 
-Example 2 (Direct):
+Example 2 (Task-point Direct):
 Scene:
-TaskPoints: A=(6.2, 2.4, -1.5), B=(1.6, 6.5, -1.5), C=(8.8, 8.2, -1.5)
-Obstacles: O1 est=(4.0,4.9) env=(major=0.69,minor=0.40,yaw=25,freshness=0.09), O2 est=(7.1,4.8) env=(major=0.64,minor=0.37,yaw=-8,freshness=0.10), O3 est=(3.5,7.2) env=(major=0.67,minor=0.39,yaw=12,freshness=0.13)
-BackgroundSafety: safety_score=0.72, safety_level=CAUTION, planning_bias=balanced, dominant_threat_type=user, dominant_threat_id=user, dominant_gap_m=1.70, dominant_uncertainty_scale_m=0.96, dominant_freshness_s=0.12
-PathSummary: current_target=B, path_clear=True, blocking_entity=none, corridor_min_gap=0.92
+TaskPoints: A=(6.2,2.4,-1.5), B=(1.6,6.5,-1.5), C=(8.8,8.2,-1.5)
+CandidateTargets: A est=(6.2,2.4,-1.5), B est=(1.6,6.5,-1.5), C est=(8.8,8.2,-1.5), user est=(5.4,4.9,0.0), user_right_side est=(6.3,4.6,0.0)
+Obstacles: O1 est=(4.0,4.9) env=(major=0.69,minor=0.40,yaw=25,freshness=0.09), O2 est=(7.1,4.8) env=(major=0.64,minor=0.37,yaw=-8,freshness=0.10)
+BackgroundSafety: safety_score=0.71, safety_level=CAUTION, planning_bias=balanced, dominant_threat_type=user, dominant_threat_id=user, dominant_gap_m=1.72, dominant_uncertainty_scale_m=0.96, dominant_freshness_s=0.12
+PathSummaries: to B(path_clear=True,blocking_entity=none,corridor_min_gap=0.90), to C(path_clear=True,blocking_entity=none,corridor_min_gap=1.12)
 Task: [A] Go to B and stop there.
-Rationale: Target is a task point and path is clear; CAUTION still allows efficient direct navigation with controlled execution.
+Rationale: Task-point target B is explicit and clear; controlled direct movement is valid.
 Response: _1=1.6;_2=6.5;ge(_1,_2);d(0.2);
 
-Example 3 (Detour - obstacle blocker):
+Example 3 (Task-point Detour):
 Scene:
-TaskPoints: A=(7.5, 3.2, -1.5), B=(2.2, 6.8, -1.5), C=(8.7, 8.5, -1.5)
-Obstacles: O1 est=(5.9,3.4) env=(major=0.88,minor=0.50,yaw=19,freshness=0.14), O2 est=(7.8,5.7) env=(major=0.63,minor=0.36,yaw=-14,freshness=0.10), O3 est=(3.3,7.4) env=(major=0.66,minor=0.40,yaw=7,freshness=0.13)
-BackgroundSafety: safety_score=0.67, safety_level=CAUTION, planning_bias=balanced, dominant_threat_type=obstacle, dominant_threat_id=O1, dominant_gap_m=1.48, dominant_uncertainty_scale_m=1.05, dominant_freshness_s=0.14
-PathSummary: current_target=A, path_clear=False, blocking_entity=O1, corridor_min_gap=-0.22
+TaskPoints: A=(7.5,3.2,-1.5), B=(2.2,6.8,-1.5), C=(8.7,8.5,-1.5)
+CandidateTargets: A est=(7.5,3.2,-1.5), B est=(2.2,6.8,-1.5), C est=(8.7,8.5,-1.5), user est=(5.1,5.0,0.0), user_right_side est=(6.0,4.7,0.0)
+Obstacles: O1 est=(5.9,3.4) env=(major=0.88,minor=0.50,yaw=19,freshness=0.14), O2 est=(7.8,5.7) env=(major=0.63,minor=0.36,yaw=-14,freshness=0.10)
+BackgroundSafety: safety_score=0.66, safety_level=CAUTION, planning_bias=balanced, dominant_threat_type=obstacle, dominant_threat_id=O1, dominant_gap_m=1.45, dominant_uncertainty_scale_m=1.05, dominant_freshness_s=0.14
+PathSummaries: to A(path_clear=False,blocking_entity=O1,corridor_min_gap=-0.22), to user(path_clear=True,blocking_entity=none,corridor_min_gap=0.64)
 Task: [A] Go to A.
-Rationale: Corridor to A is blocked by obstacle O1; direct movement is inappropriate, staged detour is preferred.
+Rationale: Selected target A is blocked by O1, so staged detour is preferred over direct movement.
 Response: tc(30);mf(0.9);tu(35);mf(1.0);d(0.2);
 
-Example 4 (Detour - user blocker):
+Example 4 (Task-point Detour):
 Scene:
-TaskPoints: A=(6.8, 2.6, -1.5), B=(2.4, 7.0, -1.5), C=(9.1, 8.6, -1.5)
-Obstacles: O1 est=(4.6,4.7) env=(major=0.71,minor=0.43,yaw=24,freshness=0.12), O2 est=(7.2,5.3) env=(major=0.68,minor=0.41,yaw=-11,freshness=0.09), O3 est=(3.4,7.1) env=(major=0.65,minor=0.38,yaw=15,freshness=0.11)
-BackgroundSafety: safety_score=0.63, safety_level=CAUTION, planning_bias=balanced, dominant_threat_type=user, dominant_threat_id=user, dominant_gap_m=1.36, dominant_uncertainty_scale_m=1.01, dominant_freshness_s=0.13
-PathSummary: current_target=B, path_clear=False, blocking_entity=user, corridor_min_gap=-0.18
+TaskPoints: A=(6.8,2.6,-1.5), B=(2.4,7.0,-1.5), C=(9.1,8.6,-1.5)
+CandidateTargets: A est=(6.8,2.6,-1.5), B est=(2.4,7.0,-1.5), C est=(9.1,8.6,-1.5), user est=(4.8,5.6,0.0), user_right_side est=(5.7,5.2,0.0)
+Obstacles: O1 est=(4.6,4.7) env=(major=0.71,minor=0.43,yaw=24,freshness=0.12), O2 est=(7.2,5.3) env=(major=0.68,minor=0.41,yaw=-11,freshness=0.09)
+BackgroundSafety: safety_score=0.62, safety_level=CAUTION, planning_bias=balanced, dominant_threat_type=user, dominant_threat_id=user, dominant_gap_m=1.34, dominant_uncertainty_scale_m=1.01, dominant_freshness_s=0.13
+PathSummaries: to B(path_clear=False,blocking_entity=user,corridor_min_gap=-0.18), to A(path_clear=True,blocking_entity=none,corridor_min_gap=0.77)
 Task: [A] Go to B.
-Rationale: User is currently the path blocker for target B; staged detour is required to avoid crossing the user corridor.
+Rationale: User blocks corridor to B; planner should detour instead of forcing direct path.
 Response: tu(30);mf(0.8);tc(35);mf(1.0);d(0.2);
 
-Example 5 (High-risk WARNING):
+Example 5 (High-risk task-point WARNING):
 Scene:
-TaskPoints: A=(6.4, 2.3, -1.5), B=(2.3, 6.6, -1.5), C=(8.9, 8.1, -1.5)
-Obstacles: O1 est=(5.1,4.2) env=(major=0.86,minor=0.52,yaw=21,freshness=0.27), O2 est=(7.0,5.0) env=(major=0.81,minor=0.50,yaw=-9,freshness=0.30), O3 est=(3.1,7.0) env=(major=0.75,minor=0.46,yaw=10,freshness=0.25)
+TaskPoints: A=(6.4,2.3,-1.5), B=(2.3,6.6,-1.5), C=(8.9,8.1,-1.5)
+CandidateTargets: A est=(6.4,2.3,-1.5), B est=(2.3,6.6,-1.5), C est=(8.9,8.1,-1.5), user est=(5.0,4.9,0.0), user_right_side est=(6.0,4.7,0.0)
+Obstacles: O1 est=(5.1,4.2) env=(major=0.86,minor=0.52,yaw=21,freshness=0.27), O2 est=(7.0,5.0) env=(major=0.81,minor=0.50,yaw=-9,freshness=0.30)
 BackgroundSafety: safety_score=0.42, safety_level=WARNING, planning_bias=safety, dominant_threat_type=obstacle, dominant_threat_id=O2, dominant_gap_m=0.92, dominant_uncertainty_scale_m=1.42, dominant_freshness_s=0.30
-PathSummary: current_target=C, path_clear=True, blocking_entity=none, corridor_min_gap=0.38
+PathSummaries: to C(path_clear=True,blocking_entity=none,corridor_min_gap=0.38), to user(path_clear=False,blocking_entity=O1,corridor_min_gap=-0.05)
 Task: [A] Go to C.
-Rationale: WARNING indicates elevated background risk; even with path_clear, cautious progression is preferred over aggressive direct movement.
-Response: d(0.3);tc(12);mf(0.5);d(0.2);tu(10);mf(0.5);
+Rationale: WARNING risk requires cautious progression, but the plan should still progress toward C.
+Response: d(0.3);tc(12);mf(0.5);d(0.2);tu(10);mf(0.5);_1=8.9;_2=8.1;ge(_1,_2);
 
-Example 6 (High-risk DANGER):
+Example 6 (High-risk task-point DANGER):
 Scene:
-TaskPoints: A=(7.0, 2.1, -1.5), B=(2.1, 6.9, -1.5), C=(8.6, 8.7, -1.5)
-Obstacles: O1 est=(5.7,3.3) env=(major=1.02,minor=0.61,yaw=17,freshness=0.34), O2 est=(6.8,4.6) env=(major=0.97,minor=0.58,yaw=-6,freshness=0.36), O3 est=(3.0,7.5) env=(major=0.90,minor=0.55,yaw=9,freshness=0.33)
+TaskPoints: A=(7.0,2.1,-1.5), B=(2.1,6.9,-1.5), C=(8.6,8.7,-1.5)
+CandidateTargets: A est=(7.0,2.1,-1.5), B est=(2.1,6.9,-1.5), C est=(8.6,8.7,-1.5), user est=(5.5,4.2,0.0), user_right_side est=(6.4,3.8,0.0)
+Obstacles: O1 est=(5.7,3.3) env=(major=1.02,minor=0.61,yaw=17,freshness=0.34), O2 est=(6.8,4.6) env=(major=0.97,minor=0.58,yaw=-6,freshness=0.36)
 BackgroundSafety: safety_score=0.19, safety_level=DANGER, planning_bias=safety, dominant_threat_type=user, dominant_threat_id=user, dominant_gap_m=0.28, dominant_uncertainty_scale_m=1.78, dominant_freshness_s=0.35
-PathSummary: current_target=A, path_clear=True, blocking_entity=none, corridor_min_gap=0.31
+PathSummaries: to A(path_clear=True,blocking_entity=none,corridor_min_gap=0.31), to B(path_clear=False,blocking_entity=O1,corridor_min_gap=-0.16)
 Task: [A] Go to A.
-Rationale: DANGER requires recovery-first cautious behavior; avoid immediate aggressive direct approach even when target is known.
-Response: d(0.4);tu(15);mf(0.3);d(0.3);tc(15);mf(0.3);
+Rationale: DANGER needs recovery-first cautious movement, but still should move toward A step-by-step.
+Response: d(0.4);tu(15);mf(0.3);d(0.3);tc(15);mf(0.3);_1=7.0;_2=2.1;ge(_1,_2);
 
-Example 7 (Multi-step):
+Example 7 (User-relative):
 Scene:
-TaskPoints: A=(6.1, 2.2, -1.5), B=(2.0, 6.4, -1.5), C=(8.8, 8.4, -1.5)
+TaskPoints: A=(6.1,2.2,-1.5), B=(2.0,6.4,-1.5), C=(8.8,8.4,-1.5)
+CandidateTargets: A est=(6.1,2.2,-1.5), B est=(2.0,6.4,-1.5), C est=(8.8,8.4,-1.5), user est=(5.3,5.1,0.0), user_right_side est=(6.2,4.8,0.0)
+Obstacles: O1 est=(4.8,4.5) env=(major=0.79,minor=0.47,yaw=20,freshness=0.16), O2 est=(7.5,5.2) env=(major=0.74,minor=0.44,yaw=-12,freshness=0.14)
+BackgroundSafety: safety_score=0.68, safety_level=CAUTION, planning_bias=balanced, dominant_threat_type=obstacle, dominant_threat_id=O1, dominant_gap_m=1.40, dominant_uncertainty_scale_m=1.09, dominant_freshness_s=0.16
+PathSummaries: to user(path_clear=True,blocking_entity=none,corridor_min_gap=0.62), to A(path_clear=False,blocking_entity=O1,corridor_min_gap=-0.08)
+Task: [A] Fly to the user.
+Rationale: User-referenced instruction should select user target, not default to task-point A/B/C.
+Response: _1=5.3;_2=5.1;ge(_1,_2);
+
+Example 8 (User-relative):
+Scene:
+TaskPoints: A=(6.3,2.0,-1.5), B=(2.4,6.2,-1.5), C=(8.7,8.3,-1.5)
+CandidateTargets: A est=(6.3,2.0,-1.5), B est=(2.4,6.2,-1.5), C est=(8.7,8.3,-1.5), user est=(5.0,5.0,0.0), user_right_side est=(5.9,4.6,0.0)
+Obstacles: O1 est=(4.9,4.6) env=(major=0.82,minor=0.48,yaw=18,freshness=0.15), O2 est=(7.1,5.1) env=(major=0.71,minor=0.42,yaw=-10,freshness=0.14)
+BackgroundSafety: safety_score=0.60, safety_level=CAUTION, planning_bias=balanced, dominant_threat_type=user, dominant_threat_id=user, dominant_gap_m=1.24, dominant_uncertainty_scale_m=1.18, dominant_freshness_s=0.15
+PathSummaries: to user_right_side(path_clear=True,blocking_entity=none,corridor_min_gap=0.55), to user(path_clear=False,blocking_entity=O1,corridor_min_gap=-0.04)
+Task: [A] Come back to my right side.
+Rationale: Instruction explicitly asks for user-right-side target; planner should select user_right_side candidate.
+Response: _1=5.9;_2=4.6;ge(_1,_2);
+
+Example 9 (Query):
+Scene:
+TaskPoints: A=(6.0,2.2,-1.5), B=(2.2,6.5,-1.5), C=(8.9,8.0,-1.5)
+CandidateTargets: A est=(6.0,2.2,-1.5), B est=(2.2,6.5,-1.5), C est=(8.9,8.0,-1.5), user est=(5.4,5.2,0.0), user_right_side est=(6.3,4.8,0.0)
+Obstacles: O1 est=(4.5,4.4) env=(major=0.73,minor=0.43,yaw=22,freshness=0.11)
+BackgroundSafety: safety_score=0.77, safety_level=SAFE, planning_bias=efficiency, dominant_threat_type=obstacle, dominant_threat_id=O1, dominant_gap_m=2.10, dominant_uncertainty_scale_m=0.88, dominant_freshness_s=0.12
+PathSummaries: to A(path_clear=True,blocking_entity=none,corridor_min_gap=1.00), to user(path_clear=True,blocking_entity=none,corridor_min_gap=0.82)
+Task: [Q] Where am I?
+Rationale: This is an information query, not a navigation request; answer via probe/log without movement.
+Response: _1=p('What is the current estimated drone position?');lo(_1);
+
+Example 10 (Multi-step target-type switch):
+Scene:
+TaskPoints: A=(6.1,2.2,-1.5), B=(2.0,6.4,-1.5), C=(8.8,8.4,-1.5)
+CandidateTargets: A est=(6.1,2.2,-1.5), B est=(2.0,6.4,-1.5), C est=(8.8,8.4,-1.5), user est=(5.3,5.1,0.0), user_right_side est=(6.2,4.8,0.0)
 Obstacles: O1 est=(4.8,4.5) env=(major=0.79,minor=0.47,yaw=20,freshness=0.16), O2 est=(7.5,5.2) env=(major=0.74,minor=0.44,yaw=-12,freshness=0.14), O3 est=(3.2,7.6) env=(major=0.73,minor=0.43,yaw=11,freshness=0.15)
 BackgroundSafety: safety_score=0.58, safety_level=CAUTION, planning_bias=balanced, dominant_threat_type=obstacle, dominant_threat_id=O1, dominant_gap_m=1.22, dominant_uncertainty_scale_m=1.16, dominant_freshness_s=0.16
-PathSummary: current_target=C, path_clear=False, blocking_entity=O2, corridor_min_gap=-0.12
+PathSummaries: to C(path_clear=False,blocking_entity=O2,corridor_min_gap=-0.12), to B(path_clear=True,blocking_entity=none,corridor_min_gap=0.67), to user_right_side(path_clear=True,blocking_entity=none,corridor_min_gap=0.51)
 Task: [A] Go to C, then B, then come back to my right side.
-Rationale: This is a multi-step task. Complete C first with detour-aware progression, then B, then switch to user-relative final positioning.
-Response: tu(25);mf(0.9);tc(25);mf(1.0);_1=8.8;_2=8.4;ge(_1,_2);_3=2.0;_4=6.4;ge(_3,_4);_5=p('What is the current estimated user position?');_6=_5[0]+1.2;_7=_5[1]-0.6;ge(_6,_7);
+Rationale: Multi-step task requires target-type switch: task-point C -> task-point B -> user-relative user_right_side.
+Response: tu(25);mf(0.9);tc(25);mf(1.0);_1=8.8;_2=8.4;ge(_1,_2);_3=2.0;_4=6.4;ge(_3,_4);_5=6.2;_6=4.8;ge(_5,_6);

@@ -758,7 +758,15 @@ class LLMController():
             simulated.append(effective)
         return simulated
 
-    def _build_dominant_threat_context(self, safety_state, obstacle_states, scene, now: float):
+    def _build_dominant_threat_context(
+        self,
+        safety_state,
+        obstacle_states,
+        scene,
+        now: float,
+        candidate_targets_summary=None,
+        candidate_path_summaries=None,
+    ):
         if safety_state is None:
             return None
 
@@ -856,6 +864,8 @@ class LLMController():
             task_points_summary=task_points_summary,
             obstacles_summary=obstacles_summary,
             path_summary=None,
+            candidate_targets_summary=candidate_targets_summary or [],
+            candidate_path_summaries=candidate_path_summaries or [],
         )
 
     def get_live_ui_snapshot(self):
@@ -943,19 +953,57 @@ class LLMController():
             now_s=now,
             obstacle_envelopes=obstacle_states,
         )
+        user_heading = float(self.get_user_heading_yaw())
+        user_ref = user_est or user_gt
+        right_offset_m = 1.0
+        right_dx = math.sin(user_heading) * right_offset_m
+        right_dy = -math.cos(user_heading) * right_offset_m
+        candidate_targets = []
+        for point in self.get_baseline_scene().task_points:
+            candidate_targets.append({"id": point.id, "x": float(point.x), "y": float(point.y), "z": float(point.z)})
+        candidate_targets.append(
+            {
+                "id": "user",
+                "x": float(user_ref[0]),
+                "y": float(user_ref[1]),
+                "z": float(user_ref[2]),
+            }
+        )
+        candidate_targets.append(
+            {
+                "id": "user_right_side",
+                "x": float(user_ref[0] + right_dx),
+                "y": float(user_ref[1] + right_dy),
+                "z": float(user_ref[2]),
+            }
+        )
+        candidate_path_summaries = []
+        for target in candidate_targets:
+            path = self._compute_path_eval_for_target(
+                self.get_baseline_scene(),
+                drone_est or drone_gt,
+                user_est or user_gt,
+                target_xy=(target["x"], target["y"]),
+                obstacle_envelopes=obstacle_states,
+            )
+            candidate_path_summaries.append(
+                {
+                    "target_id": target["id"],
+                    "path_clear": bool(path.path_clear),
+                    "blocking_entity": str(path.blocking_entity),
+                    "corridor_min_gap": float(path.corridor_min_gap),
+                }
+            )
         dominant_safety_context = self._build_dominant_threat_context(
             safety_state=safety_state,
             obstacle_states=obstacle_states,
             scene=self.get_baseline_scene(),
             now=now,
+            candidate_targets_summary=candidate_targets,
+            candidate_path_summaries=candidate_path_summaries,
         )
         if dominant_safety_context is not None:
-            dominant_safety_context.path_summary = {
-                "target_task_point": target_task_point,
-                "path_clear": None if path_eval is None else bool(path_eval.path_clear),
-                "blocking_entity": None if path_eval is None else str(path_eval.blocking_entity),
-                "corridor_min_gap": None if path_eval is None else float(path_eval.corridor_min_gap),
-            }
+            dominant_safety_context.path_summary = None
             safety_context = dominant_safety_context
         snapshot = {
             "drone_gt": drone_gt,
@@ -975,6 +1023,8 @@ class LLMController():
             "baseline_scene_state": self.baseline_scene_state,
             "obstacle_envelope_states": obstacle_states,
             "path_eval": path_eval,
+            "candidate_targets": candidate_targets,
+            "candidate_path_summaries": candidate_path_summaries,
             "target_task_point": target_task_point,
             "baseline_decision": self.latest_baseline_decision,
             "baseline_expectation_summary": self.get_baseline_expectation_summary(safety_context),
@@ -1046,6 +1096,20 @@ class LLMController():
             user_xy=(None if user_pos is None else (float(user_pos[0]), float(user_pos[1]))),
             user_radius_m=user_radius,
             obstacle_envelopes=obstacle_envelopes,
+            corridor_half_width_m=0.35,
+        )
+
+    def _compute_path_eval_for_target(self, scene: BaselineScene, drone_pos, user_pos, target_xy, obstacle_envelopes=None):
+        safety_context = getattr(self, "latest_safety_context", None)
+        user_radius = 0.75
+        if safety_context is not None:
+            user_radius = max(0.45, float(getattr(safety_context, "uncertainty_scale_m", 1.0)) * 0.5)
+        return evaluate_path_clear(
+            drone_xy=(float(drone_pos[0]), float(drone_pos[1])),
+            target_xy=(float(target_xy[0]), float(target_xy[1])),
+            user_xy=(None if user_pos is None else (float(user_pos[0]), float(user_pos[1]))),
+            user_radius_m=user_radius,
+            obstacle_envelopes=obstacle_envelopes or [],
             corridor_half_width_m=0.35,
         )
 

@@ -13,6 +13,8 @@ You must prioritize extracting spatial data such as 3D coordinates ([x, y, z], r
 Structured Context First (Task Points / Obstacles / Path Summary):
 When the scene/safety context already provides structured task-point, obstacle, current-target, and path-clear/path-blocking information, do not mechanically probe all positions first. Plan directly from the provided structured context. Use probe p(...) only when key dynamic information is missing, stale, ambiguous, or must be re-checked at runtime.
 
+When multiple candidate targets are provided, you must select the target matching the user's instruction instead of defaulting to a task point. Not every task is navigation; question-like tasks may require probe/log answers rather than movement.
+
 Handling Dynamic Position Tasks:
 For tasks relying on dynamic user movement or positional updates, it is mandatory to insert a probe to obtain current positions before any movement decisions. Do not assume positions remain static over time.
 

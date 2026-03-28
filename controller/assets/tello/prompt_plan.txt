@@ -4,11 +4,8 @@ Your response should carefully consider the 'system skills description', the 'sc
 
 The 'system skills description' describes the system's capabilities which include low-level and high-level skills.
 
-Low-level skills, while fixed, offer direct function calls to control the robot and acquire vision information.
-
-High-level skills, built with our language 'MiniSpec', are more flexible and can be used to build more complex skills.
-
-Whenever possible, prioritize the use of high-level skills, invoke skills using their designated abbreviations, and ensure that 'object_name' refers to a specific type of object. If a skill has no argument, you can call it without parentheses.
+Low-level skills provide direct function calls to control the robot and acquire runtime information.
+High-level skills are MiniSpec composites and can build more complex behavior.
 
 Description of the two skill sets:
 - High-level skills:
@@ -16,98 +13,90 @@ Description of the two skill sets:
 - Low-level skills:
 {system_skill_description_low}
 
-The scene description provides structured information about the current environment. It may include task points (A/B/C), obstacles (O1/O2/O3), estimated drone/user coordinates, and optional visual detections.
+The scene/safety context may include:
+- TaskPoints (A/B/C)
+- CandidateTargets (A/B/C/user/user_right_side/...)
+- Obstacles (with envelope/freshness)
+- BackgroundSafety (dominant threat based global risk)
+- PathSummaries by candidate target
 
-The task description is a natural language instruction and may start with "[A]" or "[Q]".
-- "[A]": generate an executable MiniSpec action plan.
-- "[Q]": use `log` to output a literal answer at the end of execution.
+CRITICAL: do not use a single fixed current-target viewpoint.
+You must select target intent from the user instruction first, then use candidate targets/path summaries accordingly.
 
-The execution history is prior actions from previous responses. If provided, this is replanning and you must continue consistently from prior progress.
+Task interpretation priority:
+1) If instruction refers to A/B/C explicitly -> prioritize that task-point target.
+2) If instruction refers to user/me/my right side -> prioritize user-related candidate targets (user, user_right_side, etc.).
+3) If instruction is query/information request (e.g., where am I?) -> do NOT output movement; use probe/log style response.
 
-For this planner phase, use the provided structured safety/path context as the primary decision basis.
+Safety/path semantics (two-layer):
+1) BackgroundSafety:
+   - global prior risk and planning bias
+   - from dominant threat over user + obstacles
+   - controls style (efficiency vs cautious/recovery-first)
 
-IMPORTANT SAFETY MODELING (two-layer semantics):
-1) BackgroundSafety = global prior risk state.
-   - Derived from dominant threat over user + obstacles.
-   - Includes safety_score, safety_level, planning_bias, dominant_threat_type/id, and dominant risk metrics.
-   - Controls global planning style (efficiency vs caution vs recovery-first).
+2) PathSummaries by candidate:
+   - per-target path feasibility (path_clear / blocking_entity / corridor_min_gap)
+   - controls whether direct movement to that selected target is feasible
 
-2) PathSummary = target-conditioned path feasibility.
-   - For the current target only.
-   - Includes current_target, path_clear, blocking_entity, corridor_min_gap.
-   - Controls whether direct target-seeking is feasible right now.
+Do not confuse these layers:
+- BackgroundSafety does NOT select target for you.
+- Task intent selects target.
+- PathSummary for that target decides direct vs detour feasibility.
 
-Do NOT collapse these two layers into one concept:
-- state safety != target-path safety.
-- planner must use both when deciding actions.
-
-Planner behavior policy (must follow):
+Planning style policy:
 A) Direct target-seeking
-- Conditions: current_target known, path_clear=True, and safety_level not WARNING/DANGER.
-- Behavior: prefer efficient movement to target (direct style), `goto_estimated_xy` is allowed.
+- Use when selected target path_clear=True and safety_level is not WARNING/DANGER.
+- Efficient target-directed movement is allowed, including goto_estimated_xy.
 
 B) Staged detour
-- Conditions: path_clear=False and blocking_entity is user or obstacle.
-- Behavior: do NOT charge directly to target; do staged skill-based detour first (e.g., tc/tu + mf/mb/ml/mr + d), then continue.
+- Use when selected target path_clear=False (blocking by user/obstacle).
+- Do staged detour first (tc/tu + mf/mb/ml/mr + d), then continue target progress.
 
 C) Cautious / recovery-first
-- Conditions: background safety WARNING or DANGER.
-- Behavior: even when path is locally passable, stay conservative; use hold/alignment/small-step progression, avoid aggressive direct closing motion.
+- Use when BackgroundSafety is WARNING/DANGER.
+- Even if path is locally passable, use conservative progression (hold/align/small steps), but still progress toward task completion when feasible.
 
-Planning priorities:
-- Always read and use: current target + PathSummary + BackgroundSafety.
-- Obstacles are not cosmetic scene text; they can be blockers and/or dominant threats.
-- Task points (A/B/C) are valid navigation targets and should be handled explicitly.
+Not every task is navigation:
+- Query tasks should answer/log information.
+- Do not default to A just because A/B/C exist in scene.
 
 Movement semantics are critical:
-- In PX4_SIM, `mf`, `mb`, `mr`, and `ml` are body-frame movement skills, not world-frame x/y movement skills.
-- Therefore, you must NOT compute world-coordinate deltas and pass those directly into `mf`, `mb`, `mr`, or `ml`.
-- For coordinate-based estimated XY navigation, use `goto_estimated_xy(target_x, target_y)`.
-- Reserve `mf`, `mb`, `mr`, and `ml` for true body-relative motions.
+- In PX4_SIM, `mf`, `mb`, `mr`, and `ml` are body-frame skills, not world x/y skills.
+- For world-frame estimated XY target navigation, use `goto_estimated_xy(target_x, target_y)`.
 
 Examples policy:
-- Examples are task-point navigation under background safety + path constraints.
-- They demonstrate:
-  - clear path -> direct
-  - blocked path -> detour
-  - high risk -> cautious progression
-  - multi-step task decomposition
-- Examples are not a single canonical answer template.
+- Examples demonstrate task-point navigation, user-related targets, query handling, and multi-step target-type switching under BackgroundSafety + PathSummaries.
+- Do not memorize one template; infer style from task intent + safety + path summaries.
 
-Before generating any response, you MUST read and strictly follow the rules in guides.txt and plan_examples.txt:
-- guides.txt contains mandatory syntax/safety/program constraints.
-- plan_examples.txt shows valid planning style under this baseline architecture.
+Before generating any response, you MUST read and strictly follow the rules in guides.txt and plan_examples.txt.
 
 Key requirements:
-- Never violate any rule in guides.txt.
-- Never include example code verbatim in your response.
-- Always decompose arithmetic operations and array indexing into step-by-step variable assignments.
-- Use MiniSpec conditionals starting with '?' and never use `if (...)` syntax.
-- Use `probe` only when provided context is insufficient, stale, or missing critical dynamic information.
-- For explicit takeoff intents, call `takeoff`.
-- For explicit landing intents, call `land`.
-- Do not reveal hidden chain-of-thought.
+- Never violate guides.txt constraints.
+- Never copy example response verbatim.
+- Decompose arithmetic/indexing into stepwise variable assignments.
+- Use MiniSpec `?` condition syntax; do not use Python-style if.
+- Use `probe` when context is missing/stale/ambiguous, not mechanically every time.
+- For explicit takeoff intent, call `takeoff`.
+- For explicit landing intent, call `land`.
 
-Failure to comply leads to invalid plans, parsing/runtime errors, and task failure.
-
-Here are some extra guides for you to better understand the task and generate a better response:
+Here are extra guides:
 {guides}
 
-Here is a list of example responses for different scene/task contexts and explanations:
+Here are examples:
 {plan_examples}
 
-Here is the scene description:
+Scene description:
 {scene_description}
 
-Here is the task description:
+Task description:
 {task_description}
 
-Here is the execution history (has value if replanning):
+Execution history (if replanning):
 {execution_history}
 
-Here is the safety context:
+Safety context:
 {safety_context}
 
-Please generate the response only with a single sentence of MiniSpec program, strictly following the above rules.
+Please generate only a single sentence of MiniSpec program.
 
 response:
