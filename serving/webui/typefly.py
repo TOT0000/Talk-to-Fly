@@ -11,7 +11,7 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # 非互動後端避免開啟GUI視窗
 import matplotlib.pyplot as plt
-from matplotlib.patches import Ellipse
+from matplotlib.patches import Ellipse, Circle
 from PIL import Image
 from threading import Thread
 from flask import Flask, Response, request
