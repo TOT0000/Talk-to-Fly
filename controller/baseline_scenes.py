@@ -16,11 +16,25 @@ class TaskPoint:
 @dataclass(frozen=True)
 class StaticObstacle:
     id: str
-    center_x: float
-    center_y: float
-    major_axis_m: float
-    minor_axis_m: float
-    orientation_deg: float = 0.0
+    gt_x: float
+    gt_y: float
+    base_major_axis_m: float
+    base_minor_axis_m: float
+    base_orientation_deg: float = 0.0
+    est_bias_x_m: float = 0.0
+    est_bias_y_m: float = 0.0
+    base_uncertainty_m: float = 0.18
+
+
+@dataclass(frozen=True)
+class ObstacleEnvelopeState:
+    id: str
+    gt_xy: Tuple[float, float]
+    est_xy: Tuple[float, float]
+    covariance_like_xy_m: Tuple[float, float]
+    envelope_major_axis_m: float
+    envelope_minor_axis_m: float
+    orientation_deg: float
 
 
 @dataclass(frozen=True)
@@ -57,9 +71,38 @@ def _rotate(x: float, y: float, yaw_rad: float) -> Tuple[float, float]:
     return (x * c) + (y * s), (-x * s) + (y * c)
 
 
-def _point_to_obstacle_local(x: float, y: float, obstacle: StaticObstacle) -> Tuple[float, float]:
-    dx = float(x - obstacle.center_x)
-    dy = float(y - obstacle.center_y)
+def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float) -> List[ObstacleEnvelopeState]:
+    states: List[ObstacleEnvelopeState] = []
+    for idx, obstacle in enumerate(scene.obstacles):
+        phase = float(now_s * 0.35 + idx * 0.9)
+        jitter_x = 0.04 * math.sin(phase)
+        jitter_y = 0.04 * math.cos(phase * 0.8)
+        est_x = float(obstacle.gt_x + obstacle.est_bias_x_m + jitter_x)
+        est_y = float(obstacle.gt_y + obstacle.est_bias_y_m + jitter_y)
+
+        sigma_x = float(obstacle.base_uncertainty_m * (1.0 + 0.25 * abs(math.sin(phase * 0.7))))
+        sigma_y = float(obstacle.base_uncertainty_m * (1.0 + 0.25 * abs(math.cos(phase * 0.6))))
+
+        envelope_major = float(obstacle.base_major_axis_m + (1.8 * sigma_x))
+        envelope_minor = float(obstacle.base_minor_axis_m + (1.8 * sigma_y))
+
+        states.append(
+            ObstacleEnvelopeState(
+                id=obstacle.id,
+                gt_xy=(float(obstacle.gt_x), float(obstacle.gt_y)),
+                est_xy=(est_x, est_y),
+                covariance_like_xy_m=(sigma_x, sigma_y),
+                envelope_major_axis_m=max(0.05, envelope_major),
+                envelope_minor_axis_m=max(0.05, envelope_minor),
+                orientation_deg=float(obstacle.base_orientation_deg),
+            )
+        )
+    return states
+
+
+def _point_to_obstacle_local(x: float, y: float, obstacle: ObstacleEnvelopeState) -> Tuple[float, float]:
+    dx = float(x - obstacle.est_xy[0])
+    dy = float(y - obstacle.est_xy[1])
     return _rotate(dx, dy, math.radians(float(obstacle.orientation_deg)))
 
 
@@ -68,12 +111,12 @@ def _segment_min_f_on_inflated_ellipse(
     ay: float,
     bx: float,
     by: float,
-    obstacle: StaticObstacle,
+    obstacle: ObstacleEnvelopeState,
     corridor_half_width_m: float,
     samples: int = 81,
 ) -> float:
-    inflated_major = max(1e-4, float(obstacle.major_axis_m) + float(corridor_half_width_m))
-    inflated_minor = max(1e-4, float(obstacle.minor_axis_m) + float(corridor_half_width_m))
+    inflated_major = max(1e-4, float(obstacle.envelope_major_axis_m) + float(corridor_half_width_m))
+    inflated_minor = max(1e-4, float(obstacle.envelope_minor_axis_m) + float(corridor_half_width_m))
     min_f = float("inf")
     for i in range(max(3, samples)):
         t = float(i / (samples - 1))
@@ -91,11 +134,11 @@ def _signed_gap_for_obstacle(
     ay: float,
     bx: float,
     by: float,
-    obstacle: StaticObstacle,
+    obstacle: ObstacleEnvelopeState,
     corridor_half_width_m: float,
 ) -> float:
     min_f = _segment_min_f_on_inflated_ellipse(ax, ay, bx, by, obstacle, corridor_half_width_m)
-    min_axis = min(float(obstacle.major_axis_m), float(obstacle.minor_axis_m))
+    min_axis = min(float(obstacle.envelope_major_axis_m), float(obstacle.envelope_minor_axis_m))
     return (math.sqrt(min_f) - 1.0) * max(1e-4, min_axis)
 
 
@@ -118,7 +161,7 @@ def evaluate_path_clear(
     target_xy: Tuple[float, float],
     user_xy: Optional[Tuple[float, float]],
     user_radius_m: float,
-    obstacles: List[StaticObstacle],
+    obstacle_envelopes: List[ObstacleEnvelopeState],
     corridor_half_width_m: float = 0.35,
 ) -> PathClearResult:
     ax, ay = float(drone_xy[0]), float(drone_xy[1])
@@ -130,7 +173,7 @@ def evaluate_path_clear(
         center_distance = _distance_point_to_segment(float(user_xy[0]), float(user_xy[1]), ax, ay, bx, by)
         blockers.append(("user", center_distance - (float(user_radius_m) + float(corridor_half_width_m))))
 
-    for obstacle in obstacles:
+    for obstacle in obstacle_envelopes:
         blockers.append((obstacle.id, _signed_gap_for_obstacle(ax, ay, bx, by, obstacle, corridor_half_width_m)))
 
     if not blockers:
@@ -147,9 +190,11 @@ def build_scene_expectations(
     user_radius_m: float,
     corridor_half_width_m: float,
     high_risk: bool,
+    now_s: float = 0.0,
 ) -> List[BaselineExpectation]:
     drone_xy = (float(scene.drone_initial_pose[0]), float(scene.drone_initial_pose[1]))
     user_xy = (float(scene.user_position[0]), float(scene.user_position[1]))
+    obstacle_envelopes = compute_obstacle_envelope_states(scene, now_s=now_s)
     rows: List[BaselineExpectation] = []
     for point in scene.task_points:
         result = evaluate_path_clear(
@@ -157,7 +202,7 @@ def build_scene_expectations(
             target_xy=(float(point.x), float(point.y)),
             user_xy=user_xy,
             user_radius_m=float(user_radius_m),
-            obstacles=list(scene.obstacles),
+            obstacle_envelopes=obstacle_envelopes,
             corridor_half_width_m=float(corridor_half_width_m),
         )
         direct = bool(result.path_clear and not high_risk)
@@ -173,74 +218,94 @@ def build_scene_expectations(
     return rows
 
 
+def build_all_scene_expectations(
+    user_radius_m: float,
+    corridor_half_width_m: float,
+    high_risk: bool,
+    now_s: float = 0.0,
+) -> List[BaselineExpectation]:
+    rows: List[BaselineExpectation] = []
+    for scene in BASELINE_SCENES.values():
+        rows.extend(
+            build_scene_expectations(
+                scene=scene,
+                user_radius_m=user_radius_m,
+                corridor_half_width_m=corridor_half_width_m,
+                high_risk=high_risk,
+                now_s=now_s,
+            )
+        )
+    return rows
+
+
 BASELINE_SCENES: Dict[str, BaselineScene] = {
     "SCENE_1_CLEAR_PATH": BaselineScene(
         id="SCENE_1_CLEAR_PATH",
-        drone_initial_pose=(1.2, 1.6, -1.5),
+        drone_initial_pose=(1.0, 1.5, -1.5),
         drone_initial_yaw_rad=0.0,
-        user_position=(10.6, 10.4, 0.0),
+        user_position=(10.7, 10.6, 0.0),
         task_points=(
-            TaskPoint("A", 9.8, 1.8, -1.5),
-            TaskPoint("B", 9.4, 4.8, -1.5),
-            TaskPoint("C", 9.0, 7.8, -1.5),
+            TaskPoint("A", 10.0, 1.6, -1.5),
+            TaskPoint("B", 9.7, 4.9, -1.5),
+            TaskPoint("C", 9.4, 7.9, -1.5),
         ),
         obstacles=(
-            StaticObstacle("O1", 4.2, 8.8, 0.95, 0.55, 25.0),
-            StaticObstacle("O2", 6.6, 9.2, 0.85, 0.50, -10.0),
-            StaticObstacle("O3", 2.6, 10.4, 0.75, 0.45, 40.0),
+            StaticObstacle("O1", 3.2, 9.8, 0.80, 0.48, 20.0, est_bias_x_m=0.04, est_bias_y_m=-0.03, base_uncertainty_m=0.16),
+            StaticObstacle("O2", 5.8, 10.0, 0.85, 0.50, -15.0, est_bias_x_m=-0.03, est_bias_y_m=0.04, base_uncertainty_m=0.15),
+            StaticObstacle("O3", 8.0, 9.3, 0.75, 0.46, 40.0, est_bias_x_m=0.02, est_bias_y_m=0.02, base_uncertainty_m=0.14),
         ),
-        notes="Rightward target lane is clear; designed to strongly favor direct_go_to to A.",
+        notes="Bottom corridor to A is intentionally clear from user and obstacle envelopes.",
     ),
     "SCENE_2_OBSTACLE_BLOCKS": BaselineScene(
         id="SCENE_2_OBSTACLE_BLOCKS",
-        drone_initial_pose=(1.3, 2.4, -1.5),
-        drone_initial_yaw_rad=0.05,
-        user_position=(10.0, 9.4, 0.0),
+        drone_initial_pose=(1.3, 2.5, -1.5),
+        drone_initial_yaw_rad=0.06,
+        user_position=(10.1, 9.3, 0.0),
         task_points=(
-            TaskPoint("A", 9.6, 2.4, -1.5),
-            TaskPoint("B", 8.8, 5.3, -1.5),
-            TaskPoint("C", 8.5, 8.1, -1.5),
+            TaskPoint("A", 9.7, 2.5, -1.5),
+            TaskPoint("B", 8.9, 5.7, -1.5),
+            TaskPoint("C", 8.5, 8.3, -1.5),
         ),
         obstacles=(
-            StaticObstacle("O1", 5.2, 2.5, 1.45, 0.82, 10.0),
-            StaticObstacle("O2", 6.6, 5.8, 1.00, 0.60, 35.0),
-            StaticObstacle("O3", 3.0, 7.4, 0.85, 0.52, -20.0),
+            StaticObstacle("O1", 5.1, 2.5, 1.25, 0.75, 8.0, est_bias_x_m=0.02, est_bias_y_m=0.01, base_uncertainty_m=0.20),
+            StaticObstacle("O2", 6.5, 5.9, 1.00, 0.60, 35.0, est_bias_x_m=-0.04, est_bias_y_m=0.02, base_uncertainty_m=0.18),
+            StaticObstacle("O3", 3.1, 7.6, 0.90, 0.52, -20.0, est_bias_x_m=0.01, est_bias_y_m=-0.03, base_uncertainty_m=0.17),
         ),
-        notes="Obstacle O1 cuts through the main corridor to A while side-space remains for detour.",
+        notes="Obstacle O1 is positioned to cut the direct A corridor but still leaves side detour room.",
     ),
     "SCENE_3_USER_NEAR_CORRIDOR": BaselineScene(
         id="SCENE_3_USER_NEAR_CORRIDOR",
-        drone_initial_pose=(1.4, 3.1, -1.5),
+        drone_initial_pose=(1.4, 3.0, -1.5),
         drone_initial_yaw_rad=0.0,
-        user_position=(5.2, 3.15, 0.0),
+        user_position=(5.1, 3.05, 0.0),
         task_points=(
-            TaskPoint("A", 9.4, 3.2, -1.5),
-            TaskPoint("B", 8.8, 6.1, -1.5),
-            TaskPoint("C", 8.4, 8.9, -1.5),
+            TaskPoint("A", 9.3, 3.1, -1.5),
+            TaskPoint("B", 8.9, 6.2, -1.5),
+            TaskPoint("C", 8.6, 8.9, -1.5),
         ),
         obstacles=(
-            StaticObstacle("O1", 2.4, 8.6, 0.95, 0.55, 0.0),
-            StaticObstacle("O2", 6.8, 8.0, 1.05, 0.60, 20.0),
-            StaticObstacle("O3", 10.4, 5.8, 0.90, 0.50, -30.0),
+            StaticObstacle("O1", 2.3, 8.7, 0.90, 0.55, 0.0, est_bias_x_m=-0.02, est_bias_y_m=0.03, base_uncertainty_m=0.16),
+            StaticObstacle("O2", 6.8, 8.2, 1.00, 0.60, 18.0, est_bias_x_m=0.03, est_bias_y_m=-0.02, base_uncertainty_m=0.18),
+            StaticObstacle("O3", 10.2, 5.9, 0.85, 0.50, -30.0, est_bias_x_m=0.02, est_bias_y_m=0.03, base_uncertainty_m=0.16),
         ),
-        notes="User envelope is the intended blocker for path to A; validates user-as-blocker behavior.",
+        notes="User envelope is intentionally near the A corridor to make user the primary blocker.",
     ),
     "SCENE_4_CORNER_CONSTRAINED": BaselineScene(
         id="SCENE_4_CORNER_CONSTRAINED",
-        drone_initial_pose=(0.9, 10.8, -1.5),
-        drone_initial_yaw_rad=-0.65,
-        user_position=(2.2, 9.6, 0.0),
+        drone_initial_pose=(0.8, 11.1, -1.5),
+        drone_initial_yaw_rad=-0.75,
+        user_position=(1.9, 9.8, 0.0),
         task_points=(
-            TaskPoint("A", 1.6, 8.4, -1.5),
-            TaskPoint("B", 2.9, 7.3, -1.5),
-            TaskPoint("C", 4.1, 6.3, -1.5),
+            TaskPoint("A", 1.5, 8.8, -1.5),
+            TaskPoint("B", 2.4, 7.6, -1.5),
+            TaskPoint("C", 3.6, 6.5, -1.5),
         ),
         obstacles=(
-            StaticObstacle("O1", 1.6, 9.7, 1.05, 0.72, 15.0),
-            StaticObstacle("O2", 2.7, 8.6, 1.20, 0.75, 42.0),
-            StaticObstacle("O3", 3.8, 9.7, 0.95, 0.62, -35.0),
+            StaticObstacle("O1", 1.3, 10.1, 1.10, 0.72, 12.0, est_bias_x_m=0.03, est_bias_y_m=-0.02, base_uncertainty_m=0.22),
+            StaticObstacle("O2", 2.3, 8.9, 1.22, 0.78, 48.0, est_bias_x_m=-0.03, est_bias_y_m=0.04, base_uncertainty_m=0.23),
+            StaticObstacle("O3", 3.2, 9.7, 1.08, 0.66, -40.0, est_bias_x_m=0.02, est_bias_y_m=0.03, base_uncertainty_m=0.21),
         ),
-        notes="Corner + compressed obstacles create constrained geometry that should prefer conservative detour.",
+        notes="Upper-left corner compression + clustered obstacles create clear constrained geometry.",
     ),
 }
 

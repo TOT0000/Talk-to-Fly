@@ -723,6 +723,20 @@ class TypeFly:
                 f"blocker={row.get('expected_blocking_entity')} mode={row.get('expected_motion_mode')}"
             )
         expectation_block = "\n".join(expectation_lines) if expectation_lines else "  - (n/a)"
+        all_rows = snapshot.get("baseline_all_scene_expectations") or []
+        all_scene_block = {}
+        for row in all_rows:
+            scene_id = row.get("scene_id")
+            item = (
+                f"{row.get('target_task_point')}="
+                f"{row.get('expected_motion_mode')}/"
+                f"{row.get('expected_blocking_entity')}"
+            )
+            all_scene_block.setdefault(scene_id, []).append(item)
+        all_scene_lines = []
+        for scene_id, items in all_scene_block.items():
+            all_scene_lines.append(f"  - {scene_id}: " + ", ".join(items))
+        all_scene_summary = "\n".join(all_scene_lines) if all_scene_lines else "  - (n/a)"
         return (
             "### Baseline Status\n"
             f"- current scene id: {None if scene is None else scene.id}\n"
@@ -730,7 +744,8 @@ class TypeFly:
             f"- path_clear: {path_clear}\n"
             f"- blocking entity: {blocking}\n"
             f"- corridor_min_gap_m: {min_gap}\n"
-            f"- scene×target expected behavior:\n{expectation_block}"
+            f"- current scene expected behavior:\n{expectation_block}\n"
+            f"- all scenes quick matrix (mode/blocker):\n{all_scene_summary}"
         )
 
     def _estimate_heading_from_history(self, primary_key: str, fallback_key: str = None):
@@ -882,16 +897,18 @@ class TypeFly:
                 ax_xy.add_patch(ellipse)
 
         baseline_scene = snapshot.get("baseline_scene") if snapshot else None
+        obstacle_states = snapshot.get("obstacle_envelope_states") if snapshot else None
         if baseline_scene is not None:
             for point in baseline_scene.task_points:
                 ax_xy.scatter([point.x], [point.y], c="#2E7D32", marker="D", s=65, label="Task point")
                 ax_xy.text(point.x + 0.06, point.y + 0.06, f"{point.id}", fontsize=8, color="#1B5E20")
-            for obstacle in baseline_scene.obstacles:
-                ax_xy.scatter([obstacle.center_x], [obstacle.center_y], c="#6D4C41", marker="s", s=70, label="Obstacle")
+            for obstacle in obstacle_states or []:
+                ax_xy.scatter([obstacle.gt_xy[0]], [obstacle.gt_xy[1]], c="#5D4037", marker="s", s=62, label="Obstacle GT")
+                ax_xy.scatter([obstacle.est_xy[0]], [obstacle.est_xy[1]], c="#8D6E63", marker="X", s=58, label="Obstacle EST")
                 obstacle_ellipse = Ellipse(
-                    xy=(float(obstacle.center_x), float(obstacle.center_y)),
-                    width=2.0 * float(obstacle.major_axis_m),
-                    height=2.0 * float(obstacle.minor_axis_m),
+                    xy=(float(obstacle.est_xy[0]), float(obstacle.est_xy[1])),
+                    width=2.0 * float(obstacle.envelope_major_axis_m),
+                    height=2.0 * float(obstacle.envelope_minor_axis_m),
                     angle=float(obstacle.orientation_deg),
                     edgecolor="#8D6E63",
                     facecolor="none",
@@ -900,7 +917,7 @@ class TypeFly:
                     label="Obstacle envelope",
                 )
                 ax_xy.add_patch(obstacle_ellipse)
-                ax_xy.text(obstacle.center_x + 0.08, obstacle.center_y + 0.08, obstacle.id, fontsize=8, color="#4E342E")
+                ax_xy.text(obstacle.est_xy[0] + 0.08, obstacle.est_xy[1] + 0.08, obstacle.id, fontsize=8, color="#4E342E")
 
         drone_for_heading = positions.get("drone_gt") or positions.get("drone_est")
         yaw_rad = float(snapshot.get("drone_yaw_rad") or 0.0) if snapshot else 0.0
@@ -936,7 +953,7 @@ class TypeFly:
             ax_xy.legend(dedup.values(), dedup.keys(), fontsize=8)
 
         buf_xy = io.BytesIO()
-        fig_xy.savefig(buf_xy, format='png', bbox_inches='tight')
+        fig_xy.savefig(buf_xy, format='png')
         buf_xy.seek(0)
         plt.close(fig_xy)
         return Image.open(buf_xy)
@@ -965,7 +982,7 @@ class TypeFly:
             xlim=dynamic_xlim,
             ylim=dynamic_ylim,
             title="Drone / User Localization & Safety Envelope (XY view)",
-            figsize=(5, 4),
+            figsize=(5.8, 4.4),
             show_legend=False,
         )
 

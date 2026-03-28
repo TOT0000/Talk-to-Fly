@@ -28,7 +28,9 @@ from .task_run_logger import TaskRunLogger
 from .baseline_scenes import (
     BASELINE_SCENES,
     BaselineScene,
+    build_all_scene_expectations,
     build_scene_expectations,
+    compute_obstacle_envelope_states,
     evaluate_path_clear,
     get_task_point,
     normalize_baseline_scene_id,
@@ -786,7 +788,8 @@ class LLMController():
             "baseline_scene_id": self.baseline_scene_id,
             "baseline_scene": self.get_baseline_scene(),
             "baseline_scene_state": self.baseline_scene_state,
-            "path_eval": self._compute_path_eval(self.get_baseline_scene(), drone_est or drone_gt, user_est or user_gt),
+            "obstacle_envelope_states": compute_obstacle_envelope_states(self.get_baseline_scene(), now_s=now),
+            "path_eval": self._compute_path_eval(self.get_baseline_scene(), drone_est or drone_gt, user_est or user_gt, now_s=now),
             "target_task_point": (
                 "A"
                 if not isinstance(self.latest_baseline_decision, dict)
@@ -794,6 +797,7 @@ class LLMController():
             ),
             "baseline_decision": self.latest_baseline_decision,
             "baseline_expectation_summary": self.get_baseline_expectation_summary(safety_context),
+            "baseline_all_scene_expectations": self.get_all_scene_expectation_summary(safety_context),
         }
         if safety_state is not None and safety_context is not None:
             consistency_from_gap = bool(float(safety_state.envelope_gap_m) < 0.0)
@@ -838,7 +842,7 @@ class LLMController():
                 return token
         return "A"
 
-    def _compute_path_eval(self, scene: BaselineScene, drone_pos, user_pos):
+    def _compute_path_eval(self, scene: BaselineScene, drone_pos, user_pos, now_s: float = 0.0):
         target_id = "A"
         if isinstance(self.latest_baseline_decision, dict):
             target_id = str(self.latest_baseline_decision.get("target_task_point") or "A")
@@ -850,12 +854,13 @@ class LLMController():
         user_radius = 0.75
         if safety_context is not None:
             user_radius = max(0.45, float(safety_context.uncertainty_scale_m) * 0.5)
+        obstacle_envelopes = compute_obstacle_envelope_states(scene, now_s=now_s)
         return evaluate_path_clear(
             drone_xy=(float(drone_pos[0]), float(drone_pos[1])),
             target_xy=(float(point.x), float(point.y)),
             user_xy=(None if user_pos is None else (float(user_pos[0]), float(user_pos[1]))),
             user_radius_m=user_radius,
-            obstacles=list(scene.obstacles),
+            obstacle_envelopes=obstacle_envelopes,
             corridor_half_width_m=0.35,
         )
 
@@ -871,12 +876,14 @@ class LLMController():
             return None
         safety_context = snapshot.get("safety_context")
         user_radius = max(0.45, float(getattr(safety_context, "uncertainty_scale_m", 1.0)) * 0.5)
+        now_s = time.time()
+        obstacle_envelopes = compute_obstacle_envelope_states(scene, now_s=now_s)
         path_eval = evaluate_path_clear(
             drone_xy=(float(drone_pos[0]), float(drone_pos[1])),
             target_xy=(float(target.x), float(target.y)),
             user_xy=(None if user_pos is None else (float(user_pos[0]), float(user_pos[1]))),
             user_radius_m=user_radius,
-            obstacles=list(scene.obstacles),
+            obstacle_envelopes=obstacle_envelopes,
             corridor_half_width_m=0.35,
         )
         risk_high = bool(safety_context is not None and str(safety_context.safety_level) in {"WARNING", "DANGER"})
@@ -887,9 +894,9 @@ class LLMController():
         else:
             side = "left"
             if path_eval.blocking_entity.startswith("O"):
-                obstacle = next((o for o in scene.obstacles if o.id == path_eval.blocking_entity), None)
+                obstacle = next((o for o in obstacle_envelopes if o.id == path_eval.blocking_entity), None)
                 if obstacle is not None:
-                    side = "left" if float(obstacle.center_y) <= float(drone_pos[1]) else "right"
+                    side = "left" if float(obstacle.est_xy[1]) <= float(drone_pos[1]) else "right"
             elif path_eval.blocking_entity == "user" and user_pos is not None:
                 side = "left" if float(user_pos[1]) <= float(drone_pos[1]) else "right"
             if side == "left":
@@ -904,13 +911,14 @@ class LLMController():
         obstacle_summary = [
             {
                 "id": obs.id,
-                "center_x": float(obs.center_x),
-                "center_y": float(obs.center_y),
-                "major_axis_m": float(obs.major_axis_m),
-                "minor_axis_m": float(obs.minor_axis_m),
+                "gt_xy": [float(obs.gt_xy[0]), float(obs.gt_xy[1])],
+                "est_xy": [float(obs.est_xy[0]), float(obs.est_xy[1])],
+                "covariance_like_xy_m": [float(obs.covariance_like_xy_m[0]), float(obs.covariance_like_xy_m[1])],
+                "envelope_major_axis_m": float(obs.envelope_major_axis_m),
+                "envelope_minor_axis_m": float(obs.envelope_minor_axis_m),
                 "orientation_deg": float(obs.orientation_deg),
             }
-            for obs in scene.obstacles
+            for obs in obstacle_envelopes
         ]
         task_points_summary = [
             {"id": pt.id, "x": float(pt.x), "y": float(pt.y), "z": float(pt.z)}
@@ -944,6 +952,27 @@ class LLMController():
             user_radius_m=user_radius,
             corridor_half_width_m=0.35,
             high_risk=risk_high,
+            now_s=time.time(),
+        )
+        return [
+            {
+                "scene_id": item.scene_id,
+                "target_task_point": item.target_task_point,
+                "expected_path_clear": item.expected_path_clear,
+                "expected_blocking_entity": item.expected_blocking_entity,
+                "expected_motion_mode": item.expected_motion_mode,
+            }
+            for item in expectations
+        ]
+
+    def get_all_scene_expectation_summary(self, safety_context=None):
+        risk_high = bool(safety_context is not None and str(safety_context.safety_level) in {"WARNING", "DANGER"})
+        user_radius = max(0.45, float(getattr(safety_context, "uncertainty_scale_m", 1.0)) * 0.5)
+        expectations = build_all_scene_expectations(
+            user_radius_m=user_radius,
+            corridor_half_width_m=0.35,
+            high_risk=risk_high,
+            now_s=time.time(),
         )
         return [
             {
