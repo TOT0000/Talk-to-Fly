@@ -41,8 +41,7 @@ class LLMPlanner():
     def set_model(self, model_name):
         self.model_name = model_name
 
-    def init(self, high_level_skillset: SkillSet, low_level_skillset: SkillSet, vision_skill: VisionSkillWrapper):
-        self.high_level_skillset = high_level_skillset
+    def init(self, low_level_skillset: SkillSet, vision_skill: VisionSkillWrapper):
         self.low_level_skillset = low_level_skillset
         self.vision_skill = vision_skill
 
@@ -107,7 +106,6 @@ class LLMPlanner():
         )
 
         prompt = self.prompt_plan.format(
-            system_skill_description_high=self.high_level_skillset,
             system_skill_description_low=self.low_level_skillset,
             guides=self.guides,
             plan_examples=self.plan_examples,
