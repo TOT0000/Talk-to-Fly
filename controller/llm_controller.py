@@ -520,11 +520,14 @@ class LLMController():
         monitor_thread.start()
         while True:
             location_info = self._format_planner_location_info()
+            runtime_snapshot = self.get_live_ui_snapshot()
 
             scene_description = self.vision.get_obj_list() if self.enable_video else ''
             if hasattr(self.state_provider, "debug_log_latest_localization_snapshot"):
                 self.state_provider.debug_log_latest_localization_snapshot(reason="pre-plan")
-            safety_context = self.state_provider.get_latest_safety_context() if hasattr(self.state_provider, "get_latest_safety_context") else None
+            safety_context = runtime_snapshot.get("safety_context") if isinstance(runtime_snapshot, dict) else None
+            if safety_context is None:
+                safety_context = self.state_provider.get_latest_safety_context() if hasattr(self.state_provider, "get_latest_safety_context") else None
             if safety_context is None:
                 safety_context = self.safety_assessor.build_from_provider(self.state_provider)
             self._debug_log_safety_context(safety_context)
