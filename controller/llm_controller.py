@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 import asyncio
 import uuid
 import threading
+import numpy as np
 
 from .shared_frame import SharedFrame, Frame
 from .gcs_safety_assessment import GcsSafetyAssessmentService
@@ -838,6 +839,7 @@ class LLMController():
             )
         self._debug_log_obstacle_envelopes(snapshot.get("obstacle_envelope_states"))
         self._debug_log_envelope_audit(snapshot.get("envelope_audit"))
+        self._debug_log_localization_pipeline_comparison(snapshot)
         print_debug(
             "[UI-SNAPSHOT] "
             f"drone_gt={snapshot['drone_gt']} drone_est={snapshot['drone_est']} "
@@ -899,16 +901,15 @@ class LLMController():
         if drone_pos is None:
             return None
         safety_context = snapshot.get("safety_context")
-        user_radius = max(0.45, float(getattr(safety_context, "uncertainty_scale_m", 1.0)) * 0.5)
-        now_s = time.time()
-        obstacle_envelopes = compute_obstacle_envelope_states(scene, now_s=now_s)
-        path_eval = evaluate_path_clear(
-            drone_xy=(float(drone_pos[0]), float(drone_pos[1])),
-            target_xy=(float(target.x), float(target.y)),
-            user_xy=(None if user_pos is None else (float(user_pos[0]), float(user_pos[1]))),
-            user_radius_m=user_radius,
+        obstacle_envelopes = snapshot.get("obstacle_envelope_states")
+        if obstacle_envelopes is None:
+            obstacle_envelopes = compute_obstacle_envelope_states(scene, now_s=time.time())
+        path_eval = self._compute_path_eval(
+            scene,
+            drone_pos,
+            user_pos,
+            now_s=time.time(),
             obstacle_envelopes=obstacle_envelopes,
-            corridor_half_width_m=0.35,
         )
         risk_high = bool(safety_context is not None and str(safety_context.safety_level) in {"WARNING", "DANGER"})
         direct_go_to = bool(path_eval.path_clear and not risk_high)
@@ -1041,6 +1042,7 @@ class LLMController():
                 "matrix_xy": drone_matrix,
                 "matrix_source": "provider_packet.M_xy",
                 "called_function": "build_safety_envelope",
+                "localization_pipeline_function": "IterativeLeastSquaresEstimator3D.estimate",
                 "base_sigma": "packet covariance",
                 "nominal_size_used": False,
                 "bias_used": False,
@@ -1059,6 +1061,7 @@ class LLMController():
                 "matrix_xy": user_matrix,
                 "matrix_source": "provider_packet.M_xy",
                 "called_function": "build_safety_envelope",
+                "localization_pipeline_function": "IterativeLeastSquaresEstimator3D.estimate",
                 "base_sigma": "packet covariance",
                 "nominal_size_used": False,
                 "bias_used": False,
@@ -1081,10 +1084,11 @@ class LLMController():
                     "est": [float(obs_state.est_xy[0]), float(obs_state.est_xy[1])],
                     "matrix_xy": obs_state.matrix_xy,
                     "matrix_source": "obstacle_state_packet.M_xy (consumed by build_safety_envelope)",
-                    "called_function": "build_safety_envelope",
-                    "base_sigma": "n/a (direct covariance input)",
+                    "called_function": obs_state.envelope_builder_function,
+                    "localization_pipeline_function": obs_state.localization_pipeline_function,
+                    "base_sigma": "packet covariance (anchor-based localization output)",
                     "nominal_size_used": False,
-                    "bias_used": None if base is None else [float(base.est_bias_x_m), float(base.est_bias_y_m)],
+                    "bias_used": None if base is None else "range-bias model via LocalizationErrorModel",
                     "extra_inflation": "none (single chi2 expansion)",
                     "chi2": float(obs_state.envelope.chi2_val),
                     "major_axis": float(obs_state.envelope.major_axis_radius),
@@ -1110,7 +1114,8 @@ class LLMController():
             lines.append(
                 f"{entity['id']}: gt={entity['gt']} est={entity['est']} "
                 f"matrix={entity['matrix_xy']} source={entity['matrix_source']} "
-                f"fn={entity.get('called_function', 'build_safety_envelope(via GCS service)')} "
+                f"loc_fn={entity.get('localization_pipeline_function', 'unknown')} "
+                f"env_fn={entity.get('called_function', 'build_safety_envelope(via GCS service)')} "
                 f"base_sigma={entity['base_sigma']} nominal_size_used={entity['nominal_size_used']} "
                 f"bias={entity['bias_used']} inflate={entity['extra_inflation']} "
                 f"chi2={entity['chi2']} major={entity['major_axis']:.3f} "
@@ -1120,6 +1125,55 @@ class LLMController():
         print_debug("[ENVELOPE-AUDIT] " + " || ".join(lines))
         if ratio_text:
             print_debug("[ENVELOPE-RATIOS] " + ratio_text)
+
+    def _fmt_array_debug(self, arr):
+        values = np.asarray(arr, dtype=float).reshape(-1)
+        return "[" + ", ".join(f"{float(v):.3f}" for v in values) + "]"
+
+    def _debug_log_localization_pipeline_comparison(self, snapshot):
+        safety_state = snapshot.get("safety_state")
+        if safety_state is None:
+            return
+        user_packet = getattr(safety_state, "user_packet", None)
+        obstacle_states = snapshot.get("obstacle_envelope_states") or []
+        if user_packet is None:
+            return
+
+        lines = [
+            "[PIPELINE-CHECK] USER",
+            f"  GT position: ({float(user_packet.gt_position_3d[0]):.3f}, {float(user_packet.gt_position_3d[1]):.3f}, {float(user_packet.gt_position_3d[2]):.3f})",
+            f"  simulated anchor measurements: {self._fmt_array_debug(user_packet.measured_ranges)}",
+            f"  estimated position: ({float(user_packet.estimated_position_3d[0]):.3f}, {float(user_packet.estimated_position_3d[1]):.3f}, {float(user_packet.estimated_position_3d[2]):.3f})",
+            f"  localization covariance-like M_xy: {np.asarray(user_packet.M_xy, dtype=float).tolist()}",
+            "  localization pipeline function: IterativeLeastSquaresEstimator3D.estimate",
+            "  envelope builder function: build_safety_envelope",
+            (
+                "  final major/minor/orientation: "
+                f"{float(safety_state.user_envelope.major_axis_radius):.3f}/"
+                f"{float(safety_state.user_envelope.minor_axis_radius):.3f}/"
+                f"{float(safety_state.user_envelope.orientation_deg):.3f}"
+            ),
+        ]
+        print_debug("\n".join(lines))
+
+        for obs in obstacle_states:
+            packet = obs.localization_packet
+            obs_lines = [
+                f"[PIPELINE-CHECK] {obs.id}",
+                f"  GT position: ({float(packet.gt_position_3d[0]):.3f}, {float(packet.gt_position_3d[1]):.3f}, {float(packet.gt_position_3d[2]):.3f})",
+                f"  simulated anchor measurements: {self._fmt_array_debug(packet.measured_ranges)}",
+                f"  estimated position: ({float(packet.estimated_position_3d[0]):.3f}, {float(packet.estimated_position_3d[1]):.3f}, {float(packet.estimated_position_3d[2]):.3f})",
+                f"  localization covariance-like M_xy: {np.asarray(packet.M_xy, dtype=float).tolist()}",
+                f"  localization pipeline function: {obs.localization_pipeline_function}",
+                f"  envelope builder function: {obs.envelope_builder_function}",
+                (
+                    "  final major/minor/orientation: "
+                    f"{float(obs.envelope.major_axis_radius):.3f}/"
+                    f"{float(obs.envelope.minor_axis_radius):.3f}/"
+                    f"{float(obs.envelope.orientation_deg):.3f}"
+                ),
+            ]
+            print_debug("\n".join(obs_lines))
 
     def start_robot(self):
         print_t("[C] Connecting to robot...")
