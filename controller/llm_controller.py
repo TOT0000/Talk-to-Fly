@@ -156,6 +156,7 @@ class LLMController():
         self.baseline_scene_id = normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_1_CLEAR_PATH"))
         self.baseline_scene_state = None
         self.latest_baseline_decision = None
+        self.user_heading_yaw_rad = 0.0
 
         # PX4_SIM optional managed user-position publisher lifecycle
         self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
@@ -607,10 +608,22 @@ class LLMController():
             "notes": scene.notes,
             "captured_at": time.time(),
         }
+        self.user_heading_yaw_rad = float(scene.user_initial_yaw_rad)
         return self.baseline_scene_state
 
     def get_baseline_scene_state(self):
         return self.baseline_scene_state
+
+    def get_user_heading_yaw(self) -> float:
+        return float(self.user_heading_yaw_rad)
+
+    def set_user_heading_yaw(self, yaw_rad: float):
+        self.user_heading_yaw_rad = float(yaw_rad)
+        return self.user_heading_yaw_rad
+
+    def turn_user_heading(self, delta_deg: float):
+        self.user_heading_yaw_rad = float(self.user_heading_yaw_rad + math.radians(float(delta_deg)))
+        return self.user_heading_yaw_rad
 
     def set_active_scenario(self, scenario_name: str):
         scenario = self.scenario_manager.select(scenario_name)
@@ -785,6 +798,7 @@ class LLMController():
             "safety_state": safety_state,
             "safety_context": safety_context,
             "drone_yaw_rad": self._get_drone_yaw_rad(),
+            "user_heading_yaw_rad": self.get_user_heading_yaw(),
             "baseline_scene_id": self.baseline_scene_id,
             "baseline_scene": self.get_baseline_scene(),
             "baseline_scene_state": self.baseline_scene_state,
@@ -814,6 +828,7 @@ class LLMController():
                 f"level={safety_context.safety_level} "
                 f"reason_tags={safety_context.reason_tags}"
             )
+        self._debug_log_obstacle_envelopes(snapshot.get("obstacle_envelope_states"))
         print_debug(
             "[UI-SNAPSHOT] "
             f"drone_gt={snapshot['drone_gt']} drone_est={snapshot['drone_est']} "
@@ -984,6 +999,20 @@ class LLMController():
             }
             for item in expectations
         ]
+
+    def _debug_log_obstacle_envelopes(self, obstacle_states):
+        if not obstacle_states:
+            return
+        parts = []
+        for obs in obstacle_states:
+            parts.append(
+                f"{obs.id}:gt=({obs.gt_xy[0]:.2f},{obs.gt_xy[1]:.2f}) "
+                f"est=({obs.est_xy[0]:.2f},{obs.est_xy[1]:.2f}) "
+                f"sigma=({obs.covariance_like_xy_m[0]:.3f},{obs.covariance_like_xy_m[1]:.3f}) "
+                f"axes=({obs.envelope_major_axis_m:.3f},{obs.envelope_minor_axis_m:.3f}) "
+                f"ori={obs.orientation_deg:.1f}"
+            )
+        print_debug("[BASELINE-OBS] " + " | ".join(parts))
 
     def start_robot(self):
         print_t("[C] Connecting to robot...")

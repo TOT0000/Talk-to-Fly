@@ -5,6 +5,9 @@ from typing import Dict, List, Optional, Tuple
 import math
 
 
+CHI2_2_095 = 5.991
+
+
 @dataclass(frozen=True)
 class TaskPoint:
     id: str
@@ -18,8 +21,8 @@ class StaticObstacle:
     id: str
     gt_x: float
     gt_y: float
-    base_major_axis_m: float
-    base_minor_axis_m: float
+    nominal_major_m: float
+    nominal_minor_m: float
     base_orientation_deg: float = 0.0
     est_bias_x_m: float = 0.0
     est_bias_y_m: float = 0.0
@@ -32,6 +35,8 @@ class ObstacleEnvelopeState:
     gt_xy: Tuple[float, float]
     est_xy: Tuple[float, float]
     covariance_like_xy_m: Tuple[float, float]
+    matrix_xy: Tuple[Tuple[float, float], Tuple[float, float]]
+    chi2_val: float
     envelope_major_axis_m: float
     envelope_minor_axis_m: float
     orientation_deg: float
@@ -43,6 +48,7 @@ class BaselineScene:
     drone_initial_pose: Tuple[float, float, float]
     drone_initial_yaw_rad: float
     user_position: Tuple[float, float, float]
+    user_initial_yaw_rad: float
     task_points: Tuple[TaskPoint, ...]
     obstacles: Tuple[StaticObstacle, ...]
     notes: str = ""
@@ -71,7 +77,40 @@ def _rotate(x: float, y: float, yaw_rad: float) -> Tuple[float, float]:
     return (x * c) + (y * s), (-x * s) + (y * c)
 
 
-def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float) -> List[ObstacleEnvelopeState]:
+def _build_covariance_matrix_2d(sigma_major: float, sigma_minor: float, orientation_deg: float):
+    theta = math.radians(float(orientation_deg))
+    c = math.cos(theta)
+    s = math.sin(theta)
+    a2 = float(sigma_major) ** 2
+    b2 = float(sigma_minor) ** 2
+    m00 = (c * c * a2) + (s * s * b2)
+    m01 = (c * s * (a2 - b2))
+    m11 = (s * s * a2) + (c * c * b2)
+    return ((m00, m01), (m01, m11))
+
+
+def _eigen_decompose_2x2_sym(matrix_xy):
+    m00, m01 = matrix_xy[0]
+    _, m11 = matrix_xy[1]
+    trace = m00 + m11
+    det = (m00 * m11) - (m01 * m01)
+    term = math.sqrt(max(0.0, (trace * trace * 0.25) - det))
+    l1 = max(0.0, (trace * 0.5) + term)
+    l2 = max(0.0, (trace * 0.5) - term)
+    # major eigenvector
+    if abs(m01) > 1e-9:
+        vx = l1 - m11
+        vy = m01
+    else:
+        vx, vy = (1.0, 0.0) if m00 >= m11 else (0.0, 1.0)
+    norm = math.hypot(vx, vy)
+    if norm < 1e-9:
+        vx, vy = 1.0, 0.0
+        norm = 1.0
+    return (l1, l2), (vx / norm, vy / norm)
+
+
+def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float, chi2_val: float = CHI2_2_095) -> List[ObstacleEnvelopeState]:
     states: List[ObstacleEnvelopeState] = []
     for idx, obstacle in enumerate(scene.obstacles):
         phase = float(now_s * 0.35 + idx * 0.9)
@@ -83,8 +122,15 @@ def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float) -> List
         sigma_x = float(obstacle.base_uncertainty_m * (1.0 + 0.25 * abs(math.sin(phase * 0.7))))
         sigma_y = float(obstacle.base_uncertainty_m * (1.0 + 0.25 * abs(math.cos(phase * 0.6))))
 
-        envelope_major = float(obstacle.base_major_axis_m + (1.8 * sigma_x))
-        envelope_minor = float(obstacle.base_minor_axis_m + (1.8 * sigma_y))
+        sigma_major = max(0.05, float(obstacle.nominal_major_m) * 0.30 + sigma_x)
+        sigma_minor = max(0.05, float(obstacle.nominal_minor_m) * 0.30 + sigma_y)
+        matrix_xy = _build_covariance_matrix_2d(sigma_major, sigma_minor, obstacle.base_orientation_deg)
+
+        eigenvalues, major_vec = _eigen_decompose_2x2_sym(matrix_xy)
+        envelope_major = float(math.sqrt(float(chi2_val) * float(eigenvalues[0])))
+        envelope_minor = float(math.sqrt(float(chi2_val) * float(eigenvalues[1])))
+        orientation_rad = float(math.atan2(major_vec[1], major_vec[0]))
+        orientation_deg = float(math.degrees(orientation_rad))
 
         states.append(
             ObstacleEnvelopeState(
@@ -92,9 +138,11 @@ def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float) -> List
                 gt_xy=(float(obstacle.gt_x), float(obstacle.gt_y)),
                 est_xy=(est_x, est_y),
                 covariance_like_xy_m=(sigma_x, sigma_y),
+                matrix_xy=matrix_xy,
+                chi2_val=float(chi2_val),
                 envelope_major_axis_m=max(0.05, envelope_major),
                 envelope_minor_axis_m=max(0.05, envelope_minor),
-                orientation_deg=float(obstacle.base_orientation_deg),
+                orientation_deg=orientation_deg,
             )
         )
     return states
@@ -244,15 +292,16 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
         drone_initial_pose=(1.0, 1.5, -1.5),
         drone_initial_yaw_rad=0.0,
         user_position=(10.7, 10.6, 0.0),
+        user_initial_yaw_rad=-2.4,
         task_points=(
             TaskPoint("A", 10.0, 1.6, -1.5),
             TaskPoint("B", 9.7, 4.9, -1.5),
             TaskPoint("C", 9.4, 7.9, -1.5),
         ),
         obstacles=(
-            StaticObstacle("O1", 3.2, 9.8, 0.80, 0.48, 20.0, est_bias_x_m=0.04, est_bias_y_m=-0.03, base_uncertainty_m=0.16),
-            StaticObstacle("O2", 5.8, 10.0, 0.85, 0.50, -15.0, est_bias_x_m=-0.03, est_bias_y_m=0.04, base_uncertainty_m=0.15),
-            StaticObstacle("O3", 8.0, 9.3, 0.75, 0.46, 40.0, est_bias_x_m=0.02, est_bias_y_m=0.02, base_uncertainty_m=0.14),
+            StaticObstacle("O1", 3.2, 9.8, 0.80, 0.48, 20.0, est_bias_x_m=0.04, est_bias_y_m=-0.03, base_uncertainty_m=0.12),
+            StaticObstacle("O2", 5.8, 10.0, 0.85, 0.50, -15.0, est_bias_x_m=-0.03, est_bias_y_m=0.04, base_uncertainty_m=0.12),
+            StaticObstacle("O3", 8.0, 9.3, 0.75, 0.46, 40.0, est_bias_x_m=0.02, est_bias_y_m=0.02, base_uncertainty_m=0.11),
         ),
         notes="Bottom corridor to A is intentionally clear from user and obstacle envelopes.",
     ),
@@ -261,15 +310,16 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
         drone_initial_pose=(1.3, 2.5, -1.5),
         drone_initial_yaw_rad=0.06,
         user_position=(10.1, 9.3, 0.0),
+        user_initial_yaw_rad=-2.2,
         task_points=(
             TaskPoint("A", 9.7, 2.5, -1.5),
             TaskPoint("B", 8.9, 5.7, -1.5),
             TaskPoint("C", 8.5, 8.3, -1.5),
         ),
         obstacles=(
-            StaticObstacle("O1", 5.1, 2.5, 1.25, 0.75, 8.0, est_bias_x_m=0.02, est_bias_y_m=0.01, base_uncertainty_m=0.20),
-            StaticObstacle("O2", 6.5, 5.9, 1.00, 0.60, 35.0, est_bias_x_m=-0.04, est_bias_y_m=0.02, base_uncertainty_m=0.18),
-            StaticObstacle("O3", 3.1, 7.6, 0.90, 0.52, -20.0, est_bias_x_m=0.01, est_bias_y_m=-0.03, base_uncertainty_m=0.17),
+            StaticObstacle("O1", 5.1, 2.5, 1.25, 0.75, 8.0, est_bias_x_m=0.02, est_bias_y_m=0.01, base_uncertainty_m=0.14),
+            StaticObstacle("O2", 6.5, 5.9, 1.00, 0.60, 35.0, est_bias_x_m=-0.04, est_bias_y_m=0.02, base_uncertainty_m=0.13),
+            StaticObstacle("O3", 3.1, 7.6, 0.90, 0.52, -20.0, est_bias_x_m=0.01, est_bias_y_m=-0.03, base_uncertainty_m=0.12),
         ),
         notes="Obstacle O1 is positioned to cut the direct A corridor but still leaves side detour room.",
     ),
@@ -278,15 +328,16 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
         drone_initial_pose=(1.4, 3.0, -1.5),
         drone_initial_yaw_rad=0.0,
         user_position=(5.1, 3.05, 0.0),
+        user_initial_yaw_rad=0.1,
         task_points=(
             TaskPoint("A", 9.3, 3.1, -1.5),
             TaskPoint("B", 8.9, 6.2, -1.5),
             TaskPoint("C", 8.6, 8.9, -1.5),
         ),
         obstacles=(
-            StaticObstacle("O1", 2.3, 8.7, 0.90, 0.55, 0.0, est_bias_x_m=-0.02, est_bias_y_m=0.03, base_uncertainty_m=0.16),
-            StaticObstacle("O2", 6.8, 8.2, 1.00, 0.60, 18.0, est_bias_x_m=0.03, est_bias_y_m=-0.02, base_uncertainty_m=0.18),
-            StaticObstacle("O3", 10.2, 5.9, 0.85, 0.50, -30.0, est_bias_x_m=0.02, est_bias_y_m=0.03, base_uncertainty_m=0.16),
+            StaticObstacle("O1", 2.3, 8.7, 0.90, 0.55, 0.0, est_bias_x_m=-0.02, est_bias_y_m=0.03, base_uncertainty_m=0.12),
+            StaticObstacle("O2", 6.8, 8.2, 1.00, 0.60, 18.0, est_bias_x_m=0.03, est_bias_y_m=-0.02, base_uncertainty_m=0.13),
+            StaticObstacle("O3", 10.2, 5.9, 0.85, 0.50, -30.0, est_bias_x_m=0.02, est_bias_y_m=0.03, base_uncertainty_m=0.12),
         ),
         notes="User envelope is intentionally near the A corridor to make user the primary blocker.",
     ),
@@ -295,15 +346,16 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
         drone_initial_pose=(0.8, 11.1, -1.5),
         drone_initial_yaw_rad=-0.75,
         user_position=(1.9, 9.8, 0.0),
+        user_initial_yaw_rad=-1.1,
         task_points=(
             TaskPoint("A", 1.5, 8.8, -1.5),
             TaskPoint("B", 2.4, 7.6, -1.5),
             TaskPoint("C", 3.6, 6.5, -1.5),
         ),
         obstacles=(
-            StaticObstacle("O1", 1.3, 10.1, 1.10, 0.72, 12.0, est_bias_x_m=0.03, est_bias_y_m=-0.02, base_uncertainty_m=0.22),
-            StaticObstacle("O2", 2.3, 8.9, 1.22, 0.78, 48.0, est_bias_x_m=-0.03, est_bias_y_m=0.04, base_uncertainty_m=0.23),
-            StaticObstacle("O3", 3.2, 9.7, 1.08, 0.66, -40.0, est_bias_x_m=0.02, est_bias_y_m=0.03, base_uncertainty_m=0.21),
+            StaticObstacle("O1", 1.3, 10.1, 1.10, 0.72, 12.0, est_bias_x_m=0.03, est_bias_y_m=-0.02, base_uncertainty_m=0.14),
+            StaticObstacle("O2", 2.3, 8.9, 1.22, 0.78, 48.0, est_bias_x_m=-0.03, est_bias_y_m=0.04, base_uncertainty_m=0.15),
+            StaticObstacle("O3", 3.2, 9.7, 1.08, 0.66, -40.0, est_bias_x_m=0.02, est_bias_y_m=0.03, base_uncertainty_m=0.14),
         ),
         notes="Upper-left corner compression + clustered obstacles create clear constrained geometry.",
     ),
