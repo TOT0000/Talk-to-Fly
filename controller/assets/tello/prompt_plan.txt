@@ -38,7 +38,7 @@ Output requirement:
 MiniSpec rules:
 - Output exactly one MiniSpec sentence.
 - Use simple stepwise assignments for arithmetic/indexing.
-- Use MiniSpec `?cond{...}` syntax, not Python `if`.
+- Use MiniSpec `?cond{{...}}` syntax, not Python `if`.
 - Follow guides.txt and plan_examples.txt.
 
 Guides:
