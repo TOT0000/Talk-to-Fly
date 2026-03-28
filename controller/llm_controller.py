@@ -964,6 +964,7 @@ class LLMController():
             user_est or user_gt,
             now_s=now,
             obstacle_envelopes=obstacle_states,
+            user_envelope=(None if safety_state is None else safety_state.user_envelope),
         )
         user_heading = float(self.get_user_heading_yaw())
         user_ref = user_est or user_gt
@@ -1007,6 +1008,7 @@ class LLMController():
                 user_est or user_gt,
                 target_xy=(target["x"], target["y"]),
                 obstacle_envelopes=obstacle_states,
+                user_envelope=(None if safety_state is None else safety_state.user_envelope),
             )
             candidate_path_summaries.append(
                 {
@@ -1099,7 +1101,7 @@ class LLMController():
                 return token
         return "A"
 
-    def _compute_path_eval(self, scene: BaselineScene, drone_pos, user_pos, now_s: float = 0.0, obstacle_envelopes=None):
+    def _compute_path_eval(self, scene: BaselineScene, drone_pos, user_pos, now_s: float = 0.0, obstacle_envelopes=None, user_envelope=None):
         target_id = "A"
         if isinstance(self.latest_baseline_decision, dict):
             target_id = str(self.latest_baseline_decision.get("target_task_point") or "A")
@@ -1117,11 +1119,12 @@ class LLMController():
             target_xy=(float(point.x), float(point.y)),
             user_xy=(None if user_pos is None else (float(user_pos[0]), float(user_pos[1]))),
             user_radius_m=user_radius,
+            user_envelope=user_envelope,
             obstacle_envelopes=obstacle_envelopes,
             corridor_half_width_m=0.35,
         )
 
-    def _compute_path_eval_for_target(self, scene: BaselineScene, drone_pos, user_pos, target_xy, obstacle_envelopes=None):
+    def _compute_path_eval_for_target(self, scene: BaselineScene, drone_pos, user_pos, target_xy, obstacle_envelopes=None, user_envelope=None):
         safety_context = getattr(self, "latest_safety_context", None)
         user_radius = 0.75
         if safety_context is not None:
@@ -1131,6 +1134,7 @@ class LLMController():
             target_xy=(float(target_xy[0]), float(target_xy[1])),
             user_xy=(None if user_pos is None else (float(user_pos[0]), float(user_pos[1]))),
             user_radius_m=user_radius,
+            user_envelope=user_envelope,
             obstacle_envelopes=obstacle_envelopes or [],
             corridor_half_width_m=0.35,
         )
@@ -1155,6 +1159,7 @@ class LLMController():
             user_pos,
             now_s=time.time(),
             obstacle_envelopes=obstacle_envelopes,
+            user_envelope=(None if snapshot.get("safety_state") is None else snapshot.get("safety_state").user_envelope),
         )
         risk_high = bool(safety_context is not None and str(safety_context.safety_level) in {"WARNING", "DANGER"})
         direct_go_to = bool(path_eval.path_clear and not risk_high)
