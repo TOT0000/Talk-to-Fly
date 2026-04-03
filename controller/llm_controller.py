@@ -39,6 +39,11 @@ from .baseline_scenes import (
     get_task_point,
     normalize_baseline_scene_id,
 )
+from .benchmark_layout import (
+    BENCHMARK_CHECKPOINT_ORDER,
+    BENCHMARK_CHECKPOINTS,
+    BENCHMARK_ZONES,
+)
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = 0.30
@@ -843,7 +848,10 @@ class LLMController():
         else:
             user_packet = provider.get_latest_received_user_packet() if hasattr(provider, "get_latest_received_user_packet") else None
 
-        obstacle_states_generated = compute_obstacle_envelope_states(self.get_baseline_scene(), now_s=now)
+        baseline_state = self.baseline_scene_state or {}
+        scene_start_ts = float(baseline_state.get("captured_at", now))
+        elapsed_scene_s = max(0.0, now - scene_start_ts)
+        obstacle_states_generated = compute_obstacle_envelope_states(self.get_baseline_scene(), now_s=elapsed_scene_s)
         obstacle_states = self._simulate_obstacle_returns(obstacle_states_generated, now=now)
         user_heading = float(self.get_user_heading_yaw())
         user_ref = user_est or user_gt
@@ -908,11 +916,46 @@ class LLMController():
         if dominant_safety_context is not None:
             dominant_safety_context.path_summary = None
             safety_context = dominant_safety_context
+        elif drone_packet is not None:
+            # Fallback: when provider-level safety_state is unavailable, still
+            # compute collision probability with UAV + user/worker localization packets.
+            worker_packets = []
+            if user_packet is not None:
+                worker_packets.append(("user", user_packet))
+            worker_packets.extend((str(obs.id), obs.localization_packet) for obs in obstacle_states)
+            if worker_packets:
+                safety_context = self.safety_assessor.build_from_packets(
+                    drone_packet=drone_packet,
+                    worker_packets=worker_packets,
+                    now=now,
+                    safety_state=None,
+                )
+        drone_bias_xy = None if drone_packet is None else tuple(float(v) for v in drone_packet.b_xy[:2])
+        user_bias_xy = None if user_packet is None else tuple(float(v) for v in user_packet.b_xy[:2])
+        drone_corrected = None if drone_est is None else (
+            float(drone_est[0] - (0.0 if drone_bias_xy is None else drone_bias_xy[0])),
+            float(drone_est[1] - (0.0 if drone_bias_xy is None else drone_bias_xy[1])),
+            float(drone_est[2]),
+        )
+        user_corrected = None if user_est is None else (
+            float(user_est[0] - (0.0 if user_bias_xy is None else user_bias_xy[0])),
+            float(user_est[1] - (0.0 if user_bias_xy is None else user_bias_xy[1])),
+            float(user_est[2]),
+        )
+
         snapshot = {
             "drone_gt": drone_gt,
             "drone_est": drone_est,
+            "drone_est_bias_corrected": drone_corrected,
+            "drone_est_raw": drone_est,
+            "drone_bias_xy": drone_bias_xy,
+            "drone_P_xy": (None if drone_packet is None else np.asarray(drone_packet.P_xy, dtype=float).copy()),
             "user_gt": user_gt,
             "user_est": user_est,
+            "user_est_bias_corrected": user_corrected,
+            "user_est_raw": user_est,
+            "user_bias_xy": user_bias_xy,
+            "user_P_xy": (None if user_packet is None else np.asarray(user_packet.P_xy, dtype=float).copy()),
             "safety_state": safety_state,
             "safety_context": safety_context,
             "drone_yaw_rad": self._get_drone_yaw_rad(),
@@ -921,9 +964,39 @@ class LLMController():
             "baseline_scene": self.get_baseline_scene(),
             "baseline_scene_state": self.baseline_scene_state,
             "obstacle_envelope_states": obstacle_states,
+            "workers": [
+                {
+                    "id": str(obs.id),
+                    "gt_xy": tuple(float(v) for v in obs.gt_xy),
+                    "est_xy_raw": (
+                        float(obs.localization_packet.estimated_position_3d[0]),
+                        float(obs.localization_packet.estimated_position_3d[1]),
+                    ),
+                    "bias_xy": tuple(float(v) for v in obs.localization_packet.b_xy[:2]),
+                    "est_xy_bias_corrected": (
+                        float(obs.localization_packet.estimated_position_3d[0] - obs.localization_packet.b_xy[0]),
+                        float(obs.localization_packet.estimated_position_3d[1] - obs.localization_packet.b_xy[1]),
+                    ),
+                    "P_xy": np.asarray(obs.localization_packet.P_xy, dtype=float).copy(),
+                }
+                for obs in obstacle_states
+            ],
             "candidate_targets": candidate_targets,
             "candidate_path_summaries": candidate_path_summaries,
             "baseline_decision": self.latest_baseline_decision,
+            "framework_name": "TypeFly baseline",
+            "mode_name": self.get_active_scenario_name(),
+            "checkpoint_order": list(BENCHMARK_CHECKPOINT_ORDER),
+            "benchmark_checkpoints": [
+                {"id": cp.id, "zone_id": cp.zone_id, "x": float(cp.x), "y": float(cp.y), "radius_m": float(cp.radius_m)}
+                for cp in BENCHMARK_CHECKPOINTS
+            ],
+            "benchmark_zones": [
+                {"id": zone.id, "x_range": zone.x_range, "y_range": zone.y_range, "label_xy": zone.label_xy}
+                for zone in BENCHMARK_ZONES
+            ],
+            "original_planned_path": None,
+            "updated_path": None,
         }
         if safety_state is not None and safety_context is not None:
             consistency_from_gap = bool(float(safety_state.envelope_gap_m) < 0.0)
