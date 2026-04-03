@@ -443,8 +443,8 @@ class TypeFly:
         normalized, report, runtime = self._apply_mode_and_collect(scenario_name)
         return (
             f"Scenario `{normalized}` applied. "
-            f"Live safety: {runtime.get('safety_level')} "
-            f"(score={self._fmt_float(runtime.get('safety_score'))})"
+            f"Live collision probability: {self._fmt_float(runtime.get('current_collision_probability'))} "
+            f"(historical_max={self._fmt_float(runtime.get('historical_max_collision_probability'))})"
         )
 
     def apply_baseline_scene(self, scene_id):
@@ -472,8 +472,8 @@ class TypeFly:
         runtime = self.llm_controller.get_scenario_runtime_status()
         return (
             f"User moved to {self._fmt_vec(updated)} | "
-            f"live safety={runtime.get('safety_level')} "
-            f"(score={self._fmt_float(runtime.get('safety_score'))})"
+            f"live collision_probability={self._fmt_float(runtime.get('current_collision_probability'))} "
+            f"(historical_max={self._fmt_float(runtime.get('historical_max_collision_probability'))})"
         )
 
     def move_user_forward(self, step_m: float):
@@ -718,9 +718,9 @@ class TypeFly:
         return "\n".join(
             [
                 "### Safety / Risk",
-                f"- safety_score: {safety_context.safety_score:.3f}",
-                f"- safety_level: {safety_context.safety_level}",
-                f"- planning_bias: {safety_context.planning_bias}",
+                f"- current_collision_probability: {float(getattr(safety_context, 'current_collision_probability', 0.0)):.6f}",
+                f"- historical_max_collision_probability: {float(getattr(safety_context, 'historical_max_collision_probability', 0.0)):.6f}",
+                f"- safety_score (compat): {safety_context.safety_score:.3f}",
                 f"- dominant_threat_type: {getattr(safety_context, 'dominant_threat_type', 'user')}",
                 f"- dominant_threat_id: {getattr(safety_context, 'dominant_threat_id', 'user')}",
                 f"- dominant_gap_m: {float(getattr(safety_context, 'dominant_gap_m', safety_context.envelope_gap_m)):.3f} m",

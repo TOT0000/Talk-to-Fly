@@ -7,14 +7,15 @@ from typing import Any, Dict, List, Optional
 @dataclass
 class SafetyContext:
     safety_score: float
-    safety_level: str
-    planning_bias: str
     preferred_standoff_m: float
     reason_tags: List[str]
     envelope_gap_m: float
     uncertainty_scale_m: float
     drone_to_user_distance_xy: float
     envelopes_overlap: bool
+    # Deprecated compatibility fields; main decision chain should use collision probabilities.
+    safety_level: str = ""
+    planning_bias: str = ""
     latest_generation_timestamp: Optional[float] = None
     latest_receive_timestamp: Optional[float] = None
     timing_freshness_s: Optional[float] = None
@@ -96,8 +97,6 @@ class SafetyContext:
             f"current_collision_probability: {self.current_collision_probability:.6f}\n"
             f"historical_max_collision_probability: {self.historical_max_collision_probability:.6f}\n"
             f"safety_score: {self.safety_score:.3f}\n"
-            f"safety_level: {self.safety_level}\n"
-            f"planning_bias: {self.planning_bias}\n"
             f"reason_tags: {self.reason_tags}\n"
             f"dominant_threat_type: {self.dominant_threat_type}\n"
             f"dominant_threat_id: {self.dominant_threat_id}\n"

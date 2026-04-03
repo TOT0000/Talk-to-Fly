@@ -18,27 +18,6 @@ class GcsSafetyAssessmentService:
         self._uav_radius_m = float(os.getenv("TYPEFLY_UAV_RADIUS_M", "0.35"))
         self._worker_radius_m = float(os.getenv("TYPEFLY_WORKER_RADIUS_M", "0.35"))
 
-    @staticmethod
-    def _probability_to_level(probability: float) -> str:
-        """Map collision probability to compatibility labels used by existing UI/loggers."""
-        p = float(probability)
-        if p < 0.05:
-            return "SAFE"
-        if p < 0.15:
-            return "CAUTION"
-        if p < 0.30:
-            return "WARNING"
-        return "DANGER"
-
-    @staticmethod
-    def _planning_bias(level: str) -> str:
-        return {
-            "SAFE": "efficiency",
-            "CAUTION": "balanced",
-            "WARNING": "safety",
-            "DANGER": "safety",
-        }.get(level, "balanced")
-
     def _build_context_from_scene_summary(
         self,
         *,
@@ -49,14 +28,14 @@ class GcsSafetyAssessmentService:
         safety_state,
         now: float,
     ) -> SafetyContext:
-        level = self._probability_to_level(current_probability)
         overlap_flag = bool(current_probability >= 0.5)
         if safety_state is not None:
             envelope_gap_m = float(safety_state.envelope_gap_m)
-            uncertainty_scale_m = float(
+            geometric_uncertainty_m = float(
                 safety_state.drone_radius_along_user_direction
                 + safety_state.user_radius_along_drone_direction
             )
+            uncertainty_scale_m = geometric_uncertainty_m
             distance_xy = float(safety_state.drone_to_user_distance_xy)
             latest_gen = safety_state.latest_generation_timestamp
             latest_recv = safety_state.latest_receive_timestamp
@@ -77,8 +56,6 @@ class GcsSafetyAssessmentService:
             # Keep compatibility fields while changing semantics:
             # safety_score now represents current scene collision probability.
             safety_score=float(current_probability),
-            safety_level=str(level),
-            planning_bias=str(self._planning_bias(level)),
             preferred_standoff_m=float(self._uav_radius_m + self._worker_radius_m),
             reason_tags=[
                 "collision_probability_core",
@@ -157,8 +134,6 @@ class GcsSafetyAssessmentService:
         if safety_state is None:
             return SafetyContext(
                 safety_score=0.0,
-                safety_level="CAUTION",
-                planning_bias="balanced",
                 preferred_standoff_m=float(self._uav_radius_m + self._worker_radius_m),
                 reason_tags=["collision_probability_core", "safety_state_unavailable"],
                 envelope_gap_m=0.0,

@@ -42,6 +42,7 @@ from .baseline_scenes import (
 )
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = 0.30
 
 class LLMController():
     def __init__(self, robot_type, virtual_queue, use_http=False, message_queue: Optional[queue.Queue]=None, enable_video=False, state_provider: Optional[StateProvider]=None):
@@ -697,7 +698,8 @@ class LLMController():
             "target_user_gt": None if report is None else report.target_user_position_3d,
             "actual_drone_gt": snapshot.get("drone_gt") if snapshot else None,
             "actual_user_gt": snapshot.get("user_gt") if snapshot else None,
-            "safety_level": None if safety_context is None else safety_context.safety_level,
+            "current_collision_probability": None if safety_context is None else float(safety_context.current_collision_probability),
+            "historical_max_collision_probability": None if safety_context is None else float(safety_context.historical_max_collision_probability),
             "safety_score": None if safety_context is None else float(safety_context.safety_score),
             "envelope_gap_m": None if safety_context is None else float(safety_context.envelope_gap_m),
             "uncertainty_scale_m": None if safety_context is None else float(safety_context.uncertainty_scale_m),
@@ -729,8 +731,8 @@ class LLMController():
             f"  uncertainty={safety_context.uncertainty_scale_m:.3f}\n"
             f"  overlap={safety_context.envelopes_overlap}\n"
             f"  score={safety_context.safety_score:.3f}\n"
-            f"  level={safety_context.safety_level}\n"
-            f"  bias={safety_context.planning_bias}\n"
+            f"  current_collision_probability={safety_context.current_collision_probability:.6f}\n"
+            f"  historical_max_collision_probability={safety_context.historical_max_collision_probability:.6f}\n"
             f"  standoff={safety_context.preferred_standoff_m:.3f}\n"
             f"  dominant_threat={safety_context.dominant_threat_type}:{safety_context.dominant_threat_id}\n"
             f"  dominant_gap={safety_context.dominant_gap_m:.3f}\n"
@@ -1004,7 +1006,7 @@ class LLMController():
                 f"drone_radius={safety_state.drone_radius_along_user_direction:.6f} "
                 f"user_radius={safety_state.user_radius_along_drone_direction:.6f} "
                 f"score={safety_context.safety_score:.6f} "
-                f"level={safety_context.safety_level} "
+                f"current_p={safety_context.current_collision_probability:.6f} "
                 f"reason_tags={safety_context.reason_tags}"
             )
         self._debug_log_obstacle_envelopes(snapshot.get("obstacle_envelope_states"))
@@ -1098,7 +1100,10 @@ class LLMController():
             obstacle_envelopes=obstacle_envelopes,
             user_envelope=(None if snapshot.get("safety_state") is None else snapshot.get("safety_state").user_envelope),
         )
-        risk_high = bool(safety_context is not None and str(safety_context.safety_level) in {"WARNING", "DANGER"})
+        risk_high = bool(
+            safety_context is not None
+            and float(safety_context.current_collision_probability) >= COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD
+        )
         direct_go_to = bool(path_eval.path_clear and not risk_high)
         if direct_go_to:
             plan = "mf(1.0);d(0.2);mf(0.8);d(0.2);"
@@ -1157,7 +1162,10 @@ class LLMController():
 
     def get_baseline_expectation_summary(self, safety_context=None):
         scene = self.get_baseline_scene()
-        risk_high = bool(safety_context is not None and str(safety_context.safety_level) in {"WARNING", "DANGER"})
+        risk_high = bool(
+            safety_context is not None
+            and float(safety_context.current_collision_probability) >= COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD
+        )
         user_radius = max(0.45, float(getattr(safety_context, "uncertainty_scale_m", 1.0)) * 0.5)
         expectations = build_scene_expectations(
             scene=scene,
@@ -1178,7 +1186,10 @@ class LLMController():
         ]
 
     def get_all_scene_expectation_summary(self, safety_context=None):
-        risk_high = bool(safety_context is not None and str(safety_context.safety_level) in {"WARNING", "DANGER"})
+        risk_high = bool(
+            safety_context is not None
+            and float(safety_context.current_collision_probability) >= COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD
+        )
         user_radius = max(0.45, float(getattr(safety_context, "uncertainty_scale_m", 1.0)) * 0.5)
         expectations = build_all_scene_expectations(
             user_radius_m=user_radius,
