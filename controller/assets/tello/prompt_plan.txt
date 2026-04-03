@@ -9,7 +9,7 @@ Scene context may include:
 - TaskPoints: A/B/C
 - CandidateTargets: A/B/C, user, user_right_side, user_left_side
 - Obstacles with envelope/freshness
-- BackgroundSafety: dominant threat, safety_level, planning_bias
+- BackgroundSafety: dominant threat, current_collision_probability, historical_max_collision_probability, per-worker collision probabilities
 - PathSummaries by candidate target
 
 How to plan:
@@ -25,9 +25,9 @@ Important probe rule:
 - If you need forward progress, use short fixed forward moves and re-check.
 
 Planning styles:
-- Direct: target path_clear=True and safety is not WARNING/DANGER.
+- Direct: target path_clear=True and current_collision_probability is below high-risk threshold.
 - Detour: target path_clear=False; avoid the blocker first, then continue to target.
-- Cautious: safety is WARNING/DANGER; use smaller steps and re-check more often.
+- Cautious: current_collision_probability is high; use smaller steps and re-check more often.
 
 MiniSpec rules:
 - Output exactly one MiniSpec sentence.
@@ -62,7 +62,7 @@ Scene context may include:
 - TaskPoints: A/B/C
 - CandidateTargets: A/B/C, user, user_right_side, user_left_side, ...
 - Obstacles with envelope/freshness
-- BackgroundSafety: dominant threat, safety_level, planning_bias
+- BackgroundSafety: dominant threat, current_collision_probability, historical_max_collision_probability, per-worker collision probabilities
 - PathSummaries by candidate target
 
 Interpret the task first, then choose the matching target:
@@ -76,9 +76,9 @@ Use two safety layers correctly:
 Task intent chooses the target. Path summary for that target chooses direct vs detour. BackgroundSafety changes how cautious you should be.
 
 Planning styles:
-1. Direct: selected target has clear path and safety is not WARNING/DANGER.
+1. Direct: selected target has clear path and current_collision_probability is below high-risk threshold.
 2. Detour: selected target path is blocked; avoid blocker, then continue to target.
-3. Cautious: safety is WARNING/DANGER; use smaller/safer staged motion, but still try to complete the task when feasible.
+3. Cautious: current_collision_probability is high; use smaller/safer staged motion, but still try to complete the task when feasible.
 
 Movement semantics:
 - In PX4_SIM, mf/mb/ml/mr are body-frame moves.

@@ -7,14 +7,15 @@ from typing import Any, Dict, List, Optional
 @dataclass
 class SafetyContext:
     safety_score: float
-    safety_level: str
-    planning_bias: str
     preferred_standoff_m: float
     reason_tags: List[str]
     envelope_gap_m: float
     uncertainty_scale_m: float
     drone_to_user_distance_xy: float
     envelopes_overlap: bool
+    # Deprecated compatibility fields; main decision chain should use collision probabilities.
+    safety_level: str = ""
+    planning_bias: str = ""
     latest_generation_timestamp: Optional[float] = None
     latest_receive_timestamp: Optional[float] = None
     timing_freshness_s: Optional[float] = None
@@ -29,6 +30,9 @@ class SafetyContext:
     path_summary: Optional[Dict[str, Any]] = None
     candidate_targets_summary: Optional[List[Dict[str, Any]]] = None
     candidate_path_summaries: Optional[List[Dict[str, Any]]] = None
+    current_collision_probability: float = 0.0
+    historical_max_collision_probability: float = 0.0
+    per_worker_collision_probabilities: Optional[List[Dict[str, Any]]] = None
 
     def to_prompt_block(self) -> str:
         freshness = "unknown" if self.timing_freshness_s is None else f"{self.timing_freshness_s:.2f} s"
@@ -40,6 +44,7 @@ class SafetyContext:
         obstacles = self.obstacles_summary or []
         candidate_targets = self.candidate_targets_summary or []
         candidate_paths = self.candidate_path_summaries or []
+        per_worker_probs = self.per_worker_collision_probabilities or []
         task_points_block = (
             "\n".join(
                 f"- {row.get('id')}: x={float(row.get('x')):.2f}, y={float(row.get('y')):.2f}, z={float(row.get('z')):.2f}"
@@ -80,10 +85,18 @@ class SafetyContext:
             if candidate_paths
             else "- (n/a)"
         )
+        per_worker_prob_block = (
+            "\n".join(
+                f"- {row.get('id')}: P_c={float(row.get('collision_probability')):.6f}"
+                for row in per_worker_probs
+            )
+            if per_worker_probs
+            else "- (n/a)"
+        )
         return (
+            f"current_collision_probability: {self.current_collision_probability:.6f}\n"
+            f"historical_max_collision_probability: {self.historical_max_collision_probability:.6f}\n"
             f"safety_score: {self.safety_score:.3f}\n"
-            f"safety_level: {self.safety_level}\n"
-            f"planning_bias: {self.planning_bias}\n"
             f"reason_tags: {self.reason_tags}\n"
             f"dominant_threat_type: {self.dominant_threat_type}\n"
             f"dominant_threat_id: {self.dominant_threat_id}\n"
@@ -101,5 +114,6 @@ class SafetyContext:
             f"TaskPoints:\n{task_points_block}\n"
             f"CandidateTargets:\n{candidate_targets_block}\n"
             f"Obstacles:\n{obstacle_block}\n"
-            f"PathSummaries:\n{candidate_paths_block}"
+            f"PathSummaries:\n{candidate_paths_block}\n"
+            f"PerWorkerCollisionProbabilities:\n{per_worker_prob_block}"
         )
