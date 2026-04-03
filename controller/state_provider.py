@@ -64,12 +64,6 @@ class StateProvider(ABC):
     def get_latest_packet_generation_timestamp(self) -> Optional[float]:
         return None
 
-    def get_latest_packet_receive_timestamp(self) -> Optional[float]:
-        return None
-
-    def compute_aoi(self, now: Optional[float] = None) -> Optional[float]:
-        return None
-
     def flush_due_packets(self, now: Optional[float] = None):
         return []
 

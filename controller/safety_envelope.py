@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
@@ -24,7 +23,6 @@ class SafetyEnvelope2D:
     chi2_val: float
     matrix_xy: np.ndarray
     packet_generation_timestamp: float
-    packet_receive_timestamp: Optional[float]
     sequence_number: int
 
     def ray_radius(self, direction_xy: np.ndarray) -> float:
@@ -77,6 +75,5 @@ def build_safety_envelope(packet: LocalizedStatePacket, chi2_val: float = CHI2_2
         chi2_val=float(chi2_val),
         matrix_xy=matrix_xy,
         packet_generation_timestamp=float(packet.state_generation_timestamp),
-        packet_receive_timestamp=packet.received_packet_timestamp,
         sequence_number=int(packet.sequence_number),
     )

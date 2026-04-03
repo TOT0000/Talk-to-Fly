@@ -16,16 +16,10 @@ class SafetyContext:
     # Deprecated compatibility fields; main decision chain should use collision probabilities.
     safety_level: str = ""
     planning_bias: str = ""
-    # Legacy scenario-runner hooks; no longer used by controller/prompt/logger/UI risk logic.
-    latest_generation_timestamp: Optional[float] = None
-    latest_receive_timestamp: Optional[float] = None
-    timing_freshness_s: Optional[float] = None
-    max_aoi_s: Optional[float] = None
     dominant_threat_type: str = "user"
     dominant_threat_id: str = "user"
     dominant_gap_m: float = 0.0
     dominant_uncertainty_scale_m: float = 1.0
-    dominant_freshness_s: Optional[float] = None
     task_points_summary: Optional[List[Dict[str, Any]]] = None
     obstacles_summary: Optional[List[Dict[str, Any]]] = None
     path_summary: Optional[Dict[str, Any]] = None

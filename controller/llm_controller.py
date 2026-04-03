@@ -658,7 +658,6 @@ class LLMController():
             "safety_level": report.measured_initial_safety_level,
             "envelope_gap_m": report.measured_initial_envelope_gap_m,
             "uncertainty_scale_m": report.measured_initial_uncertainty_scale_m,
-            "max_aoi_s": report.measured_initial_max_aoi_s,
             "repositioned": report.repositioned,
             "calibration_iterations": report.calibration_iterations,
             "captured_at": time.time(),
@@ -1169,8 +1168,7 @@ class LLMController():
                 f"est=({obs.est_xy[0]:.2f},{obs.est_xy[1]:.2f}) "
                 f"matrix={obs.matrix_xy} "
                 f"axes=({obs.envelope.major_axis_radius:.3f},{obs.envelope.minor_axis_radius:.3f}) "
-                f"ori={obs.envelope.orientation_deg:.1f} "
-                f"rx={'None' if packet.received_packet_timestamp is None else f'{float(packet.received_packet_timestamp):.3f}'}"
+                f"ori={obs.envelope.orientation_deg:.1f}"
             )
         print_debug("[BASELINE-OBS] " + " | ".join(parts))
 
