@@ -43,12 +43,12 @@ BENCHMARK_CHECKPOINTS: Tuple[CheckpointDef, ...] = (
     CheckpointDef("B2", "zone_B", 10.6, 10.6),
     CheckpointDef("B3", "zone_B", 7.4, 7.8),
     CheckpointDef("B4", "zone_B", 10.6, 7.8),
-    CheckpointDef("C1", "zone_C", 1.7, 4.2),
-    CheckpointDef("C2", "zone_C", 4.1, 4.2),
-    CheckpointDef("C3", "zone_C", 6.0, 4.2),
-    CheckpointDef("C4", "zone_C", 8.0, 4.2),
-    CheckpointDef("C5", "zone_C", 10.0, 4.2),
-    CheckpointDef("C6", "zone_C", 6.0, 1.8),
+    CheckpointDef("C1", "zone_C", 1.6, 4.5),
+    CheckpointDef("C2", "zone_C", 4.2, 3.9),
+    CheckpointDef("C3", "zone_C", 6.2, 4.7),
+    CheckpointDef("C4", "zone_C", 8.4, 3.5),
+    CheckpointDef("C5", "zone_C", 10.3, 4.6),
+    CheckpointDef("C6", "zone_C", 6.0, 1.7),
 )
 
 BENCHMARK_CHECKPOINT_ORDER: Tuple[str, ...] = tuple(cp.id for cp in BENCHMARK_CHECKPOINTS)

@@ -43,7 +43,6 @@ from .benchmark_layout import (
     BENCHMARK_CHECKPOINT_ORDER,
     BENCHMARK_CHECKPOINTS,
     BENCHMARK_ZONES,
-    build_checkpoint_order_polyline,
 )
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -917,6 +916,20 @@ class LLMController():
         if dominant_safety_context is not None:
             dominant_safety_context.path_summary = None
             safety_context = dominant_safety_context
+        elif drone_packet is not None:
+            # Fallback: when provider-level safety_state is unavailable, still
+            # compute collision probability with UAV + user/worker localization packets.
+            worker_packets = []
+            if user_packet is not None:
+                worker_packets.append(("user", user_packet))
+            worker_packets.extend((str(obs.id), obs.localization_packet) for obs in obstacle_states)
+            if worker_packets:
+                safety_context = self.safety_assessor.build_from_packets(
+                    drone_packet=drone_packet,
+                    worker_packets=worker_packets,
+                    now=now,
+                    safety_state=None,
+                )
         drone_bias_xy = None if drone_packet is None else tuple(float(v) for v in drone_packet.b_xy[:2])
         user_bias_xy = None if user_packet is None else tuple(float(v) for v in user_packet.b_xy[:2])
         drone_corrected = None if drone_est is None else (
@@ -982,7 +995,7 @@ class LLMController():
                 {"id": zone.id, "x_range": zone.x_range, "y_range": zone.y_range, "label_xy": zone.label_xy}
                 for zone in BENCHMARK_ZONES
             ],
-            "original_planned_path": build_checkpoint_order_polyline(),
+            "original_planned_path": None,
             "updated_path": None,
         }
         if safety_state is not None and safety_context is not None:

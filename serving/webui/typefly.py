@@ -638,6 +638,14 @@ class TypeFly:
             return "n/a"
         return f"{value:.3f}{suffix}"
 
+    def _fmt_prob(self, value):
+        if value is None:
+            return "n/a"
+        value = float(value)
+        if abs(value) < 1e-4 and value != 0.0:
+            return f"{value:.3e}"
+        return f"{value:.6f}"
+
     def _extract_ui_positions(self, snapshot):
         if not snapshot:
             return {
@@ -726,18 +734,34 @@ class TypeFly:
         completed = len(self.benchmark_progress["completed"])
         total = len(self.benchmark_progress["order"])
         target = self.benchmark_progress.get("current_target") or "n/a"
-        return "\n".join(
-            [
-                "### Status",
-                f"- current framework: {snapshot.get('framework_name', 'n/a')}",
-                f"- current mode: {snapshot.get('mode_name', 'n/a')}",
-                f"- current_collision_probability: {float(getattr(safety_context, 'current_collision_probability', 0.0)):.6f}",
-                f"- historical_max_collision_probability: {float(getattr(safety_context, 'historical_max_collision_probability', 0.0)):.6f}",
-                f"- dominant risky worker: {getattr(safety_context, 'dominant_threat_id', 'n/a')}",
-                f"- current target checkpoint: {target}",
-                f"- completed checkpoints: {completed}/{total}",
-            ]
-        )
+        positions = self._extract_ui_positions(snapshot)
+        workers = snapshot.get("workers") or []
+        worker_map = {str(item.get("id")): item for item in workers}
+
+        def _fmt_xy(pos):
+            if pos is None:
+                return "(n/a)"
+            return f"({float(pos[0]):.2f}, {float(pos[1]):.2f})"
+
+        lines = [
+            "### Status",
+            f"- current framework: {snapshot.get('framework_name', 'n/a')}",
+            f"- current mode: {snapshot.get('mode_name', 'n/a')}",
+            f"- current_collision_probability: {self._fmt_prob(getattr(safety_context, 'current_collision_probability', 0.0))}",
+            f"- historical_max_collision_probability: {self._fmt_prob(getattr(safety_context, 'historical_max_collision_probability', 0.0))}",
+            f"- dominant risky worker: {getattr(safety_context, 'dominant_threat_id', 'n/a')}",
+            f"- current target checkpoint: {target}",
+            f"- completed checkpoints: {completed}/{total}",
+            "",
+            f"- UAV true: {_fmt_xy(positions.get('drone_gt'))}",
+            f"- UAV est (bias-corrected): {_fmt_xy(positions.get('drone_est'))}",
+        ]
+        for worker_id in ("worker_1", "worker_2", "worker_3"):
+            worker = worker_map.get(worker_id)
+            lines.append(f"- {worker_id} true: {_fmt_xy(None if worker is None else worker.get('gt_xy'))}")
+            lines.append(f"- {worker_id} est (bias-corrected): {_fmt_xy(None if worker is None else worker.get('est_xy_bias_corrected'))}")
+
+        return "\n".join(lines)
 
     def _estimate_heading_from_history(self, primary_key: str, fallback_key: str = None):
         history = list(self.position_history.get(primary_key, []))
@@ -857,7 +881,7 @@ class TypeFly:
         original_path = snapshot.get("original_planned_path") or []
         if len(original_path) >= 2:
             ax_xy.plot([p[0] for p in original_path], [p[1] for p in original_path], color="#9E9E9E", linestyle="--", linewidth=1.4, label="Original planned path")
-        updated_path = snapshot.get("updated_path") or list((p[0], p[1]) for p in self.position_history["drone_gt"])
+        updated_path = snapshot.get("updated_path") or []
         if len(updated_path) >= 2:
             ax_xy.plot([p[0] for p in updated_path], [p[1] for p in updated_path], color="#1565C0", linestyle="-", linewidth=1.7, label="Current path")
 
@@ -871,22 +895,6 @@ class TypeFly:
             dy = arrow_len * float(math.sin(yaw_rad))
             ax_xy.arrow(hx, hy, dx, dy, head_width=0.16, head_length=0.18, color="#0B57D0", linewidth=1.6, length_includes_head=True, zorder=5)
             ax_xy.text(hx + dx + 0.05, hy + dy + 0.05, "Heading", fontsize=8, color="#0B57D0")
-
-        user_for_heading = positions.get("user_gt") or positions.get("user_est")
-        if user_for_heading is not None:
-            explicit_user_yaw = snapshot.get("user_heading_yaw_rad") if snapshot else None
-            if explicit_user_yaw is not None:
-                user_yaw_rad = float(explicit_user_yaw)
-                user_heading_source = "explicit_state"
-            else:
-                user_yaw_rad, user_heading_source = self._estimate_heading_from_history("user_gt", fallback_key="user_est")
-            ux = float(user_for_heading[0])
-            uy = float(user_for_heading[1])
-            arrow_len = 0.45
-            udx = arrow_len * float(math.cos(user_yaw_rad))
-            udy = arrow_len * float(math.sin(user_yaw_rad))
-            ax_xy.arrow(ux, uy, udx, udy, head_width=0.14, head_length=0.16, color="#C5221F", linewidth=1.4, length_includes_head=True, zorder=5)
-            ax_xy.text(ux + udx + 0.04, uy + udy + 0.04, f"User Heading ({user_heading_source})", fontsize=7, color="#C5221F")
 
         ax_xy.set_xlim(*xlim)
         ax_xy.set_ylim(*ylim)
