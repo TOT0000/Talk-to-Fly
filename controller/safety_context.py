@@ -25,6 +25,7 @@ class SafetyContext:
     current_collision_probability: float = 0.0
     historical_max_collision_probability: float = 0.0
     per_worker_collision_probabilities: Optional[List[Dict[str, Any]]] = None
+    collision_debug_info: Optional[Dict[str, Any]] = None
 
     def to_prompt_block(self) -> str:
         task_points = self.task_points_summary or []

@@ -739,7 +739,7 @@ class TypeFly:
         worker_map = {str(item.get("id")): item for item in workers}
         per_worker_probs = {}
         for row in getattr(safety_context, "per_worker_collision_probabilities", []) or []:
-            per_worker_probs[str(row.get("id"))] = float(row.get("collision_probability", 0.0))
+            per_worker_probs[str(row.get("id"))] = row
 
         def _fmt_xy(pos):
             if pos is None:
@@ -774,7 +774,27 @@ class TypeFly:
             lines.append(f"- {worker_id} est (bias-corrected): {_fmt_xy(w_est)}")
             lines.append(f"- {worker_id} distance to UAV (true): {_dist_xy(positions.get('drone_gt'), w_true)}")
             lines.append(f"- {worker_id} distance to UAV (est): {_dist_xy(positions.get('drone_est'), w_est)}")
-            lines.append(f"- {worker_id} collision probability: {self._fmt_prob(per_worker_probs.get(worker_id, 0.0))}")
+            prob_row = per_worker_probs.get(worker_id, {})
+            lines.append(f"- {worker_id} collision probability: {self._fmt_prob(prob_row.get('collision_probability', 0.0))}")
+            if worker_id == "worker_3":
+                ui_mu3 = None
+                if positions.get("drone_est") is not None and w_est is not None:
+                    ui_mu3 = [float(w_est[0] - positions["drone_est"][0]), float(w_est[1] - positions["drone_est"][1])]
+                lines.append(f"- worker_3 relative mean mu3: {prob_row.get('mu_xy', 'n/a')}")
+                lines.append(f"- worker_3 relative mean mu3 (from UI est): {ui_mu3 if ui_mu3 is not None else 'n/a'}")
+                lines.append(f"- worker_3 relative covariance Sigma_rel3: {prob_row.get('sigma_rel', 'n/a')}")
+                lines.append(f"- worker_3 exact series P_c: {self._fmt_prob(prob_row.get('exact_series_probability', 0.0))}")
+                lines.append(f"- worker_3 Monte Carlo P_c (debug): {self._fmt_prob(prob_row.get('monte_carlo_probability'))}")
+
+        dbg = getattr(safety_context, "collision_debug_info", {}) or {}
+        sanity = dbg.get("sanity_case_probabilities", {}) if isinstance(dbg, dict) else {}
+        lines.extend(
+            [
+                "",
+                f"- sanity Case1 exact (mu=[0,0], sigma=1e-4I, r_c=0.52): {self._fmt_prob(sanity.get('case1_exact'))}",
+                f"- sanity Case2 exact (mu=[3,0], sigma=1e-4I, r_c=0.52): {self._fmt_prob(sanity.get('case2_exact'))}",
+            ]
+        )
 
         return "\n".join(lines)
 
