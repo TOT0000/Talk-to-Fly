@@ -834,6 +834,8 @@ class TypeFly:
         ]
         return gr.update(value="\n".join(lines), visible=True)
 
+        return "\n".join(lines)
+
     def _estimate_heading_from_history(self, primary_key: str, fallback_key: str = None):
         history = list(self.position_history.get(primary_key, []))
         if len(history) < 2 and fallback_key:
