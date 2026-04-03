@@ -105,28 +105,52 @@ def quadratic_form_cdf_exact_series(
     prod_term = float(np.prod(np.power(2.0 * lambda_vals, -0.5)))
     c = [exp_term * prod_term]
 
+    base_vals = np.maximum(2.0 * lambda_vals, 1e-300)
+    log_base_vals = np.log(base_vals)
+    negative_logs = -log_base_vals[log_base_vals < 0.0]
+    dynamic_k_limit = int(max_terms)
+    if negative_logs.size > 0:
+        max_neg = float(np.max(negative_logs))
+        if max_neg > 0.0:
+            dynamic_k_limit = min(dynamic_k_limit, max(6, int(700.0 / max_neg)))
+
     # Precompute d_k lazily as needed by recursion.
     def compute_d(k: int) -> float:
-        inv_term = np.power(2.0 * lambda_vals, -float(k))
-        return 0.5 * float(np.sum((1.0 - (float(k) * np.square(transformed_b))) * inv_term))
+        exponent = -float(k) * log_base_vals
+        inv_term = np.exp(np.clip(exponent, -700.0, 700.0))
+        value = 0.5 * float(np.sum((1.0 - (float(k) * np.square(transformed_b))) * inv_term))
+        return value
 
     total = 0.0
     converged = False
     terms_used = 0
     half_n = 0.5 * float(n)
 
-    for k in range(max_terms):
+    for k in range(dynamic_k_limit):
         if k > 0:
             ck = 0.0
             for i in range(k):
                 d = compute_d(k - i)
                 ck += d * c[i]
             ck = ck / float(k)
+            if not math.isfinite(ck):
+                break
             c.append(ck)
         ck = c[k]
 
-        gamma_denom = math.gamma(half_n + float(k) + 1.0)
-        term = ((-1.0) ** k) * ck * (q ** (half_n + float(k))) / gamma_denom
+        if ck == 0.0:
+            term = 0.0
+        else:
+            log_term_abs = math.log(abs(float(ck))) - math.lgamma(half_n + float(k) + 1.0)
+            if q > 0.0:
+                log_term_abs += (half_n + float(k)) * math.log(q)
+            if log_term_abs > 700.0:
+                break
+            if log_term_abs < -745.0:
+                term = 0.0
+            else:
+                term_mag = math.exp(log_term_abs)
+                term = ((-1.0) ** k) * (1.0 if ck >= 0 else -1.0) * term_mag
         total += term
         terms_used = k + 1
         if abs(term) < tolerance:
@@ -267,14 +291,17 @@ class CollisionProbabilityCore:
     def _get_sanity_case_probabilities(self, max_terms: int, tolerance: float) -> Dict[str, float]:
         if self._sanity_cache is not None:
             return dict(self._sanity_cache)
-        case1_mu = np.array([0.0, 0.0], dtype=float)
-        case2_mu = np.array([3.0, 0.0], dtype=float)
-        case_sigma = np.array([[1e-4, 0.0], [0.0, 1e-4]], dtype=float)
-        rc = 0.52
-        A = (1.0 / (rc * rc)) * np.eye(2, dtype=float)
-        case1_prob, _, _, _, _ = quadratic_form_cdf_exact_series(case1_mu, case_sigma, A, q=1.0, max_terms=max_terms, tolerance=tolerance)
-        case2_prob, _, _, _, _ = quadratic_form_cdf_exact_series(case2_mu, case_sigma, A, q=1.0, max_terms=max_terms, tolerance=tolerance)
-        self._sanity_cache = {"case1_exact": float(case1_prob), "case2_exact": float(case2_prob)}
+        try:
+            case1_mu = np.array([0.0, 0.0], dtype=float)
+            case2_mu = np.array([3.0, 0.0], dtype=float)
+            case_sigma = np.array([[1e-4, 0.0], [0.0, 1e-4]], dtype=float)
+            rc = 0.52
+            A = (1.0 / (rc * rc)) * np.eye(2, dtype=float)
+            case1_prob, _, _, _, _ = quadratic_form_cdf_exact_series(case1_mu, case_sigma, A, q=1.0, max_terms=max_terms, tolerance=tolerance)
+            case2_prob, _, _, _, _ = quadratic_form_cdf_exact_series(case2_mu, case_sigma, A, q=1.0, max_terms=max_terms, tolerance=tolerance)
+            self._sanity_cache = {"case1_exact": float(case1_prob), "case2_exact": float(case2_prob)}
+        except Exception:
+            self._sanity_cache = {"case1_exact": float("nan"), "case2_exact": float("nan")}
         return dict(self._sanity_cache)
 
 
