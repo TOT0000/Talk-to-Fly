@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 import math
+import os
 import numpy as np
 
 from .anchor_provider import AnchorGeometryProvider
@@ -251,6 +252,10 @@ def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float) -> List
 
 def _scripted_worker_gt_xy(worker_id: str, now_s: float, fallback_xy: Tuple[float, float]) -> Tuple[float, float]:
     t = max(0.0, float(now_s))
+    if worker_id == "worker_3" and _debug_force_close_worker_enabled():
+        # Debug-only mode: force worker_3 near UAV start region to validate
+        # collision-probability pipeline end-to-end.
+        return (1.35, 1.0)
     if worker_id == "worker_1":
         # zone_A crossing loop: rectangle loop.
         waypoints = [(1.5, 10.5), (5.2, 10.5), (5.2, 7.5), (1.5, 7.5)]
@@ -315,6 +320,11 @@ def _sample_worker2_loop(t: float) -> Tuple[float, float]:
     u -= t12
     r = u / max(t20, 1e-6)
     return (p2[0] + (p0[0] - p2[0]) * r, p2[1] + (p0[1] - p2[1]) * r)
+
+
+def _debug_force_close_worker_enabled() -> bool:
+    value = str(os.getenv("DEBUG_FORCE_CLOSE_WORKER", "false")).strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def evaluate_path_clear(

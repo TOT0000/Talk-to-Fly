@@ -737,19 +737,29 @@ class TypeFly:
         positions = self._extract_ui_positions(snapshot)
         workers = snapshot.get("workers") or []
         worker_map = {str(item.get("id")): item for item in workers}
+        per_worker_probs = {}
+        for row in getattr(safety_context, "per_worker_collision_probabilities", []) or []:
+            per_worker_probs[str(row.get("id"))] = float(row.get("collision_probability", 0.0))
 
         def _fmt_xy(pos):
             if pos is None:
                 return "(n/a)"
             return f"({float(pos[0]):.2f}, {float(pos[1]):.2f})"
 
+        def _dist_xy(a, b):
+            if a is None or b is None:
+                return "n/a"
+            return f"{math.hypot(float(a[0] - b[0]), float(a[1] - b[1])):.3f} m"
+
         lines = [
             "### Status",
             f"- current framework: {snapshot.get('framework_name', 'n/a')}",
             f"- current mode: {snapshot.get('mode_name', 'n/a')}",
+            f"- DEBUG_FORCE_CLOSE_WORKER: {os.getenv('DEBUG_FORCE_CLOSE_WORKER', 'false')}",
             f"- current_collision_probability: {self._fmt_prob(getattr(safety_context, 'current_collision_probability', 0.0))}",
             f"- historical_max_collision_probability: {self._fmt_prob(getattr(safety_context, 'historical_max_collision_probability', 0.0))}",
             f"- dominant risky worker: {getattr(safety_context, 'dominant_threat_id', 'n/a')}",
+            f"- collision radius r_u={UAV_RADIUS_M:.2f} m, r_h={WORKER_RADIUS_M:.2f} m, r_c={UAV_RADIUS_M + WORKER_RADIUS_M:.2f} m",
             f"- current target checkpoint: {target}",
             f"- completed checkpoints: {completed}/{total}",
             "",
@@ -758,8 +768,13 @@ class TypeFly:
         ]
         for worker_id in ("worker_1", "worker_2", "worker_3"):
             worker = worker_map.get(worker_id)
-            lines.append(f"- {worker_id} true: {_fmt_xy(None if worker is None else worker.get('gt_xy'))}")
-            lines.append(f"- {worker_id} est (bias-corrected): {_fmt_xy(None if worker is None else worker.get('est_xy_bias_corrected'))}")
+            w_true = None if worker is None else worker.get("gt_xy")
+            w_est = None if worker is None else worker.get("est_xy_bias_corrected")
+            lines.append(f"- {worker_id} true: {_fmt_xy(w_true)}")
+            lines.append(f"- {worker_id} est (bias-corrected): {_fmt_xy(w_est)}")
+            lines.append(f"- {worker_id} distance to UAV (true): {_dist_xy(positions.get('drone_gt'), w_true)}")
+            lines.append(f"- {worker_id} distance to UAV (est): {_dist_xy(positions.get('drone_est'), w_est)}")
+            lines.append(f"- {worker_id} collision probability: {self._fmt_prob(per_worker_probs.get(worker_id, 0.0))}")
 
         return "\n".join(lines)
 
