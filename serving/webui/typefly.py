@@ -114,6 +114,16 @@ class TypeFly:
             "active_progress": 0.0,
             "current_target": BENCHMARK_CHECKPOINT_ORDER[0] if BENCHMARK_CHECKPOINT_ORDER else None,
         }
+        self.objective_state = {
+            # Active objective set is explicitly tracked for future framework linkage.
+            "active_checkpoint_ids": set(BENCHMARK_CHECKPOINT_ORDER),
+            "active_zone_ids": {"zone_A", "zone_B", "zone_C"},
+        }
+        self.mission_clock = {
+            "started_at": None,
+            "completed_at": None,
+            "is_running": False,
+        }
 
         # 浮動提示 internal state
         self._temp_message = ""
@@ -256,6 +266,8 @@ class TypeFly:
                     )
                 with gr.Column(scale=2, min_width=300):
                     self.status_markdown = gr.Markdown(value="### Status\nWaiting for live data...")
+                    self.entity_markdown = gr.Markdown(value="### Entity positions\nWaiting for live data...")
+                    self.debug_markdown = gr.Markdown(value="### Debug\nCollapsed", visible=False)
 
             with gr.Row():
                 self.xy_plot = gr.Image(value=self.create_blank_plot("Local XY", "X (m)", "Y (m)", xlim=(0, 12), ylim=(0, 12), figsize=(5, 4)), label="Local XY", height=320)
@@ -277,6 +289,8 @@ class TypeFly:
                     self.z_plot,
                     self.counter,
                     self.status_markdown,
+                    self.entity_markdown,
+                    self.debug_markdown,
                 ]
             )
 
@@ -484,6 +498,9 @@ class TypeFly:
         elif len(message) == 0:
             return "[WARNING] Empty command!"
         else:
+            self.mission_clock["started_at"] = time.time()
+            self.mission_clock["completed_at"] = None
+            self.mission_clock["is_running"] = True
             task_thread = Thread(target=self.llm_controller.execute_task_description, args=(message,))
             task_thread.start()
             complete_response = ''
@@ -493,6 +510,9 @@ class TypeFly:
                     history.append((None, msg))
                 elif isinstance(msg, str):
                     if msg == 'end':
+                        if self.mission_clock["is_running"]:
+                            self.mission_clock["completed_at"] = time.time()
+                            self.mission_clock["is_running"] = False
                         return "Command Complete!"
                     if msg.startswith('[LOG]'):
                         complete_response += '\n'
@@ -616,17 +636,19 @@ class TypeFly:
         anchor_plot = self.render_anchor_3d_plot()
         global_xy, xy, x, y, z = self.update_position_plot(snapshot, show_error_ellipse=show_error_ellipse, show_raw_estimate=show_raw_estimate)
         status_md = self.render_status_markdown(snapshot)
+        entity_md = self.render_entity_markdown(snapshot)
+        debug_md = self.render_debug_markdown(snapshot)
         counter += 1
         print_debug(
             "[UI-CALLBACK] "
-            "outputs=[anchor_3d,global_xy_plot,xy_plot,x_plot,y_plot,z_plot,counter,status_markdown] "
+            "outputs=[anchor_3d,global_xy_plot,xy_plot,x_plot,y_plot,z_plot,counter,status,entity,debug] "
             f"drone_gt={None if not snapshot else snapshot.get('drone_gt')} "
             f"drone_est={None if not snapshot else snapshot.get('drone_est')} "
             f"user_gt={None if not snapshot else snapshot.get('user_gt')} "
             f"user_est={None if not snapshot else snapshot.get('user_est')} "
             f"counter={counter}"
         )
-        return anchor_plot, global_xy, xy, x, y, z, counter, status_md
+        return anchor_plot, global_xy, xy, x, y, z, counter, status_md, entity_md, debug_md
 
     def _fmt_vec(self, value):
         if value is None:
@@ -731,70 +753,86 @@ class TypeFly:
         safety_context = snapshot.get("safety_context") if snapshot else None
         if safety_context is None:
             return "### Status\nWaiting for safety state..."
-        completed = len(self.benchmark_progress["completed"])
-        total = len(self.benchmark_progress["order"])
+        active_ids = set(self.objective_state.get("active_checkpoint_ids", set()))
+        completed_set = set(self.benchmark_progress["completed"])
+        completed_active = len(completed_set.intersection(active_ids))
+        total = len(active_ids)
         target = self.benchmark_progress.get("current_target") or "n/a"
+        zone_map = {"zone_A": ["A1", "A2", "A3", "A4"], "zone_B": ["B1", "B2", "B3", "B4"], "zone_C": ["C1", "C2", "C3", "C4", "C5", "C6"]}
+        zone_parts = []
+        for zid, ids in zone_map.items():
+            active_zone_ids = [cid for cid in ids if cid in active_ids]
+            if not active_zone_ids:
+                continue
+            done_zone = len([cid for cid in active_zone_ids if cid in completed_set])
+            zone_parts.append(f"{zid[-1]}: {done_zone}/{len(active_zone_ids)}")
+
+        now_ts = time.time()
+        started_at = self.mission_clock.get("started_at")
+        completed_at = self.mission_clock.get("completed_at")
+        elapsed_text = "n/a"
+        if started_at is not None:
+            end_for_elapsed = now_ts if self.mission_clock.get("is_running") else (completed_at or now_ts)
+            elapsed_text = f"{max(0.0, end_for_elapsed - float(started_at)):.2f} s"
+        completion_text = "n/a" if completed_at is None or started_at is None else f"{max(0.0, float(completed_at - started_at)):.2f} s"
+
+        lines = [
+            "### Status",
+            f"- current framework: {snapshot.get('framework_name', 'n/a')}",
+            f"- current mode: {snapshot.get('execution_mode', 'Waiting')}",
+            f"- current_collision_probability: {self._fmt_prob(getattr(safety_context, 'current_collision_probability', 0.0))}",
+            f"- historical_max_collision_probability: {self._fmt_prob(getattr(safety_context, 'historical_max_collision_probability', 0.0))}",
+            f"- dominant risky worker: {getattr(safety_context, 'dominant_threat_id', 'n/a')}",
+            f"- current target checkpoint: {target}",
+            f"- checkpoint progress: {completed_active}/{total}",
+            f"- zone progress: {', '.join(zone_parts) if zone_parts else 'n/a'}",
+            f"- mission elapsed time: {elapsed_text}",
+            f"- mission completion time: {completion_text}",
+        ]
+
+        return "\n".join(lines)
+
+    def render_entity_markdown(self, snapshot):
         positions = self._extract_ui_positions(snapshot)
         workers = snapshot.get("workers") or []
         worker_map = {str(item.get("id")): item for item in workers}
-        per_worker_probs = {}
-        for row in getattr(safety_context, "per_worker_collision_probabilities", []) or []:
-            per_worker_probs[str(row.get("id"))] = row
 
         def _fmt_xy(pos):
             if pos is None:
                 return "(n/a)"
             return f"({float(pos[0]):.2f}, {float(pos[1]):.2f})"
 
-        def _dist_xy(a, b):
-            if a is None or b is None:
-                return "n/a"
-            return f"{math.hypot(float(a[0] - b[0]), float(a[1] - b[1])):.3f} m"
-
         lines = [
-            "### Status",
-            f"- current framework: {snapshot.get('framework_name', 'n/a')}",
-            f"- current mode: {snapshot.get('mode_name', 'n/a')}",
-            f"- DEBUG_FORCE_CLOSE_WORKER: {os.getenv('DEBUG_FORCE_CLOSE_WORKER', 'false')}",
-            f"- current_collision_probability: {self._fmt_prob(getattr(safety_context, 'current_collision_probability', 0.0))}",
-            f"- historical_max_collision_probability: {self._fmt_prob(getattr(safety_context, 'historical_max_collision_probability', 0.0))}",
-            f"- dominant risky worker: {getattr(safety_context, 'dominant_threat_id', 'n/a')}",
-            f"- collision radius r_u={UAV_RADIUS_M:.2f} m, r_h={WORKER_RADIUS_M:.2f} m, r_c={UAV_RADIUS_M + WORKER_RADIUS_M:.2f} m",
-            f"- current target checkpoint: {target}",
-            f"- completed checkpoints: {completed}/{total}",
-            "",
+            "### Entity positions",
             f"- UAV true: {_fmt_xy(positions.get('drone_gt'))}",
-            f"- UAV est (bias-corrected): {_fmt_xy(positions.get('drone_est'))}",
+            f"- UAV est: {_fmt_xy(positions.get('drone_est'))}",
         ]
         for worker_id in ("worker_1", "worker_2", "worker_3"):
             worker = worker_map.get(worker_id)
-            w_true = None if worker is None else worker.get("gt_xy")
-            w_est = None if worker is None else worker.get("est_xy_bias_corrected")
-            lines.append(f"- {worker_id} true: {_fmt_xy(w_true)}")
-            lines.append(f"- {worker_id} est (bias-corrected): {_fmt_xy(w_est)}")
-            lines.append(f"- {worker_id} distance to UAV (true): {_dist_xy(positions.get('drone_gt'), w_true)}")
-            lines.append(f"- {worker_id} distance to UAV (est): {_dist_xy(positions.get('drone_est'), w_est)}")
-            prob_row = per_worker_probs.get(worker_id, {})
-            lines.append(f"- {worker_id} collision probability: {self._fmt_prob(prob_row.get('collision_probability', 0.0))}")
-            if worker_id == "worker_3":
-                ui_mu3 = None
-                if positions.get("drone_est") is not None and w_est is not None:
-                    ui_mu3 = [float(w_est[0] - positions["drone_est"][0]), float(w_est[1] - positions["drone_est"][1])]
-                lines.append(f"- worker_3 relative mean mu3: {prob_row.get('mu_xy', 'n/a')}")
-                lines.append(f"- worker_3 relative mean mu3 (from UI est): {ui_mu3 if ui_mu3 is not None else 'n/a'}")
-                lines.append(f"- worker_3 relative covariance Sigma_rel3: {prob_row.get('sigma_rel', 'n/a')}")
-                lines.append(f"- worker_3 exact series P_c: {self._fmt_prob(prob_row.get('exact_series_probability', 0.0))}")
-                lines.append(f"- worker_3 Monte Carlo P_c (debug): {self._fmt_prob(prob_row.get('monte_carlo_probability'))}")
+            lines.append(f"- {worker_id} true: {_fmt_xy(None if worker is None else worker.get('gt_xy'))}")
+            lines.append(f"- {worker_id} est: {_fmt_xy(None if worker is None else worker.get('est_xy_bias_corrected'))}")
+        return "\n".join(lines)
 
+    def render_debug_markdown(self, snapshot):
+        safety_context = snapshot.get("safety_context") if snapshot else None
+        if safety_context is None:
+            return gr.update(value="### Debug\nWaiting for safety state...", visible=True)
+        per_worker = {str(row.get("id")): row for row in (getattr(safety_context, "per_worker_collision_probabilities", []) or [])}
+        w3 = per_worker.get("worker_3", {})
         dbg = getattr(safety_context, "collision_debug_info", {}) or {}
         sanity = dbg.get("sanity_case_probabilities", {}) if isinstance(dbg, dict) else {}
-        lines.extend(
-            [
-                "",
-                f"- sanity Case1 exact (mu=[0,0], sigma=1e-4I, r_c=0.52): {self._fmt_prob(sanity.get('case1_exact'))}",
-                f"- sanity Case2 exact (mu=[3,0], sigma=1e-4I, r_c=0.52): {self._fmt_prob(sanity.get('case2_exact'))}",
-            ]
-        )
+        lines = [
+            "### Debug",
+            f"- DEBUG_FORCE_CLOSE_WORKER: {os.getenv('DEBUG_FORCE_CLOSE_WORKER', 'false')}",
+            f"- r_u={UAV_RADIUS_M:.2f}, r_h={WORKER_RADIUS_M:.2f}, r_c={UAV_RADIUS_M + WORKER_RADIUS_M:.2f}",
+            f"- worker_3 mu: {w3.get('mu_xy', 'n/a')}",
+            f"- worker_3 Sigma_rel: {w3.get('sigma_rel', 'n/a')}",
+            f"- worker_3 exact P_c: {self._fmt_prob(w3.get('exact_series_probability'))}",
+            f"- worker_3 MC P_c: {self._fmt_prob(w3.get('monte_carlo_probability'))}",
+            f"- sanity case1 exact: {self._fmt_prob(sanity.get('case1_exact'))}",
+            f"- sanity case2 exact: {self._fmt_prob(sanity.get('case2_exact'))}",
+        ]
+        return gr.update(value="\n".join(lines), visible=True)
 
         return "\n".join(lines)
 

@@ -153,6 +153,7 @@ class LLMController():
         self.baseline_scene_id = normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_1_CLEAR_PATH"))
         self.baseline_scene_state = None
         self.latest_baseline_decision = None
+        self.execution_mode = "Waiting"
         self.planner_mode = str(os.getenv("TYPEFLY_PLANNER_MODE", "llm_baseline")).strip().lower()
         if self.planner_mode not in {"llm_baseline", "rule_baseline"}:
             self.planner_mode = "llm_baseline"
@@ -474,6 +475,7 @@ class LLMController():
         if self.controller_wait_takeoff:
             self.append_message("[Warning] Controller is waiting for takeoff...")
             return
+        self.execution_mode = "Planning"
         self._task_id_counter += 1
         task_id = f"task_{self._task_id_counter:05d}"
         initial_snapshot = self.get_live_ui_snapshot()
@@ -525,6 +527,7 @@ class LLMController():
                     final_plan_source = "baseline_rule"
                     baseline_shortcut_triggered = True
                 else:
+                    self.execution_mode = "Planning"
                     self.current_plan = self.planner.plan(
                         task_description=task_description,
                         scene_description=scene_description,
@@ -558,6 +561,7 @@ class LLMController():
 
                 self.append_message(f'[Plan]: \\\\')
                 self.execution_time = time.time()
+                self.execution_mode = "Executing"
                 ret_val = self.execute_minispec(self.current_plan)
                 execution_success = True
                 task_completed = True
@@ -568,6 +572,7 @@ class LLMController():
                     task_completed=task_completed,
                 )
             except Exception as e:
+                self.execution_mode = "Yielding"
                 error_message = f"[C] Error: {e}"
                 print_t(error_message)
                 self.append_message(error_message)
@@ -585,9 +590,11 @@ class LLMController():
                 self.append_message('end')
                 self.current_plan = None
                 self.execution_history = None
+                self.execution_mode = "Waiting"
                 return
 
             break
+        self.execution_mode = "Completed"
         self.task_run_logger.consume_runtime_snapshot(self.get_live_ui_snapshot())
         self.task_run_logger.end_run(run_status="completed")
         monitor_stop.set()
@@ -597,6 +604,7 @@ class LLMController():
         self.append_message('end')
         self.current_plan = None
         self.execution_history = None
+        self.execution_mode = "Waiting"
 
     def get_active_scenario_name(self) -> str:
         return self.scenario_manager.selected_name()
@@ -986,6 +994,7 @@ class LLMController():
             "baseline_decision": self.latest_baseline_decision,
             "framework_name": "TypeFly baseline",
             "mode_name": self.get_active_scenario_name(),
+            "execution_mode": self.execution_mode,
             "checkpoint_order": list(BENCHMARK_CHECKPOINT_ORDER),
             "benchmark_checkpoints": [
                 {"id": cp.id, "zone_id": cp.zone_id, "x": float(cp.x), "y": float(cp.y), "radius_m": float(cp.radius_m)}
