@@ -201,8 +201,6 @@ def _build_localized_packet_from_anchor_pipeline(
         measured_ranges=range_result.measured_ranges.copy(),
         bias_values=range_result.bias_values.copy(),
         sigma_values=range_result.sigma_values.copy(),
-        drift_values=range_result.drift_values.copy(),
-        burst_values=range_result.burst_values.copy(),
         random_noise_values=range_result.random_noise_values.copy(),
         jacobian_h_3d=np.asarray(estimate.jacobian_h_3d, dtype=float).copy(),
         P_3d=np.asarray(estimate.P_3d, dtype=float).copy(),
@@ -213,7 +211,6 @@ def _build_localized_packet_from_anchor_pipeline(
         M_xy=np.asarray(estimate.M_xy, dtype=float).copy(),
         confidence_alpha=0.95,
         est_position_timestamp=float(now_s),
-        received_packet_timestamp=float(now_s),
     )
 
 

@@ -13,7 +13,6 @@ from .localization_error_model import LocalizationErrorModel
 from .localization_estimator import IterativeLeastSquaresEstimator3D
 from .state_packet import LocalizedStatePacket
 from .state_provider import StateProvider
-from .uplink_delay_model import UplinkDelayModel
 from .utils import print_debug
 
 
@@ -96,10 +95,6 @@ class SimStateProvider(StateProvider):
         self._anchor_provider = AnchorGeometryProvider()
         self._localization_error_model = LocalizationErrorModel()
         self._localization_estimator = IterativeLeastSquaresEstimator3D()
-        self._uplink_delay_models = {
-            "drone": UplinkDelayModel(),
-            "user": UplinkDelayModel(),
-        }
         seed = int(os.getenv("SIM_LOCALIZATION_RNG_SEED", "12345"))
         self._rng = np.random.default_rng(seed)
         self._confidence_alpha = float(os.getenv("SIM_LOCALIZATION_CONFIDENCE_ALPHA", "0.95"))
@@ -108,7 +103,6 @@ class SimStateProvider(StateProvider):
         self._latest_generated_packets: dict[str, Optional[LocalizedStatePacket]] = {"drone": None, "user": None}
         self._latest_received_packets: dict[str, Optional[LocalizedStatePacket]] = {"drone": None, "user": None}
         self._latest_packet_generation_timestamps: dict[str, Optional[float]] = {"drone": None, "user": None}
-        self._latest_packet_receive_timestamps: dict[str, Optional[float]] = {"drone": None, "user": None}
         self._latest_gcs_safety_state = None
         self._latest_safety_context = None
         self._last_safety_update_timestamp: Optional[float] = None
@@ -138,7 +132,7 @@ class SimStateProvider(StateProvider):
     def _localization_error_norm(self, packet: LocalizedStatePacket) -> float:
         return float(np.linalg.norm(packet.localization_error_vector_3d))
 
-    def _log_localization_generation(self, packet: LocalizedStatePacket, arrival_timestamp: Optional[float]):
+    def _log_localization_generation(self, packet: LocalizedStatePacket):
         now = time.time()
         entity_type = packet.entity_type
         if (now - self._last_generation_detail_log_ts[entity_type]) >= self._localization_detail_log_interval_s:
@@ -147,7 +141,6 @@ class SimStateProvider(StateProvider):
                 f"[LOC-TX-{entity_type.upper()}]\n"
                 f"  seq={packet.sequence_number}\n"
                 f"  state_generation_timestamp={packet.state_generation_timestamp:.3f}\n"
-                f"  queued_arrival_timestamp={'None' if arrival_timestamp is None else f'{arrival_timestamp:.3f}'}\n"
                 f"  gt_position_3d={self._fmt_vec(packet.gt_position_3d)}\n"
                 f"  est_position_3d={self._fmt_vec(packet.estimated_position_3d)}\n"
                 f"  localization_error_vector={self._fmt_vec(packet.localization_error_vector_3d)}\n"
@@ -155,8 +148,6 @@ class SimStateProvider(StateProvider):
                 f"  true_ranges={self._fmt_arr(packet.true_ranges)}\n"
                 f"  measured_ranges={self._fmt_arr(packet.measured_ranges)}\n"
                 f"  bias_values={self._fmt_arr(packet.bias_values)}\n"
-                f"  drift_values={self._fmt_arr(packet.drift_values)}\n"
-                f"  burst_values={self._fmt_arr(packet.burst_values)}\n"
                 f"  random_noise_values={self._fmt_arr(packet.random_noise_values)}"
             )
         if (now - self._last_generation_summary_log_ts[entity_type]) >= self._localization_summary_log_interval_s:
@@ -165,28 +156,19 @@ class SimStateProvider(StateProvider):
                 f"[LOC-{entity_type.upper()}] gt={self._fmt_vec(packet.gt_position_3d)} "
                 f"est={self._fmt_vec(packet.estimated_position_3d)} "
                 f"err={self._localization_error_norm(packet):.3f}m "
-                f"aoi=pending seq={packet.sequence_number}"
+                f"seq={packet.sequence_number}"
             )
 
     def _log_localization_receive(self, packet: LocalizedStatePacket):
         now = time.time()
         entity_type = packet.entity_type
-        delay_s = None
-        if packet.received_packet_timestamp is not None:
-            delay_s = float(packet.received_packet_timestamp - packet.state_generation_timestamp)
-        aoi_s = None
-        if packet.received_packet_timestamp is not None:
-            aoi_s = float(time.time() - packet.state_generation_timestamp)
         if (now - self._last_receive_detail_log_ts[entity_type]) >= self._localization_detail_log_interval_s:
             self._last_receive_detail_log_ts[entity_type] = now
             print_debug(
                 f"[LOC-RX-{entity_type.upper()}]\n"
                 f"  seq={packet.sequence_number}\n"
                 f"  state_generation_timestamp={packet.state_generation_timestamp:.3f}\n"
-                f"  received_packet_timestamp="
-                f"{'None' if packet.received_packet_timestamp is None else f'{packet.received_packet_timestamp:.3f}'}\n"
-                f"  one_way_delay_observed={'unknown' if delay_s is None else f'{delay_s:.3f}s'}\n"
-                f"  current_aoi={'unknown' if aoi_s is None else f'{aoi_s:.3f}s'}"
+                f"  delivery=immediate"
             )
         if (now - self._last_receive_summary_log_ts[entity_type]) >= self._localization_summary_log_interval_s:
             self._last_receive_summary_log_ts[entity_type] = now
@@ -194,7 +176,7 @@ class SimStateProvider(StateProvider):
                 f"[LOC-{entity_type.upper()}] gt={self._fmt_vec(packet.gt_position_3d)} "
                 f"est={self._fmt_vec(packet.estimated_position_3d)} "
                 f"err={self._localization_error_norm(packet):.3f}m "
-                f"aoi={'unknown' if aoi_s is None else f'{aoi_s:.3f}s'} seq={packet.sequence_number}"
+                f"seq={packet.sequence_number}"
             )
 
     def debug_log_latest_localization_snapshot(self, reason: str = "snapshot", now: Optional[float] = None):
@@ -209,17 +191,11 @@ class SimStateProvider(StateProvider):
             if packet is None:
                 print_debug(f"[LOC-{entity_type.upper()}] reason={reason} no received packet yet")
                 continue
-            aoi_s = now - float(packet.state_generation_timestamp)
-            delay_s = None
-            if packet.received_packet_timestamp is not None:
-                delay_s = float(packet.received_packet_timestamp - packet.state_generation_timestamp)
             print_debug(
                 f"[LOC-{entity_type.upper()}] reason={reason} "
                 f"gt={self._fmt_vec(packet.gt_position_3d)} "
                 f"est={self._fmt_vec(packet.estimated_position_3d)} "
                 f"err={self._localization_error_norm(packet):.3f}m "
-                f"aoi={aoi_s:.3f}s "
-                f"delay={'unknown' if delay_s is None else f'{delay_s:.3f}s'} "
                 f"seq={packet.sequence_number}"
             )
 
@@ -285,7 +261,7 @@ class SimStateProvider(StateProvider):
         with self._lock:
             self._user_position = (float(x), float(y), float(z))
             self._last_user_position_ts = timestamp_now
-        # Refresh both entities at same timestamp so safety freshness/AoI is consistent.
+        # Refresh both entities at same timestamp so safety context uses synchronized packets.
         self._generate_and_queue_entity_state_packet(
             "drone",
             current_drone_position,
@@ -396,28 +372,10 @@ class SimStateProvider(StateProvider):
         with self._lock:
             return self._latest_packet_generation_timestamps["drone"]
 
-    def get_latest_packet_receive_timestamp(self) -> Optional[float]:
-        self.flush_due_packets(now=time.time())
-        with self._lock:
-            return self._latest_packet_receive_timestamps["drone"]
-
-    def compute_aoi(self, now: Optional[float] = None) -> Optional[float]:
-        now = time.time() if now is None else float(now)
-        self.flush_due_packets(now)
-        with self._lock:
-            packet = self._latest_received_packets["drone"]
-            if packet is None:
-                return None
-            return now - float(packet.state_generation_timestamp)
-
     def flush_due_packets(self, now: Optional[float] = None):
         now = time.time() if now is None else float(now)
-        delivered = []
-        for entity_type in ("drone", "user"):
-            delivered.extend(self._deliver_due_packets(entity_type, now))
-        if delivered:
-            self._refresh_cached_safety_state(now=now)
-        return delivered
+        self._refresh_cached_safety_state(now=now)
+        return []
 
     def _refresh_cached_safety_state(self, now: Optional[float] = None):
         now = time.time() if now is None else float(now)
@@ -512,8 +470,6 @@ class SimStateProvider(StateProvider):
             measured_ranges=range_result.measured_ranges.copy(),
             bias_values=range_result.bias_values.copy(),
             sigma_values=range_result.sigma_values.copy(),
-            drift_values=range_result.drift_values.copy(),
-            burst_values=range_result.burst_values.copy(),
             random_noise_values=range_result.random_noise_values.copy(),
             jacobian_h_3d=np.asarray(jacobian_h_3d, dtype=float).copy(),
             P_3d=np.asarray(P_3d, dtype=float).copy(),
@@ -525,33 +481,15 @@ class SimStateProvider(StateProvider):
             confidence_alpha=self._confidence_alpha,
             est_position_timestamp=float(generation_timestamp),
         )
-        arrival_timestamp = self._uplink_delay_models[entity_type].enqueue(
-            packet=packet,
-            generation_timestamp=generation_timestamp,
-            sequence_number=self._sequence_numbers[entity_type],
-            rng=self._rng,
-        )
         with self._lock:
             self._latest_generated_packets[entity_type] = packet.copy()
+            self._latest_received_packets[entity_type] = packet.copy()
             self._latest_packet_generation_timestamps[entity_type] = generation_timestamp
+            self._last_safety_update_timestamp = generation_timestamp
         self._sequence_numbers[entity_type] += 1
-        self._log_localization_generation(packet, arrival_timestamp)
-        return arrival_timestamp
-
-    def _deliver_due_packets(self, entity_type: str, now: float):
-        ready_packets = self._uplink_delay_models[entity_type].pop_ready(now)
-        if not ready_packets:
-            return []
-        delivered = []
-        with self._lock:
-            for arrival_timestamp, _, packet in ready_packets:
-                delivered_packet = packet.copy()
-                delivered_packet.received_packet_timestamp = float(arrival_timestamp)
-                self._latest_received_packets[entity_type] = delivered_packet
-                self._latest_packet_receive_timestamps[entity_type] = float(arrival_timestamp)
-                self._log_localization_receive(delivered_packet)
-                delivered.append(delivered_packet.copy())
-        return delivered
+        self._log_localization_generation(packet)
+        self._log_localization_receive(packet)
+        return generation_timestamp
 
     def get_latest_gcs_safety_state(self, now: Optional[float] = None):
         now = time.time() if now is None else float(now)
