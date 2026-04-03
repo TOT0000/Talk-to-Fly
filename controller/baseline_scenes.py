@@ -216,11 +216,12 @@ def _build_localized_packet_from_anchor_pipeline(
 
 def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float) -> List[ObstacleEnvelopeState]:
     states: List[ObstacleEnvelopeState] = []
-    seed = int(abs(now_s) * 1_000_000) ^ 0x0B57AC1E
-    rng = np.random.default_rng(seed)
     for idx, obstacle in enumerate(scene.obstacles):
-        _ = obstacle  # explicit: no obstacle-specific localization shortcut is used.
-        gt = np.asarray([float(obstacle.gt_x), float(obstacle.gt_y), 0.0], dtype=float)
+        gt_x, gt_y = _scripted_worker_gt_xy(obstacle.id, now_s, fallback_xy=(obstacle.gt_x, obstacle.gt_y))
+        gt = np.asarray([float(gt_x), float(gt_y), 0.0], dtype=float)
+        # deterministic seed per worker and 10Hz simulation tick.
+        seed = (hash(obstacle.id) & 0xFFFFFFFF) ^ int(max(0.0, now_s) * 10.0)
+        rng = np.random.default_rng(seed)
         packet = _build_localized_packet_from_anchor_pipeline(
             entity_type="obstacle",
             entity_key=f"obstacle:{obstacle.id}",
@@ -236,7 +237,7 @@ def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float) -> List
         states.append(
             ObstacleEnvelopeState(
                 id=obstacle.id,
-                gt_xy=(float(obstacle.gt_x), float(obstacle.gt_y)),
+                gt_xy=(float(gt_x), float(gt_y)),
                 est_xy=(est_x, est_y),
                 matrix_xy=((float(packet.M_xy[0][0]), float(packet.M_xy[0][1])), (float(packet.M_xy[1][0]), float(packet.M_xy[1][1]))),
                 localization_packet=packet,
@@ -246,6 +247,74 @@ def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float) -> List
             )
         )
     return states
+
+
+def _scripted_worker_gt_xy(worker_id: str, now_s: float, fallback_xy: Tuple[float, float]) -> Tuple[float, float]:
+    t = max(0.0, float(now_s))
+    if worker_id == "worker_1":
+        # zone_A crossing loop: rectangle loop.
+        waypoints = [(1.5, 10.5), (5.2, 10.5), (5.2, 7.5), (1.5, 7.5)]
+        return _sample_polyline_loop(waypoints, speed_mps=0.9, t=t)
+    if worker_id == "worker_2":
+        # zone_B loiter pattern with a 3 second hold near B3/B4.
+        return _sample_worker2_loop(t)
+    if worker_id == "worker_3":
+        # zone_C horizontal crossing.
+        waypoints = [(2.0, 3.2), (10.0, 3.2), (2.0, 3.2)]
+        return _sample_polyline_loop(waypoints, speed_mps=0.7, t=t)
+    return (float(fallback_xy[0]), float(fallback_xy[1]))
+
+
+def _sample_polyline_loop(waypoints: List[Tuple[float, float]], speed_mps: float, t: float) -> Tuple[float, float]:
+    if len(waypoints) < 2:
+        return waypoints[0]
+    segments: List[Tuple[Tuple[float, float], Tuple[float, float], float]] = []
+    total_len = 0.0
+    for i in range(len(waypoints)):
+        p0 = waypoints[i]
+        p1 = waypoints[(i + 1) % len(waypoints)]
+        seg_len = math.hypot(float(p1[0] - p0[0]), float(p1[1] - p0[1]))
+        if seg_len > 1e-9:
+            segments.append((p0, p1, seg_len))
+            total_len += seg_len
+    if total_len <= 1e-9:
+        return waypoints[0]
+    dist = (float(speed_mps) * float(t)) % total_len
+    for p0, p1, seg_len in segments:
+        if dist <= seg_len:
+            ratio = dist / seg_len
+            return (p0[0] + (p1[0] - p0[0]) * ratio, p0[1] + (p1[1] - p0[1]) * ratio)
+        dist -= seg_len
+    return segments[-1][1]
+
+
+def _sample_worker2_loop(t: float) -> Tuple[float, float]:
+    p0 = (8.5, 7.8)
+    p1 = (9.0, 8.2)
+    p2 = (8.2, 7.6)
+    speed = 0.6
+    hold_s = 3.0
+    len_01 = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+    len_12 = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+    len_20 = math.hypot(p0[0] - p2[0], p0[1] - p2[1])
+    t01 = len_01 / speed
+    t12 = len_12 / speed
+    t20 = len_20 / speed
+    period = t01 + hold_s + t12 + t20
+    u = t % period
+    if u <= t01:
+        r = u / max(t01, 1e-6)
+        return (p0[0] + (p1[0] - p0[0]) * r, p0[1] + (p1[1] - p0[1]) * r)
+    u -= t01
+    if u <= hold_s:
+        return p1
+    u -= hold_s
+    if u <= t12:
+        r = u / max(t12, 1e-6)
+        return (p1[0] + (p2[0] - p1[0]) * r, p1[1] + (p2[1] - p1[1]) * r)
+    u -= t12
+    r = u / max(t20, 1e-6)
+    return (p2[0] + (p0[0] - p2[0]) * r, p2[1] + (p0[1] - p2[1]) * r)
 
 
 def evaluate_path_clear(
@@ -364,6 +433,24 @@ def build_all_scene_expectations(
 
 
 BASELINE_SCENES: Dict[str, BaselineScene] = {
+    "SCENE_BENCHMARK_DEMO": BaselineScene(
+        id="SCENE_BENCHMARK_DEMO",
+        drone_initial_pose=(1.0, 1.0, -1.5),
+        drone_initial_yaw_rad=0.0,
+        user_position=(10.8, 10.2, 0.0),
+        user_initial_yaw_rad=-2.0,
+        task_points=(
+            TaskPoint("A", 1.4, 10.6, -1.5),
+            TaskPoint("B", 7.4, 10.6, -1.5),
+            TaskPoint("C", 1.7, 4.2, -1.5),
+        ),
+        obstacles=(
+            StaticObstacle("worker_1", 1.5, 10.5, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("worker_2", 8.5, 7.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("worker_3", 2.0, 3.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+        ),
+        notes="Deterministic benchmark demo scene with fixed workers and fixed checkpoint order.",
+    ),
     "SCENE_1_CLEAR_PATH": BaselineScene(
         id="SCENE_1_CLEAR_PATH",
         drone_initial_pose=(1.0, 1.5, -1.5),
