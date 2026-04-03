@@ -24,6 +24,7 @@ class GcsSafetyAssessmentService:
         current_probability: float,
         historical_max_probability: float,
         per_worker_probs: list[dict],
+        collision_debug_info: Optional[dict],
         dominant_worker_id: str,
         safety_state,
         now: float,
@@ -62,6 +63,7 @@ class GcsSafetyAssessmentService:
             current_collision_probability=float(current_probability),
             historical_max_collision_probability=float(historical_max_probability),
             per_worker_collision_probabilities=per_worker_probs,
+            collision_debug_info=collision_debug_info,
         )
 
     def build_from_packets(
@@ -97,13 +99,27 @@ class GcsSafetyAssessmentService:
             workers=worker_entities,
         )
         per_worker_probs = [
-            {"id": item.entity_id, "collision_probability": float(item.probability)}
+            {
+                "id": item.entity_id,
+                "collision_probability": float(item.probability),
+                "exact_series_probability": float(item.exact_series_probability),
+                "monte_carlo_probability": (None if item.monte_carlo_probability is None else float(item.monte_carlo_probability)),
+                "mu_xy": [float(item.mu_xy[0]), float(item.mu_xy[1])],
+                "sigma_rel": [[float(item.sigma_rel[0][0]), float(item.sigma_rel[0][1])], [float(item.sigma_rel[1][0]), float(item.sigma_rel[1][1])]],
+            }
             for item in summary.per_entity
         ]
+        collision_debug_info = {
+            "sanity_case_probabilities": dict(summary.sanity_case_probabilities or {}),
+            "uav_radius_m": float(self._uav_radius_m),
+            "worker_radius_m": float(self._worker_radius_m),
+            "collision_radius_m": float(self._uav_radius_m + self._worker_radius_m),
+        }
         return self._build_context_from_scene_summary(
             current_probability=float(summary.current_probability),
             historical_max_probability=float(summary.historical_max_probability),
             per_worker_probs=per_worker_probs,
+            collision_debug_info=collision_debug_info,
             dominant_worker_id=str(summary.dominant_entity_id),
             safety_state=safety_state,
             now=now,
@@ -132,6 +148,7 @@ class GcsSafetyAssessmentService:
                 current_collision_probability=0.0,
                 historical_max_collision_probability=float(self._core.get_historical_max_probability()),
                 per_worker_collision_probabilities=[],
+                collision_debug_info=None,
             )
         return self.build_from_packets(
             drone_packet=safety_state.drone_packet,

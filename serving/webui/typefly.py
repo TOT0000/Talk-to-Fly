@@ -12,7 +12,7 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # 非互動後端避免開啟GUI視窗
 import matplotlib.pyplot as plt
-from matplotlib.patches import Ellipse, Circle
+from matplotlib.patches import Ellipse, Circle, Arc
 from PIL import Image
 from threading import Thread
 from flask import Flask, Response, request
@@ -26,6 +26,16 @@ from controller.llm_wrapper import GPT4, LLAMA3
 from controller.abs.robot_wrapper import RobotType
 from controller.experiment_scenarios import SCENARIOS, normalize_scenario_name
 from controller.baseline_scenes import BASELINE_SCENES, normalize_baseline_scene_id
+from controller.anchor_provider import AnchorGeometryProvider
+from controller.benchmark_layout import (
+    WORKSPACE_SIZE_M,
+    CHECKPOINT_DWELL_SECONDS,
+    CHECKPOINT_RADIUS_M,
+    UAV_RADIUS_M,
+    WORKER_RADIUS_M,
+    BENCHMARK_CHECKPOINT_ORDER,
+    BENCHMARK_CHECKPOINTS_BY_ID,
+)
 from gradio import Timer
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -46,7 +56,7 @@ class TypeFly:
         self.llm_controller.register_position_callback(self.receive_position)
         self.active_scenario = self.llm_controller.set_active_scenario(initial_scenario)
         self.active_baseline_scene = self.llm_controller.set_baseline_scene(
-            normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_1_CLEAR_PATH"))
+            normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_BENCHMARK_DEMO"))
         )
         
         self.system_stop = False
@@ -96,6 +106,24 @@ class TypeFly:
             "drone": {"main": "#0B57D0", "light": "#8AB4F8"},
             "user": {"main": "#C5221F", "light": "#F28B82"},
         }
+        self.anchor_provider = AnchorGeometryProvider()
+        self.benchmark_progress = {
+            "order": list(BENCHMARK_CHECKPOINT_ORDER),
+            "completed": set(),
+            "active_enter_ts": None,
+            "active_progress": 0.0,
+            "current_target": BENCHMARK_CHECKPOINT_ORDER[0] if BENCHMARK_CHECKPOINT_ORDER else None,
+        }
+        self.objective_state = {
+            # Active objective set is explicitly tracked for future framework linkage.
+            "active_checkpoint_ids": set(BENCHMARK_CHECKPOINT_ORDER),
+            "active_zone_ids": {"zone_A", "zone_B", "zone_C"},
+        }
+        self.mission_clock = {
+            "started_at": None,
+            "completed_at": None,
+            "is_running": False,
+        }
 
         # 浮動提示 internal state
         self._temp_message = ""
@@ -126,7 +154,7 @@ class TypeFly:
                     self.scenario_apply_btn = gr.Button("Apply Scenario")
                     self.baseline_scene_selector = gr.Dropdown(
                         choices=list(BASELINE_SCENES.keys()),
-                        value=normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_1_CLEAR_PATH")),
+                        value=normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_BENCHMARK_DEMO")),
                         label="Baseline Scene",
                     )
                     self.baseline_scene_apply_btn = gr.Button("Apply Baseline Scene")
@@ -214,67 +242,55 @@ class TypeFly:
                 outputs=[self.message_markdown]
             )
 
-            # plots
             with gr.Row():
-                self.global_xy_plot = gr.Image(
-                    value=self.create_blank_plot(
-                        "Global XY Map (Fixed 0-12m Workspace)",
-                        "X (m)",
-                        "Y (m)",
-                        xlim=(0, 12),
-                        ylim=(0, 12),
-                        figsize=(10, 8),
-                    ),
-                    label="Global XY Map",
-                    height=640,
-                )
+                with gr.Column(scale=2, min_width=320):
+                    self.anchor_3d_plot = gr.Image(
+                        value=self.create_blank_plot("Anchor 3D Layout", "X (m)", "Y (m)", xlim=(0, 12), ylim=(0, 12), figsize=(5, 4)),
+                        label="Anchor 3D Panel",
+                        height=360,
+                    )
+                    self.toggle_error_ellipse = gr.Checkbox(label="Show variance error ellipse", value=False)
+                    self.toggle_raw_estimate = gr.Checkbox(label="Debug: show raw estimate", value=False)
+                with gr.Column(scale=4, min_width=520):
+                    self.global_xy_plot = gr.Image(
+                        value=self.create_blank_plot(
+                            "Benchmark Workspace XY",
+                            "X (m)",
+                            "Y (m)",
+                            xlim=(0, 12),
+                            ylim=(0, 12),
+                            figsize=(10, 8),
+                        ),
+                        label="Main XY Workspace",
+                        height=640,
+                    )
+                with gr.Column(scale=2, min_width=300):
+                    self.status_markdown = gr.Markdown(value="### Status\nWaiting for live data...")
+                    self.entity_markdown = gr.Markdown(value="### Entity positions\nWaiting for live data...")
+                    self.debug_markdown = gr.Markdown(value="### Debug\nCollapsed", visible=False)
+
             with gr.Row():
-                self.xy_plot = gr.Image(
-                    value=self.create_blank_plot(
-                        "Drone / User Localization & Safety Envelope (XY view)",
-                        "X (m)",
-                        "Y (m)",
-                        xlim=(0, 12),
-                        ylim=(0, 12),
-                        figsize=(5, 4),
-                    ),
-                    label="XY Plot",
-                    height=320,
-                )
-                self.z_plot = gr.Image(
-                    value=self.create_sequence_plot("Z in Sequence", "Index", "Z (m)", xlim=(0, 1), ylim=(0, 6)),
-                    label="Z in Sequence",
-                    height=320,
-                )
-            with gr.Row():
-                self.x_plot = gr.Image(
-                    value=self.create_sequence_plot("X in Sequence", "Index", "X (m)", xlim=(0, 1), ylim=(0, 12)),
-                    label="X in Sequence",
-                    height=320,
-                )
-                self.y_plot = gr.Image(
-                    value=self.create_sequence_plot("Y in Sequence", "Index", "Y (m)", xlim=(0, 1), ylim=(0, 12)),
-                    label="Y in Sequence",
-                    height=320,
-                )
-            with gr.Row():
-                self.coordinate_markdown = gr.Markdown(value="### Coordinates\nWaiting for live data...")
-                self.safety_markdown = gr.Markdown(value="### Safety / Risk\nWaiting for safety state...")
+                self.xy_plot = gr.Image(value=self.create_blank_plot("Local XY", "X (m)", "Y (m)", xlim=(0, 12), ylim=(0, 12), figsize=(5, 4)), label="Local XY", height=320)
+                self.x_plot = gr.Image(value=self.create_sequence_plot("X in Sequence", "Index", "X (m)", xlim=(0, 1), ylim=(0, 12)), label="X in Sequence", height=320)
+                self.y_plot = gr.Image(value=self.create_sequence_plot("Y in Sequence", "Index", "Y (m)", xlim=(0, 1), ylim=(0, 12)), label="Y in Sequence", height=320)
+                self.z_plot = gr.Image(value=self.create_sequence_plot("Z in Sequence", "Index", "Z (m)", xlim=(0, 1), ylim=(0, 6)), label="Z in Sequence", height=320)
 
             self.counter = gr.State(0)
             self.timer = Timer(value=0.08)
             self.timer.tick(
                 fn=self.update_and_step,
-                inputs=[self.counter],
+                inputs=[self.counter, self.toggle_error_ellipse, self.toggle_raw_estimate],
                 outputs=[
+                    self.anchor_3d_plot,
                     self.global_xy_plot,
                     self.xy_plot,
                     self.x_plot,
                     self.y_plot,
                     self.z_plot,
                     self.counter,
-                    self.coordinate_markdown,
-                    self.safety_markdown,
+                    self.status_markdown,
+                    self.entity_markdown,
+                    self.debug_markdown,
                 ]
             )
 
@@ -482,6 +498,9 @@ class TypeFly:
         elif len(message) == 0:
             return "[WARNING] Empty command!"
         else:
+            self.mission_clock["started_at"] = time.time()
+            self.mission_clock["completed_at"] = None
+            self.mission_clock["is_running"] = True
             task_thread = Thread(target=self.llm_controller.execute_task_description, args=(message,))
             task_thread.start()
             complete_response = ''
@@ -491,6 +510,9 @@ class TypeFly:
                     history.append((None, msg))
                 elif isinstance(msg, str):
                     if msg == 'end':
+                        if self.mission_clock["is_running"]:
+                            self.mission_clock["completed_at"] = time.time()
+                            self.mission_clock["is_running"] = False
                         return "Command Complete!"
                     if msg.startswith('[LOG]'):
                         complete_response += '\n'
@@ -607,23 +629,26 @@ class TypeFly:
         plt.close(fig)
         return Image.open(buf)
 
-    def update_and_step(self, counter):
+    def update_and_step(self, counter, show_error_ellipse=False, show_raw_estimate=False):
         snapshot = self.llm_controller.get_live_ui_snapshot()
         self._append_history(snapshot)
-        global_xy, xy, x, y, z = self.update_position_plot(snapshot)
-        coordinate_md = self.render_coordinate_markdown(snapshot)
-        safety_md = self.render_safety_markdown(snapshot)
+        self._update_checkpoint_progress(snapshot)
+        anchor_plot = self.render_anchor_3d_plot()
+        global_xy, xy, x, y, z = self.update_position_plot(snapshot, show_error_ellipse=show_error_ellipse, show_raw_estimate=show_raw_estimate)
+        status_md = self.render_status_markdown(snapshot)
+        entity_md = self.render_entity_markdown(snapshot)
+        debug_md = self.render_debug_markdown(snapshot)
         counter += 1
         print_debug(
             "[UI-CALLBACK] "
-            "outputs=[global_xy_plot,xy_plot,x_plot,y_plot,z_plot,counter,coordinate_markdown,safety_markdown] "
+            "outputs=[anchor_3d,global_xy_plot,xy_plot,x_plot,y_plot,z_plot,counter,status,entity,debug] "
             f"drone_gt={None if not snapshot else snapshot.get('drone_gt')} "
             f"drone_est={None if not snapshot else snapshot.get('drone_est')} "
             f"user_gt={None if not snapshot else snapshot.get('user_gt')} "
             f"user_est={None if not snapshot else snapshot.get('user_est')} "
             f"counter={counter}"
         )
-        return global_xy, xy, x, y, z, counter, coordinate_md, safety_md
+        return anchor_plot, global_xy, xy, x, y, z, counter, status_md, entity_md, debug_md
 
     def _fmt_vec(self, value):
         if value is None:
@@ -635,6 +660,14 @@ class TypeFly:
             return "n/a"
         return f"{value:.3f}{suffix}"
 
+    def _fmt_prob(self, value):
+        if value is None:
+            return "n/a"
+        value = float(value)
+        if abs(value) < 1e-4 and value != 0.0:
+            return f"{value:.3e}"
+        return f"{value:.6f}"
+
     def _extract_ui_positions(self, snapshot):
         if not snapshot:
             return {
@@ -643,8 +676,69 @@ class TypeFly:
                 "user_gt": None,
                 "user_est": None,
             }
-        positions = {key: snapshot.get(key) for key in ("drone_gt", "drone_est", "user_gt", "user_est")}
+        positions = {
+            "drone_gt": snapshot.get("drone_gt"),
+            # default visualization uses bias-corrected estimate.
+            "drone_est": snapshot.get("drone_est_bias_corrected") or snapshot.get("drone_est"),
+            "user_gt": snapshot.get("user_gt"),
+            # default visualization uses bias-corrected estimate.
+            "user_est": snapshot.get("user_est_bias_corrected") or snapshot.get("user_est"),
+        }
         return positions
+
+    def _update_checkpoint_progress(self, snapshot):
+        positions = self._extract_ui_positions(snapshot)
+        drone_gt = positions.get("drone_gt")
+        if drone_gt is None:
+            return
+        order = self.benchmark_progress["order"]
+        completed = self.benchmark_progress["completed"]
+        current_target = next((cid for cid in order if cid not in completed), None)
+        self.benchmark_progress["current_target"] = current_target
+        if current_target is None:
+            self.benchmark_progress["active_enter_ts"] = None
+            self.benchmark_progress["active_progress"] = 1.0
+            return
+        cp = BENCHMARK_CHECKPOINTS_BY_ID[current_target]
+        dist = math.hypot(float(drone_gt[0] - cp.x), float(drone_gt[1] - cp.y))
+        now = time.time()
+        if dist <= cp.radius_m:
+            if self.benchmark_progress["active_enter_ts"] is None:
+                self.benchmark_progress["active_enter_ts"] = now
+            dwell = now - float(self.benchmark_progress["active_enter_ts"])
+            self.benchmark_progress["active_progress"] = min(1.0, dwell / CHECKPOINT_DWELL_SECONDS)
+            if dwell >= CHECKPOINT_DWELL_SECONDS:
+                completed.add(current_target)
+                self.benchmark_progress["active_enter_ts"] = None
+                self.benchmark_progress["active_progress"] = 0.0
+        else:
+            self.benchmark_progress["active_enter_ts"] = None
+            self.benchmark_progress["active_progress"] = 0.0
+
+    def render_anchor_3d_plot(self):
+        fig = plt.figure(figsize=(5.2, 4.2))
+        ax = fig.add_subplot(111, projection='3d')
+        anchors = self.anchor_provider.get_anchor_positions()
+        ax.scatter(anchors[:, 0], anchors[:, 1], anchors[:, 2], c="#1A73E8", s=42, depthshade=False)
+        for idx, (x, y, z) in enumerate(anchors, start=1):
+            ax.text(float(x) + 0.1, float(y) + 0.1, float(z) + 0.05, f"A{idx}", fontsize=8)
+        square = np.array([[0, 0], [12, 0], [12, 12], [0, 12], [0, 0]], dtype=float)
+        ax.plot(square[:, 0], square[:, 1], zs=0.0, color="#7A7A7A", linewidth=1.2, linestyle="--")
+        for z in (2.5, 5.5):
+            ax.plot(square[:, 0], square[:, 1], zs=z, color="#9AA0A6", linewidth=1.0, linestyle=":")
+            ax.text(12.2, 12.2, z, f"z={z:.1f}m", fontsize=8, color="#5F6368")
+        ax.set_xlim(0, WORKSPACE_SIZE_M)
+        ax.set_ylim(0, WORKSPACE_SIZE_M)
+        ax.set_zlim(0, 7)
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
+        ax.set_zlabel("Z (m)")
+        ax.set_title("Anchor Layout (3D)")
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', bbox_inches='tight')
+        buf.seek(0)
+        plt.close(fig)
+        return Image.open(buf)
 
     def _append_history(self, snapshot):
         positions = self._extract_ui_positions(snapshot)
@@ -655,51 +749,90 @@ class TypeFly:
                 self.position_history[key].append(tuple(float(v) for v in value))
                 print_debug(f"[UI-HISTORY] key={key} appended={self.position_history[key][-1]}")
 
-    def render_coordinate_markdown(self, snapshot):
-        if not snapshot:
-            return "### Coordinates\nWaiting for live data..."
-        positions = self._extract_ui_positions(snapshot)
-        initial_state = self.llm_controller.get_initial_scenario_state()
-        print_debug(
-            "[UI-MARKDOWN] "
-            f"drone_gt={positions['drone_gt']} drone_est={positions['drone_est']} "
-            f"user_gt={positions['user_gt']} user_est={positions['user_est']}"
-        )
-        initial_block = ""
-        if initial_state:
-            initial_block = (
-                f"**Initial scenario (locked before task)**\n"
-                f"- selected_mode: {initial_state.get('selected_mode')}\n"
-                f"- actual initial drone GT: {self._fmt_vec(initial_state.get('actual_drone_gt'))}\n"
-                f"- actual initial user GT: {self._fmt_vec(initial_state.get('actual_user_gt'))}\n\n"
-            )
-        return (
-            "### Coordinates\n"
-            f"- Drone GT: {self._fmt_vec(positions['drone_gt'])}\n"
-            f"- Drone EST: {self._fmt_vec(positions['drone_est'])}\n"
-            f"- User GT: {self._fmt_vec(positions['user_gt'])}\n"
-            f"- User EST: {self._fmt_vec(positions['user_est'])}"
-        )
-
-    def render_safety_markdown(self, snapshot):
+    def render_status_markdown(self, snapshot):
         safety_context = snapshot.get("safety_context") if snapshot else None
         if safety_context is None:
-            return "### Safety / Risk\nWaiting for safety state..."
-        return "\n".join(
-            [
-                "### Safety / Risk",
-                f"- current_collision_probability: {float(getattr(safety_context, 'current_collision_probability', 0.0)):.6f}",
-                f"- historical_max_collision_probability: {float(getattr(safety_context, 'historical_max_collision_probability', 0.0)):.6f}",
-                f"- safety_score (compat): {safety_context.safety_score:.3f}",
-                f"- dominant_threat_type: {getattr(safety_context, 'dominant_threat_type', 'user')}",
-                f"- dominant_threat_id: {getattr(safety_context, 'dominant_threat_id', 'user')}",
-                f"- dominant_gap_m: {float(getattr(safety_context, 'dominant_gap_m', safety_context.envelope_gap_m)):.3f} m",
-                f"- dominant_uncertainty_scale_m: {float(getattr(safety_context, 'dominant_uncertainty_scale_m', safety_context.uncertainty_scale_m)):.3f} m",
-                f"- envelope_gap_m (centerline ray-gap): {safety_context.envelope_gap_m:.3f} m",
-                f"- uncertainty_scale_m: {safety_context.uncertainty_scale_m:.3f} m",
-                f"- envelopes_overlap (centerline): {safety_context.envelopes_overlap}",
-            ]
-        )
+            return "### Status\nWaiting for safety state..."
+        active_ids = set(self.objective_state.get("active_checkpoint_ids", set()))
+        completed_set = set(self.benchmark_progress["completed"])
+        completed_active = len(completed_set.intersection(active_ids))
+        total = len(active_ids)
+        target = self.benchmark_progress.get("current_target") or "n/a"
+        zone_map = {"zone_A": ["A1", "A2", "A3", "A4"], "zone_B": ["B1", "B2", "B3", "B4"], "zone_C": ["C1", "C2", "C3", "C4", "C5", "C6"]}
+        zone_parts = []
+        for zid, ids in zone_map.items():
+            active_zone_ids = [cid for cid in ids if cid in active_ids]
+            if not active_zone_ids:
+                continue
+            done_zone = len([cid for cid in active_zone_ids if cid in completed_set])
+            zone_parts.append(f"{zid[-1]}: {done_zone}/{len(active_zone_ids)}")
+
+        now_ts = time.time()
+        started_at = self.mission_clock.get("started_at")
+        completed_at = self.mission_clock.get("completed_at")
+        elapsed_text = "n/a"
+        if started_at is not None:
+            end_for_elapsed = now_ts if self.mission_clock.get("is_running") else (completed_at or now_ts)
+            elapsed_text = f"{max(0.0, end_for_elapsed - float(started_at)):.2f} s"
+        completion_text = "n/a" if completed_at is None or started_at is None else f"{max(0.0, float(completed_at - started_at)):.2f} s"
+
+        lines = [
+            "### Status",
+            f"- current framework: {snapshot.get('framework_name', 'n/a')}",
+            f"- current mode: {snapshot.get('execution_mode', 'Waiting')}",
+            f"- current_collision_probability: {self._fmt_prob(getattr(safety_context, 'current_collision_probability', 0.0))}",
+            f"- historical_max_collision_probability: {self._fmt_prob(getattr(safety_context, 'historical_max_collision_probability', 0.0))}",
+            f"- dominant risky worker: {getattr(safety_context, 'dominant_threat_id', 'n/a')}",
+            f"- current target checkpoint: {target}",
+            f"- checkpoint progress: {completed_active}/{total}",
+            f"- zone progress: {', '.join(zone_parts) if zone_parts else 'n/a'}",
+            f"- mission elapsed time: {elapsed_text}",
+            f"- mission completion time: {completion_text}",
+        ]
+
+        return "\n".join(lines)
+
+    def render_entity_markdown(self, snapshot):
+        positions = self._extract_ui_positions(snapshot)
+        workers = snapshot.get("workers") or []
+        worker_map = {str(item.get("id")): item for item in workers}
+
+        def _fmt_xy(pos):
+            if pos is None:
+                return "(n/a)"
+            return f"({float(pos[0]):.2f}, {float(pos[1]):.2f})"
+
+        lines = [
+            "### Entity positions",
+            f"- UAV true: {_fmt_xy(positions.get('drone_gt'))}",
+            f"- UAV est: {_fmt_xy(positions.get('drone_est'))}",
+        ]
+        for worker_id in ("worker_1", "worker_2", "worker_3"):
+            worker = worker_map.get(worker_id)
+            lines.append(f"- {worker_id} true: {_fmt_xy(None if worker is None else worker.get('gt_xy'))}")
+            lines.append(f"- {worker_id} est: {_fmt_xy(None if worker is None else worker.get('est_xy_bias_corrected'))}")
+        return "\n".join(lines)
+
+    def render_debug_markdown(self, snapshot):
+        safety_context = snapshot.get("safety_context") if snapshot else None
+        if safety_context is None:
+            return gr.update(value="### Debug\nWaiting for safety state...", visible=True)
+        per_worker = {str(row.get("id")): row for row in (getattr(safety_context, "per_worker_collision_probabilities", []) or [])}
+        w3 = per_worker.get("worker_3", {})
+        dbg = getattr(safety_context, "collision_debug_info", {}) or {}
+        sanity = dbg.get("sanity_case_probabilities", {}) if isinstance(dbg, dict) else {}
+        lines = [
+            "### Debug",
+            f"- DEBUG_FORCE_CLOSE_WORKER: {os.getenv('DEBUG_FORCE_CLOSE_WORKER', 'false')}",
+            f"- r_u={UAV_RADIUS_M:.2f}, r_h={WORKER_RADIUS_M:.2f}, r_c={UAV_RADIUS_M + WORKER_RADIUS_M:.2f}",
+            f"- worker_3 mu: {w3.get('mu_xy', 'n/a')}",
+            f"- worker_3 Sigma_rel: {w3.get('sigma_rel', 'n/a')}",
+            f"- worker_3 exact P_c: {self._fmt_prob(w3.get('exact_series_probability'))}",
+            f"- worker_3 MC P_c: {self._fmt_prob(w3.get('monte_carlo_probability'))}",
+            f"- sanity case1 exact: {self._fmt_prob(sanity.get('case1_exact'))}",
+            f"- sanity case2 exact: {self._fmt_prob(sanity.get('case2_exact'))}",
+        ]
+        return gr.update(value="\n".join(lines), visible=True)
 
     def _estimate_heading_from_history(self, primary_key: str, fallback_key: str = None):
         history = list(self.position_history.get(primary_key, []))
@@ -743,92 +876,85 @@ class TypeFly:
         return (min(xs) - pad, max(xs) + pad), (min(ys) - pad, max(ys) + pad)
 
 
-    def _render_xy_view(self, snapshot, xlim, ylim, title, figsize=(5, 4), show_legend=True):
+    def _render_xy_view(self, snapshot, xlim, ylim, title, figsize=(5, 4), show_legend=True, show_error_ellipse=False, show_raw_estimate=False):
         positions = self._extract_ui_positions(snapshot)
         fig_xy, ax_xy = plt.subplots(figsize=figsize)
+        ax_xy.add_patch(plt.Rectangle((0, 0), WORKSPACE_SIZE_M, WORKSPACE_SIZE_M, fill=False, edgecolor="#263238", linewidth=1.8))
+        ax_xy.plot([6, 6], [6, 12], color="#5F6368", linewidth=1.2)
+        ax_xy.plot([0, 12], [6, 6], color="#5F6368", linewidth=1.2)
+        ax_xy.text(2.2, 10.8, "zone_A", fontsize=9, color="#37474F")
+        ax_xy.text(8.2, 10.8, "zone_B", fontsize=9, color="#37474F")
+        ax_xy.text(5.2, 5.2, "zone_C", fontsize=9, color="#37474F")
 
-        point_specs = [
-            ("drone_gt", "Drone GT", self.plot_style["drone"]["main"], "o", True),
-            ("drone_est", "Drone EST", self.plot_style["drone"]["light"], "X", True),
-            ("user_gt", "User GT", self.plot_style["user"]["main"], "o", True),
-            ("user_est", "User EST", self.plot_style["user"]["light"], "X", True),
-        ]
-        for spec in point_specs:
-            key = spec[0]
-            label = spec[1]
-            color = spec[2]
-            marker = spec[3] if len(spec) > 3 else "o"
-            filled = spec[4] if len(spec) > 4 else True
-            value = positions.get(key)
-            if value is None:
-                ax_xy.scatter([], [], c=color, marker=marker, label=label)
-                continue
-            facecolors = color if filled else "none"
-            ax_xy.scatter([value[0]], [value[1]], edgecolors=color, facecolors=facecolors, marker=marker, s=70, linewidths=1.8, label=label)
-            ax_xy.text(value[0] + 0.03, value[1] + 0.03, f"{label}: ({value[0]:.3f}, {value[1]:.3f})", fontsize=8, color=color)
+        current_target = self.benchmark_progress.get("current_target")
+        active_progress = float(self.benchmark_progress.get("active_progress", 0.0))
+        for cid in BENCHMARK_CHECKPOINT_ORDER:
+            cp = BENCHMARK_CHECKPOINTS_BY_ID[cid]
+            if cid in self.benchmark_progress["completed"]:
+                color = "#2E7D32"
+            elif cid == current_target and active_progress > 0:
+                color = "#FB8C00"
+            else:
+                color = "#9E9E9E"
+            ax_xy.add_patch(Circle((cp.x, cp.y), CHECKPOINT_RADIUS_M, fill=False, edgecolor=color, linewidth=1.5))
+            if cid == current_target and active_progress > 0:
+                ax_xy.add_patch(Arc((cp.x, cp.y), width=2.0 * (CHECKPOINT_RADIUS_M + 0.08), height=2.0 * (CHECKPOINT_RADIUS_M + 0.08), theta1=90, theta2=90 - (360.0 * active_progress), edgecolor="#FF9800", linewidth=2.0))
+            ax_xy.scatter([cp.x], [cp.y], c=color, s=12)
+            ax_xy.text(cp.x + 0.08, cp.y + 0.08, cid, fontsize=8, color="#37474F")
 
-        if positions.get("drone_gt") is not None and positions.get("drone_est") is not None:
-            ax_xy.plot(
-                [positions["drone_gt"][0], positions["drone_est"][0]],
-                [positions["drone_gt"][1], positions["drone_est"][1]],
-                color=self.plot_style["drone"]["main"],
-                linestyle="--",
-                linewidth=1.0,
-                alpha=0.8,
-                label="Drone GT→EST",
-            )
-        if positions.get("user_gt") is not None and positions.get("user_est") is not None:
-            ax_xy.plot(
-                [positions["user_gt"][0], positions["user_est"][0]],
-                [positions["user_gt"][1], positions["user_est"][1]],
-                color=self.plot_style["user"]["main"],
-                linestyle="--",
-                linewidth=1.0,
-                alpha=0.8,
-                label="User GT→EST",
-            )
+        drone_gt = positions.get("drone_gt")
+        drone_est = positions.get("drone_est")
+        if drone_gt is not None:
+            ax_xy.add_patch(Circle((drone_gt[0], drone_gt[1]), UAV_RADIUS_M, fill=False, edgecolor="#0B57D0", linewidth=2.0, label="UAV true"))
+        if drone_est is not None:
+            ax_xy.add_patch(Circle((drone_est[0], drone_est[1]), UAV_RADIUS_M, fill=False, edgecolor="#8AB4F8", linewidth=1.6, linestyle="--", label="UAV bias-corrected"))
+        if drone_gt is not None and drone_est is not None:
+            ax_xy.plot([drone_gt[0], drone_est[0]], [drone_gt[1], drone_est[1]], color="#0B57D0", linewidth=0.8, alpha=0.8)
 
-        safety_state = snapshot.get("safety_state") if snapshot else None
-        if safety_state is not None:
-            for label, envelope, color in (
-                ("Drone envelope", safety_state.drone_envelope, self.plot_style["drone"]["light"]),
-                ("User envelope", safety_state.user_envelope, self.plot_style["user"]["light"]),
-            ):
-                ellipse = Ellipse(
-                    xy=(float(envelope.center_xy[0]), float(envelope.center_xy[1])),
-                    width=2.0 * float(envelope.major_axis_radius),
-                    height=2.0 * float(envelope.minor_axis_radius),
-                    angle=float(envelope.orientation_deg),
-                    edgecolor=color,
-                    facecolor="none",
-                    linewidth=1.5,
-                    linestyle="--",
-                    label=label,
-                )
-                ax_xy.add_patch(ellipse)
+        workers = snapshot.get("workers") or []
+        for worker in workers:
+            gt_xy = worker.get("gt_xy")
+            est_xy = worker.get("est_xy_bias_corrected")
+            wid = worker.get("id")
+            if gt_xy is not None:
+                ax_xy.add_patch(Circle((gt_xy[0], gt_xy[1]), WORKER_RADIUS_M, fill=False, edgecolor="#7B1FA2", linewidth=1.8))
+            if est_xy is not None:
+                ax_xy.add_patch(Circle((est_xy[0], est_xy[1]), WORKER_RADIUS_M, fill=False, edgecolor="#CE93D8", linewidth=1.3, linestyle="--"))
+                ax_xy.text(est_xy[0] + 0.08, est_xy[1] + 0.08, str(wid), fontsize=8, color="#4A148C")
+            if gt_xy is not None and est_xy is not None:
+                ax_xy.plot([gt_xy[0], est_xy[0]], [gt_xy[1], est_xy[1]], color="#8E24AA", linewidth=0.7, alpha=0.8)
+            if show_raw_estimate and worker.get("est_xy_raw") is not None:
+                raw = worker["est_xy_raw"]
+                ax_xy.scatter([raw[0]], [raw[1]], marker="x", c="#6A1B9A", s=22)
 
-        baseline_scene = snapshot.get("baseline_scene") if snapshot else None
-        obstacle_states = snapshot.get("obstacle_envelope_states") if snapshot else None
-        if baseline_scene is not None:
-            for point in baseline_scene.task_points:
-                ax_xy.scatter([point.x], [point.y], c="#2E7D32", marker="D", s=65, label="Task point")
-                ax_xy.text(point.x + 0.06, point.y + 0.06, f"{point.id}", fontsize=8, color="#1B5E20")
-            for obstacle in obstacle_states or []:
-                ax_xy.scatter([obstacle.gt_xy[0]], [obstacle.gt_xy[1]], c="#5D4037", marker="s", s=62, label="Obstacle GT")
-                ax_xy.scatter([obstacle.est_xy[0]], [obstacle.est_xy[1]], c="#8D6E63", marker="X", s=58, label="Obstacle EST")
-                obstacle_ellipse = Ellipse(
-                    xy=(float(obstacle.envelope.center_xy[0]), float(obstacle.envelope.center_xy[1])),
-                    width=2.0 * float(obstacle.envelope.major_axis_radius),
-                    height=2.0 * float(obstacle.envelope.minor_axis_radius),
-                    angle=float(obstacle.envelope.orientation_deg),
-                    edgecolor="#8D6E63",
-                    facecolor="none",
-                    linestyle=":",
-                    linewidth=1.4,
-                    label="Obstacle envelope",
-                )
-                ax_xy.add_patch(obstacle_ellipse)
-                ax_xy.text(obstacle.est_xy[0] + 0.08, obstacle.est_xy[1] + 0.08, obstacle.id, fontsize=8, color="#4E342E")
+        if show_raw_estimate and snapshot.get("drone_est_raw") is not None:
+            raw = snapshot["drone_est_raw"]
+            ax_xy.scatter([raw[0]], [raw[1]], marker="x", c="#1E88E5", s=36, label="UAV raw est")
+
+        if show_error_ellipse and snapshot.get("drone_P_xy") is not None and drone_est is not None:
+            p = np.asarray(snapshot["drone_P_xy"], dtype=float)
+            eigvals, eigvecs = np.linalg.eigh(p)
+            eigvals = np.maximum(eigvals, 1e-8)
+            angle = math.degrees(math.atan2(eigvecs[1, 1], eigvecs[0, 1]))
+            ax_xy.add_patch(Ellipse((drone_est[0], drone_est[1]), width=2 * math.sqrt(eigvals[1]), height=2 * math.sqrt(eigvals[0]), angle=angle, edgecolor="#42A5F5", facecolor="none", linestyle=":", linewidth=1.4, label="UAV variance ellipse"))
+        if show_error_ellipse:
+            for worker in workers:
+                p = worker.get("P_xy")
+                est_xy = worker.get("est_xy_bias_corrected")
+                if p is None or est_xy is None:
+                    continue
+                p = np.asarray(p, dtype=float)
+                eigvals, eigvecs = np.linalg.eigh(p)
+                eigvals = np.maximum(eigvals, 1e-8)
+                angle = math.degrees(math.atan2(eigvecs[1, 1], eigvecs[0, 1]))
+                ax_xy.add_patch(Ellipse((est_xy[0], est_xy[1]), width=2 * math.sqrt(eigvals[1]), height=2 * math.sqrt(eigvals[0]), angle=angle, edgecolor="#B39DDB", facecolor="none", linestyle=":", linewidth=1.1))
+
+        original_path = snapshot.get("original_planned_path") or []
+        if len(original_path) >= 2:
+            ax_xy.plot([p[0] for p in original_path], [p[1] for p in original_path], color="#9E9E9E", linestyle="--", linewidth=1.4, label="Original planned path")
+        updated_path = snapshot.get("updated_path") or []
+        if len(updated_path) >= 2:
+            ax_xy.plot([p[0] for p in updated_path], [p[1] for p in updated_path], color="#1565C0", linestyle="-", linewidth=1.7, label="Current path")
 
         drone_for_heading = positions.get("drone_gt") or positions.get("drone_est")
         yaw_rad = float(snapshot.get("drone_yaw_rad") or 0.0) if snapshot else 0.0
@@ -840,22 +966,6 @@ class TypeFly:
             dy = arrow_len * float(math.sin(yaw_rad))
             ax_xy.arrow(hx, hy, dx, dy, head_width=0.16, head_length=0.18, color="#0B57D0", linewidth=1.6, length_includes_head=True, zorder=5)
             ax_xy.text(hx + dx + 0.05, hy + dy + 0.05, "Heading", fontsize=8, color="#0B57D0")
-
-        user_for_heading = positions.get("user_gt") or positions.get("user_est")
-        if user_for_heading is not None:
-            explicit_user_yaw = snapshot.get("user_heading_yaw_rad") if snapshot else None
-            if explicit_user_yaw is not None:
-                user_yaw_rad = float(explicit_user_yaw)
-                user_heading_source = "explicit_state"
-            else:
-                user_yaw_rad, user_heading_source = self._estimate_heading_from_history("user_gt", fallback_key="user_est")
-            ux = float(user_for_heading[0])
-            uy = float(user_for_heading[1])
-            arrow_len = 0.45
-            udx = arrow_len * float(math.cos(user_yaw_rad))
-            udy = arrow_len * float(math.sin(user_yaw_rad))
-            ax_xy.arrow(ux, uy, udx, udy, head_width=0.14, head_length=0.16, color="#C5221F", linewidth=1.4, length_includes_head=True, zorder=5)
-            ax_xy.text(ux + udx + 0.04, uy + udy + 0.04, f"User Heading ({user_heading_source})", fontsize=7, color="#C5221F")
 
         ax_xy.set_xlim(*xlim)
         ax_xy.set_ylim(*ylim)
@@ -874,7 +984,7 @@ class TypeFly:
         plt.close(fig_xy)
         return Image.open(buf_xy)
 
-    def update_position_plot(self, snapshot):
+    def update_position_plot(self, snapshot, show_error_ellipse=False, show_raw_estimate=False):
         positions = self._extract_ui_positions(snapshot)
         dynamic_xlim, dynamic_ylim = self._axis_limits_from_snapshot(snapshot)
         print_debug(
@@ -892,6 +1002,8 @@ class TypeFly:
             title="Global XY Map (Fixed 0-12m Workspace)",
             figsize=(10, 8),
             show_legend=True,
+            show_error_ellipse=show_error_ellipse,
+            show_raw_estimate=show_raw_estimate,
         )
         local_xy = self._render_xy_view(
             snapshot=snapshot,
@@ -900,6 +1012,8 @@ class TypeFly:
             title="Drone / User Localization & Safety Envelope (XY view)",
             figsize=(5.8, 4.4),
             show_legend=False,
+            show_error_ellipse=show_error_ellipse,
+            show_raw_estimate=show_raw_estimate,
         )
 
         series_specs = [
