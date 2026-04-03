@@ -29,7 +29,6 @@ from .sim_state_provider import SimStateProvider
 from .scenario_manager import ScenarioManager
 from .safety_context import SafetyContext
 from .task_run_logger import TaskRunLogger
-from .uplink_delay_model import UplinkDelayModel
 from .baseline_scenes import (
     BASELINE_SCENES,
     BaselineScene,
@@ -42,6 +41,7 @@ from .baseline_scenes import (
 )
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = 0.30
 
 class LLMController():
     def __init__(self, robot_type, virtual_queue, use_http=False, message_queue: Optional[queue.Queue]=None, enable_video=False, state_provider: Optional[StateProvider]=None):
@@ -151,10 +151,6 @@ class LLMController():
         self.planner_mode = str(os.getenv("TYPEFLY_PLANNER_MODE", "llm_baseline")).strip().lower()
         if self.planner_mode not in {"llm_baseline", "rule_baseline"}:
             self.planner_mode = "llm_baseline"
-        self._obstacle_delay_models = {}
-        self._obstacle_sequence_numbers = {}
-        self._latest_received_obstacle_states = {}
-        self._obstacle_rng = np.random.default_rng(int(os.getenv("SIM_LOCALIZATION_RNG_SEED", "12345")) + 2026)
         self.user_heading_yaw_rad = 0.0
 
         # PX4_SIM optional managed user-position publisher lifecycle
@@ -697,7 +693,8 @@ class LLMController():
             "target_user_gt": None if report is None else report.target_user_position_3d,
             "actual_drone_gt": snapshot.get("drone_gt") if snapshot else None,
             "actual_user_gt": snapshot.get("user_gt") if snapshot else None,
-            "safety_level": None if safety_context is None else safety_context.safety_level,
+            "current_collision_probability": None if safety_context is None else float(safety_context.current_collision_probability),
+            "historical_max_collision_probability": None if safety_context is None else float(safety_context.historical_max_collision_probability),
             "safety_score": None if safety_context is None else float(safety_context.safety_score),
             "envelope_gap_m": None if safety_context is None else float(safety_context.envelope_gap_m),
             "uncertainty_scale_m": None if safety_context is None else float(safety_context.uncertainty_scale_m),
@@ -729,46 +726,18 @@ class LLMController():
             f"  uncertainty={safety_context.uncertainty_scale_m:.3f}\n"
             f"  overlap={safety_context.envelopes_overlap}\n"
             f"  score={safety_context.safety_score:.3f}\n"
-            f"  level={safety_context.safety_level}\n"
-            f"  bias={safety_context.planning_bias}\n"
+            f"  current_collision_probability={safety_context.current_collision_probability:.6f}\n"
+            f"  historical_max_collision_probability={safety_context.historical_max_collision_probability:.6f}\n"
             f"  standoff={safety_context.preferred_standoff_m:.3f}\n"
             f"  dominant_threat={safety_context.dominant_threat_type}:{safety_context.dominant_threat_id}\n"
             f"  dominant_gap={safety_context.dominant_gap_m:.3f}\n"
             f"  dominant_uncertainty={safety_context.dominant_uncertainty_scale_m:.3f}\n"
-            f"  dominant_freshness={safety_context.dominant_freshness_s}\n"
             f"  reasons={safety_context.reason_tags}"
         )
 
     def _simulate_obstacle_returns(self, obstacle_states, now: float):
-        simulated = []
-        for obs in obstacle_states or []:
-            model = self._obstacle_delay_models.setdefault(obs.id, UplinkDelayModel())
-            seq = int(self._obstacle_sequence_numbers.get(obs.id, 0))
-            self._obstacle_sequence_numbers[obs.id] = seq + 1
-            tx_packet = obs.localization_packet.copy()
-            tx_packet.sequence_number = seq
-            tx_state = replace(obs, localization_packet=tx_packet)
-            arrival = model.enqueue(
-                packet=tx_state,
-                generation_timestamp=float(tx_packet.state_generation_timestamp),
-                sequence_number=seq,
-                rng=self._obstacle_rng,
-            )
-            ready = model.pop_ready(float(now))
-            if ready:
-                delivered_arrival, _, delivered_state = ready[-1]
-                delivered_packet = delivered_state.localization_packet.copy()
-                delivered_packet.received_packet_timestamp = float(delivered_arrival)
-                self._latest_received_obstacle_states[obs.id] = replace(delivered_state, localization_packet=delivered_packet)
-            latest_state = self._latest_received_obstacle_states.get(obs.id)
-            effective = latest_state if latest_state is not None else tx_state
-            if arrival is None:
-                effective = replace(
-                    effective,
-                    localization_packet=replace(effective.localization_packet, received_packet_timestamp=None),
-                )
-            simulated.append(effective)
-        return simulated
+        _ = now
+        return list(obstacle_states or [])
 
     def _build_dominant_threat_context(
         self,
@@ -782,60 +751,16 @@ class LLMController():
         if safety_state is None:
             return None
 
-        drone_envelope = safety_state.drone_envelope
-        drone_packet = safety_state.drone_packet
-
-        candidates = []
-
-        def _build_candidate(entity_type: str, entity_id: str, entity_envelope, entity_packet):
-            delta = drone_envelope.center_xy - entity_envelope.center_xy
-            distance_xy = float(np.linalg.norm(delta))
-            unit_vec = np.array([1.0, 0.0], dtype=float) if distance_xy < 1e-9 else (delta / distance_xy)
-            drone_radius = float(drone_envelope.ray_radius(unit_vec))
-            entity_radius = float(entity_envelope.ray_radius(-unit_vec))
-            gap = float(distance_xy - (drone_radius + entity_radius))
-            uncertainty = float(drone_radius + entity_radius)
-            freshness = float(
-                max(
-                    now - float(drone_packet.state_generation_timestamp),
-                    now - float(entity_packet.state_generation_timestamp),
-                )
-            )
-            return {
-                "type": entity_type,
-                "id": entity_id,
-                "gap": gap,
-                "uncertainty": uncertainty,
-                "freshness": freshness,
-                "distance_xy": distance_xy,
-                "entity_packet": entity_packet,
-            }
-
-        candidates.append(
-            _build_candidate("user", "user", safety_state.user_envelope, safety_state.user_packet)
-        )
+        worker_packets = [("user", safety_state.user_packet)]
         for obs in obstacle_states or []:
-            candidates.append(
-                _build_candidate("obstacle", str(obs.id), obs.envelope, obs.localization_packet)
-            )
-        if not candidates:
-            return self.safety_assessor.build_from_safety_state(safety_state, now=now)
+            worker_packets.append((str(obs.id), obs.localization_packet))
 
-        candidates.sort(key=lambda item: (item["gap"], -item["uncertainty"], -item["freshness"], item["id"]))
-        dominant = candidates[0]
-        assessed = self.safety_assessor.assessor.assess(
-            envelope_gap_m=float(dominant["gap"]),
-            uncertainty_scale_m=float(dominant["uncertainty"]),
-            envelopes_overlap=bool(float(dominant["gap"]) < 0.0),
-            freshness_aoi_s=float(dominant["freshness"]),
+        assessed_context = self.safety_assessor.build_from_packets(
+            drone_packet=safety_state.drone_packet,
+            worker_packets=worker_packets,
+            now=now,
+            safety_state=safety_state,
         )
-        dom_packet = dominant["entity_packet"]
-        latest_gen_ts = float(max(drone_packet.state_generation_timestamp, dom_packet.state_generation_timestamp))
-        receive_candidates = [drone_packet.received_packet_timestamp, dom_packet.received_packet_timestamp]
-        receive_candidates = [float(ts) for ts in receive_candidates if ts is not None]
-        latest_recv_ts = max(receive_candidates) if receive_candidates else None
-        timing_freshness = None if latest_recv_ts is None else float(now - latest_recv_ts)
-        reason_tags = list(assessed.reason_tags) + [f"dominant_threat_{dominant['id']}"]
 
         task_points_summary = []
         for point in scene.task_points if scene is not None else []:
@@ -851,34 +776,14 @@ class LLMController():
                     "major_axis_m": float(obs.envelope.major_axis_radius),
                     "minor_axis_m": float(obs.envelope.minor_axis_radius),
                     "orientation_deg": float(obs.envelope.orientation_deg),
-                    "freshness_s": float(now - float(obs_packet.state_generation_timestamp)),
                 }
             )
-        return SafetyContext(
-            safety_score=float(assessed.safety_score),
-            safety_level=str(assessed.safety_level),
-            planning_bias=str(assessed.planning_bias),
-            preferred_standoff_m=float(assessed.preferred_standoff_m),
-            reason_tags=reason_tags,
-            envelope_gap_m=float(dominant["gap"]),
-            uncertainty_scale_m=float(dominant["uncertainty"]),
-            drone_to_user_distance_xy=float(safety_state.drone_to_user_distance_xy),
-            envelopes_overlap=bool(float(dominant["gap"]) < 0.0),
-            latest_generation_timestamp=latest_gen_ts,
-            latest_receive_timestamp=latest_recv_ts,
-            timing_freshness_s=timing_freshness,
-            max_aoi_s=float(dominant["freshness"]),
-            dominant_threat_type=str(dominant["type"]),
-            dominant_threat_id=str(dominant["id"]),
-            dominant_gap_m=float(dominant["gap"]),
-            dominant_uncertainty_scale_m=float(dominant["uncertainty"]),
-            dominant_freshness_s=float(dominant["freshness"]),
-            task_points_summary=task_points_summary,
-            obstacles_summary=obstacles_summary,
-            path_summary=None,
-            candidate_targets_summary=candidate_targets_summary or [],
-            candidate_path_summaries=candidate_path_summaries or [],
-        )
+        assessed_context.task_points_summary = task_points_summary
+        assessed_context.obstacles_summary = obstacles_summary
+        assessed_context.path_summary = None
+        assessed_context.candidate_targets_summary = candidate_targets_summary or []
+        assessed_context.candidate_path_summaries = candidate_path_summaries or []
+        return assessed_context
 
     def get_live_ui_snapshot(self):
         provider = getattr(self, "state_provider", None)
@@ -938,18 +843,6 @@ class LLMController():
             user_est = None if user_packet is None else _as_position_tuple(user_packet.estimated_position_3d)
         else:
             user_packet = provider.get_latest_received_user_packet() if hasattr(provider, "get_latest_received_user_packet") else None
-
-        def _timing(packet):
-            if packet is None:
-                return None, None
-            aoi_s = now - float(packet.state_generation_timestamp)
-            delay_s = None
-            if packet.received_packet_timestamp is not None:
-                delay_s = float(packet.received_packet_timestamp - packet.state_generation_timestamp)
-            return aoi_s, delay_s
-
-        drone_aoi_s, drone_delay_s = _timing(drone_packet)
-        user_aoi_s, user_delay_s = _timing(user_packet)
 
         obstacle_states_generated = compute_obstacle_envelope_states(self.get_baseline_scene(), now_s=now)
         obstacle_states = self._simulate_obstacle_returns(obstacle_states_generated, now=now)
@@ -1034,10 +927,6 @@ class LLMController():
             "drone_est": drone_est,
             "user_gt": user_gt,
             "user_est": user_est,
-            "drone_aoi_s": drone_aoi_s,
-            "drone_delay_s": drone_delay_s,
-            "user_aoi_s": user_aoi_s,
-            "user_delay_s": user_delay_s,
             "safety_state": safety_state,
             "safety_context": safety_context,
             "drone_yaw_rad": self._get_drone_yaw_rad(),
@@ -1067,7 +956,7 @@ class LLMController():
                 f"drone_radius={safety_state.drone_radius_along_user_direction:.6f} "
                 f"user_radius={safety_state.user_radius_along_drone_direction:.6f} "
                 f"score={safety_context.safety_score:.6f} "
-                f"level={safety_context.safety_level} "
+                f"current_p={safety_context.current_collision_probability:.6f} "
                 f"reason_tags={safety_context.reason_tags}"
             )
         self._debug_log_obstacle_envelopes(snapshot.get("obstacle_envelope_states"))
@@ -1161,7 +1050,10 @@ class LLMController():
             obstacle_envelopes=obstacle_envelopes,
             user_envelope=(None if snapshot.get("safety_state") is None else snapshot.get("safety_state").user_envelope),
         )
-        risk_high = bool(safety_context is not None and str(safety_context.safety_level) in {"WARNING", "DANGER"})
+        risk_high = bool(
+            safety_context is not None
+            and float(safety_context.current_collision_probability) >= COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD
+        )
         direct_go_to = bool(path_eval.path_clear and not risk_high)
         if direct_go_to:
             plan = "mf(1.0);d(0.2);mf(0.8);d(0.2);"
@@ -1220,7 +1112,10 @@ class LLMController():
 
     def get_baseline_expectation_summary(self, safety_context=None):
         scene = self.get_baseline_scene()
-        risk_high = bool(safety_context is not None and str(safety_context.safety_level) in {"WARNING", "DANGER"})
+        risk_high = bool(
+            safety_context is not None
+            and float(safety_context.current_collision_probability) >= COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD
+        )
         user_radius = max(0.45, float(getattr(safety_context, "uncertainty_scale_m", 1.0)) * 0.5)
         expectations = build_scene_expectations(
             scene=scene,
@@ -1241,7 +1136,10 @@ class LLMController():
         ]
 
     def get_all_scene_expectation_summary(self, safety_context=None):
-        risk_high = bool(safety_context is not None and str(safety_context.safety_level) in {"WARNING", "DANGER"})
+        risk_high = bool(
+            safety_context is not None
+            and float(safety_context.current_collision_probability) >= COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD
+        )
         user_radius = max(0.45, float(getattr(safety_context, "uncertainty_scale_m", 1.0)) * 0.5)
         expectations = build_all_scene_expectations(
             user_radius_m=user_radius,
@@ -1263,18 +1161,15 @@ class LLMController():
     def _debug_log_obstacle_envelopes(self, obstacle_states):
         if not obstacle_states:
             return
-        now = time.time()
         parts = []
         for obs in obstacle_states:
             packet = obs.localization_packet
-            aoi = float(now - float(packet.state_generation_timestamp))
             parts.append(
                 f"{obs.id}:gt=({obs.gt_xy[0]:.2f},{obs.gt_xy[1]:.2f}) "
                 f"est=({obs.est_xy[0]:.2f},{obs.est_xy[1]:.2f}) "
                 f"matrix={obs.matrix_xy} "
                 f"axes=({obs.envelope.major_axis_radius:.3f},{obs.envelope.minor_axis_radius:.3f}) "
                 f"ori={obs.envelope.orientation_deg:.1f} "
-                f"aoi={aoi:.3f}s "
                 f"rx={'None' if packet.received_packet_timestamp is None else f'{float(packet.received_packet_timestamp):.3f}'}"
             )
         print_debug("[BASELINE-OBS] " + " | ".join(parts))
