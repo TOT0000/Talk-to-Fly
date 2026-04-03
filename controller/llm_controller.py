@@ -655,7 +655,7 @@ class LLMController():
             "actual_drone_gt": report.actual_drone_gt_position_3d,
             "actual_user_gt": report.actual_user_gt_position_3d,
             "safety_score": report.measured_initial_safety_score,
-            "safety_level": report.measured_initial_safety_level,
+            "current_collision_probability": report.measured_initial_collision_probability,
             "envelope_gap_m": report.measured_initial_envelope_gap_m,
             "uncertainty_scale_m": report.measured_initial_uncertainty_scale_m,
             "repositioned": report.repositioned,
@@ -845,19 +845,6 @@ class LLMController():
 
         obstacle_states_generated = compute_obstacle_envelope_states(self.get_baseline_scene(), now_s=now)
         obstacle_states = self._simulate_obstacle_returns(obstacle_states_generated, now=now)
-        target_task_point = (
-            "A"
-            if not isinstance(self.latest_baseline_decision, dict)
-            else str(self.latest_baseline_decision.get("target_task_point") or "A")
-        )
-        path_eval = self._compute_path_eval(
-            self.get_baseline_scene(),
-            drone_est or drone_gt,
-            user_est or user_gt,
-            now_s=now,
-            obstacle_envelopes=obstacle_states,
-            user_envelope=(None if safety_state is None else safety_state.user_envelope),
-        )
         user_heading = float(self.get_user_heading_yaw())
         user_ref = user_est or user_gt
         right_offset_m = 1.0
@@ -934,15 +921,10 @@ class LLMController():
             "baseline_scene": self.get_baseline_scene(),
             "baseline_scene_state": self.baseline_scene_state,
             "obstacle_envelope_states": obstacle_states,
-            "path_eval": path_eval,
             "candidate_targets": candidate_targets,
             "candidate_path_summaries": candidate_path_summaries,
-            "target_task_point": target_task_point,
             "baseline_decision": self.latest_baseline_decision,
-            "baseline_expectation_summary": self.get_baseline_expectation_summary(safety_context),
-            "baseline_all_scene_expectations": self.get_all_scene_expectation_summary(safety_context),
         }
-        snapshot["envelope_audit"] = self._build_envelope_audit_summary(snapshot)
         if safety_state is not None and safety_context is not None:
             consistency_from_gap = bool(float(safety_state.envelope_gap_m) < 0.0)
             print_debug(
@@ -959,7 +941,6 @@ class LLMController():
                 f"reason_tags={safety_context.reason_tags}"
             )
         self._debug_log_obstacle_envelopes(snapshot.get("obstacle_envelope_states"))
-        self._debug_log_envelope_audit(snapshot.get("envelope_audit"))
         self._debug_log_localization_pipeline_comparison(snapshot)
         print_debug(
             "[UI-SNAPSHOT] "

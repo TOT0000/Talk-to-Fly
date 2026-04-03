@@ -21,7 +21,7 @@ class ScenarioApplyReport:
     actual_drone_gt_position_3d: tuple[float, float, float]
     actual_user_gt_position_3d: tuple[float, float, float]
     measured_initial_safety_score: Optional[float]
-    measured_initial_safety_level: Optional[str]
+    measured_initial_collision_probability: Optional[float]
     measured_initial_envelope_gap_m: Optional[float]
     measured_initial_uncertainty_scale_m: Optional[float]
     repositioned: bool
@@ -106,7 +106,9 @@ class ScenarioManager:
             actual_drone_gt_position_3d=actual_drone,
             actual_user_gt_position_3d=actual_user,
             measured_initial_safety_score=None if safety_context is None else float(safety_context.safety_score),
-            measured_initial_safety_level=None if safety_context is None else str(safety_context.safety_level),
+            measured_initial_collision_probability=(
+                None if safety_context is None else float(safety_context.current_collision_probability)
+            ),
             measured_initial_envelope_gap_m=None if safety_context is None else float(safety_context.envelope_gap_m),
             measured_initial_uncertainty_scale_m=None if safety_context is None else float(safety_context.uncertainty_scale_m),
             repositioned=repositioned,
@@ -118,7 +120,7 @@ class ScenarioManager:
             f"selected={report.selected_mode} "
             f"target_drone={report.target_drone_position_3d} target_user={report.target_user_position_3d} "
             f"actual_drone={report.actual_drone_gt_position_3d} actual_user={report.actual_user_gt_position_3d} "
-            f"score={report.measured_initial_safety_score} level={report.measured_initial_safety_level} "
+            f"score={report.measured_initial_safety_score} p_collision={report.measured_initial_collision_probability} "
             f"gap={report.measured_initial_envelope_gap_m} uncertainty={report.measured_initial_uncertainty_scale_m} "
             f"repositioned={report.repositioned} iterations={report.calibration_iterations}"
         )
@@ -156,7 +158,15 @@ class ScenarioManager:
             for _ in range(3):
                 measured = controller.get_live_ui_snapshot()
                 measured_ctx = measured.get("safety_context") if measured else None
-                measured_rank = LEVEL_RANK.get(str(measured_ctx.safety_level), 3) if measured_ctx else 3
+                measured_rank = 3
+                if measured_ctx is not None:
+                    p = float(measured_ctx.current_collision_probability)
+                    if p >= 0.30:
+                        measured_rank = 0
+                    elif p >= 0.15:
+                        measured_rank = 1
+                    elif p >= 0.05:
+                        measured_rank = 2
                 if measured_rank <= target_rank:
                     break
                 current_gap = current_gap - (0.20 if scenario.name == "WARNING" else 0.15)

@@ -260,7 +260,6 @@ class TypeFly:
             with gr.Row():
                 self.coordinate_markdown = gr.Markdown(value="### Coordinates\nWaiting for live data...")
                 self.safety_markdown = gr.Markdown(value="### Safety / Risk\nWaiting for safety state...")
-                self.baseline_markdown = gr.Markdown(value="### Baseline Status\nWaiting for baseline scene...")
 
             self.counter = gr.State(0)
             self.timer = Timer(value=0.08)
@@ -276,7 +275,6 @@ class TypeFly:
                     self.counter,
                     self.coordinate_markdown,
                     self.safety_markdown,
-                    self.baseline_markdown,
                 ]
             )
 
@@ -615,18 +613,17 @@ class TypeFly:
         global_xy, xy, x, y, z = self.update_position_plot(snapshot)
         coordinate_md = self.render_coordinate_markdown(snapshot)
         safety_md = self.render_safety_markdown(snapshot)
-        baseline_md = self.render_baseline_markdown(snapshot)
         counter += 1
         print_debug(
             "[UI-CALLBACK] "
-            "outputs=[global_xy_plot,xy_plot,x_plot,y_plot,z_plot,counter,coordinate_markdown,safety_markdown,baseline_markdown] "
+            "outputs=[global_xy_plot,xy_plot,x_plot,y_plot,z_plot,counter,coordinate_markdown,safety_markdown] "
             f"drone_gt={None if not snapshot else snapshot.get('drone_gt')} "
             f"drone_est={None if not snapshot else snapshot.get('drone_est')} "
             f"user_gt={None if not snapshot else snapshot.get('user_gt')} "
             f"user_est={None if not snapshot else snapshot.get('user_est')} "
             f"counter={counter}"
         )
-        return global_xy, xy, x, y, z, counter, coordinate_md, safety_md, baseline_md
+        return global_xy, xy, x, y, z, counter, coordinate_md, safety_md
 
     def _fmt_vec(self, value):
         if value is None:
@@ -702,65 +699,6 @@ class TypeFly:
                 f"- uncertainty_scale_m: {safety_context.uncertainty_scale_m:.3f} m",
                 f"- envelopes_overlap (centerline): {safety_context.envelopes_overlap}",
             ]
-        )
-
-    def render_baseline_markdown(self, snapshot):
-        if not snapshot:
-            return "### Baseline Status\nWaiting for baseline state..."
-        scene = snapshot.get("baseline_scene")
-        path_eval = snapshot.get("path_eval")
-        target_task_point = snapshot.get("target_task_point") or "A"
-        blocking = "none"
-        path_clear = "n/a"
-        min_gap = "n/a"
-        if path_eval is not None:
-            blocking = path_eval.blocking_entity
-            path_clear = str(bool(path_eval.path_clear))
-            min_gap = f"{float(path_eval.corridor_min_gap):.3f}"
-        expectation_lines = []
-        for row in snapshot.get("baseline_expectation_summary") or []:
-            expectation_lines.append(
-                f"  - {row.get('target_task_point')}: clear={row.get('expected_path_clear')} "
-                f"blocker={row.get('expected_blocking_entity')} mode={row.get('expected_motion_mode')}"
-            )
-        expectation_block = "\n".join(expectation_lines) if expectation_lines else "  - (n/a)"
-        all_rows = snapshot.get("baseline_all_scene_expectations") or []
-        all_scene_block = {}
-        for row in all_rows:
-            scene_id = row.get("scene_id")
-            item = (
-                f"{row.get('target_task_point')}="
-                f"{row.get('expected_motion_mode')}/"
-                f"{row.get('expected_blocking_entity')}"
-            )
-            all_scene_block.setdefault(scene_id, []).append(item)
-        all_scene_lines = []
-        for scene_id, items in all_scene_block.items():
-            all_scene_lines.append(f"  - {scene_id}: " + ", ".join(items))
-        all_scene_summary = "\n".join(all_scene_lines) if all_scene_lines else "  - (n/a)"
-        audit = snapshot.get("envelope_audit") or {}
-        major_minor_lines = []
-        for entity in audit.get("entities", []):
-            major_minor_lines.append(
-                f"  - {entity.get('id')}: major={float(entity.get('major_axis')):.3f}, minor={float(entity.get('minor_axis')):.3f}"
-            )
-        ratio_lines = []
-        for key, value in sorted((audit.get("ratios") or {}).items()):
-            ratio_lines.append(f"  - {key}: {float(value):.3f}")
-        major_minor_block = "\n".join(major_minor_lines) if major_minor_lines else "  - (n/a)"
-        ratio_block = "\n".join(ratio_lines) if ratio_lines else "  - (n/a)"
-        return (
-            "### Baseline Status\n"
-            f"- current scene id: {None if scene is None else scene.id}\n"
-            f"- current target task point: {target_task_point}\n"
-            f"- path_clear: {path_clear}\n"
-            f"- blocking entity: {blocking}\n"
-            f"- corridor_min_gap_m: {min_gap}\n"
-            f"- user_heading_yaw_deg: {math.degrees(float(snapshot.get('user_heading_yaw_rad') or 0.0)):.1f}\n"
-            f"- envelope major/minor audit:\n{major_minor_block}\n"
-            f"- obstacle/drone-user major ratios:\n{ratio_block}\n"
-            f"- current scene expected behavior:\n{expectation_block}\n"
-            f"- all scenes quick matrix (mode/blocker):\n{all_scene_summary}"
         )
 
     def _estimate_heading_from_history(self, primary_key: str, fallback_key: str = None):

@@ -13,9 +13,6 @@ class SafetyContext:
     uncertainty_scale_m: float
     drone_to_user_distance_xy: float
     envelopes_overlap: bool
-    # Deprecated compatibility fields; main decision chain should use collision probabilities.
-    safety_level: str = ""
-    planning_bias: str = ""
     dominant_threat_type: str = "user"
     dominant_threat_id: str = "user"
     dominant_gap_m: float = 0.0
