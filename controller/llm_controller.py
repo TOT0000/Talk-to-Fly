@@ -29,7 +29,6 @@ from .sim_state_provider import SimStateProvider
 from .scenario_manager import ScenarioManager
 from .safety_context import SafetyContext
 from .task_run_logger import TaskRunLogger
-from .uplink_delay_model import UplinkDelayModel
 from .baseline_scenes import (
     BASELINE_SCENES,
     BaselineScene,
@@ -152,10 +151,6 @@ class LLMController():
         self.planner_mode = str(os.getenv("TYPEFLY_PLANNER_MODE", "llm_baseline")).strip().lower()
         if self.planner_mode not in {"llm_baseline", "rule_baseline"}:
             self.planner_mode = "llm_baseline"
-        self._obstacle_delay_models = {}
-        self._obstacle_sequence_numbers = {}
-        self._latest_received_obstacle_states = {}
-        self._obstacle_rng = np.random.default_rng(int(os.getenv("SIM_LOCALIZATION_RNG_SEED", "12345")) + 2026)
         self.user_heading_yaw_rad = 0.0
 
         # PX4_SIM optional managed user-position publisher lifecycle
@@ -737,40 +732,12 @@ class LLMController():
             f"  dominant_threat={safety_context.dominant_threat_type}:{safety_context.dominant_threat_id}\n"
             f"  dominant_gap={safety_context.dominant_gap_m:.3f}\n"
             f"  dominant_uncertainty={safety_context.dominant_uncertainty_scale_m:.3f}\n"
-            f"  dominant_freshness={safety_context.dominant_freshness_s}\n"
             f"  reasons={safety_context.reason_tags}"
         )
 
     def _simulate_obstacle_returns(self, obstacle_states, now: float):
-        simulated = []
-        for obs in obstacle_states or []:
-            model = self._obstacle_delay_models.setdefault(obs.id, UplinkDelayModel())
-            seq = int(self._obstacle_sequence_numbers.get(obs.id, 0))
-            self._obstacle_sequence_numbers[obs.id] = seq + 1
-            tx_packet = obs.localization_packet.copy()
-            tx_packet.sequence_number = seq
-            tx_state = replace(obs, localization_packet=tx_packet)
-            arrival = model.enqueue(
-                packet=tx_state,
-                generation_timestamp=float(tx_packet.state_generation_timestamp),
-                sequence_number=seq,
-                rng=self._obstacle_rng,
-            )
-            ready = model.pop_ready(float(now))
-            if ready:
-                delivered_arrival, _, delivered_state = ready[-1]
-                delivered_packet = delivered_state.localization_packet.copy()
-                delivered_packet.received_packet_timestamp = float(delivered_arrival)
-                self._latest_received_obstacle_states[obs.id] = replace(delivered_state, localization_packet=delivered_packet)
-            latest_state = self._latest_received_obstacle_states.get(obs.id)
-            effective = latest_state if latest_state is not None else tx_state
-            if arrival is None:
-                effective = replace(
-                    effective,
-                    localization_packet=replace(effective.localization_packet, received_packet_timestamp=None),
-                )
-            simulated.append(effective)
-        return simulated
+        _ = now
+        return list(obstacle_states or [])
 
     def _build_dominant_threat_context(
         self,
@@ -809,7 +776,6 @@ class LLMController():
                     "major_axis_m": float(obs.envelope.major_axis_radius),
                     "minor_axis_m": float(obs.envelope.minor_axis_radius),
                     "orientation_deg": float(obs.envelope.orientation_deg),
-                    "freshness_s": float(now - float(obs_packet.state_generation_timestamp)),
                 }
             )
         assessed_context.task_points_summary = task_points_summary
@@ -877,18 +843,6 @@ class LLMController():
             user_est = None if user_packet is None else _as_position_tuple(user_packet.estimated_position_3d)
         else:
             user_packet = provider.get_latest_received_user_packet() if hasattr(provider, "get_latest_received_user_packet") else None
-
-        def _timing(packet):
-            if packet is None:
-                return None, None
-            aoi_s = now - float(packet.state_generation_timestamp)
-            delay_s = None
-            if packet.received_packet_timestamp is not None:
-                delay_s = float(packet.received_packet_timestamp - packet.state_generation_timestamp)
-            return aoi_s, delay_s
-
-        drone_aoi_s, drone_delay_s = _timing(drone_packet)
-        user_aoi_s, user_delay_s = _timing(user_packet)
 
         obstacle_states_generated = compute_obstacle_envelope_states(self.get_baseline_scene(), now_s=now)
         obstacle_states = self._simulate_obstacle_returns(obstacle_states_generated, now=now)
@@ -973,10 +927,6 @@ class LLMController():
             "drone_est": drone_est,
             "user_gt": user_gt,
             "user_est": user_est,
-            "drone_aoi_s": drone_aoi_s,
-            "drone_delay_s": drone_delay_s,
-            "user_aoi_s": user_aoi_s,
-            "user_delay_s": user_delay_s,
             "safety_state": safety_state,
             "safety_context": safety_context,
             "drone_yaw_rad": self._get_drone_yaw_rad(),
@@ -1211,18 +1161,15 @@ class LLMController():
     def _debug_log_obstacle_envelopes(self, obstacle_states):
         if not obstacle_states:
             return
-        now = time.time()
         parts = []
         for obs in obstacle_states:
             packet = obs.localization_packet
-            aoi = float(now - float(packet.state_generation_timestamp))
             parts.append(
                 f"{obs.id}:gt=({obs.gt_xy[0]:.2f},{obs.gt_xy[1]:.2f}) "
                 f"est=({obs.est_xy[0]:.2f},{obs.est_xy[1]:.2f}) "
                 f"matrix={obs.matrix_xy} "
                 f"axes=({obs.envelope.major_axis_radius:.3f},{obs.envelope.minor_axis_radius:.3f}) "
                 f"ori={obs.envelope.orientation_deg:.1f} "
-                f"aoi={aoi:.3f}s "
                 f"rx={'None' if packet.received_packet_timestamp is None else f'{float(packet.received_packet_timestamp):.3f}'}"
             )
         print_debug("[BASELINE-OBS] " + " | ".join(parts))

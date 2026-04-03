@@ -8,7 +8,7 @@ Use only the listed low-level and utility skills. Never invent or use any omitte
 Scene context may include:
 - TaskPoints: A/B/C
 - CandidateTargets: A/B/C, user, user_right_side, user_left_side
-- Obstacles with envelope/freshness
+- Obstacles with envelope geometry
 - BackgroundSafety: dominant threat, current_collision_probability, historical_max_collision_probability, per-worker collision probabilities
 - PathSummaries by candidate target
 
@@ -61,7 +61,7 @@ Available low-level and utility skills:
 Scene context may include:
 - TaskPoints: A/B/C
 - CandidateTargets: A/B/C, user, user_right_side, user_left_side, ...
-- Obstacles with envelope/freshness
+- Obstacles with envelope geometry
 - BackgroundSafety: dominant threat, current_collision_probability, historical_max_collision_probability, per-worker collision probabilities
 - PathSummaries by candidate target
 

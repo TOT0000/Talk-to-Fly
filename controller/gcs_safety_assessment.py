@@ -15,8 +15,8 @@ class GcsSafetyAssessmentService:
     def __init__(self):
         # Collision-probability is the only primary risk core.
         self._core = CollisionProbabilityCore()
-        self._uav_radius_m = float(os.getenv("TYPEFLY_UAV_RADIUS_M", "0.35"))
-        self._worker_radius_m = float(os.getenv("TYPEFLY_WORKER_RADIUS_M", "0.35"))
+        self._uav_radius_m = float(os.getenv("TYPEFLY_UAV_RADIUS_M", "0.22"))
+        self._worker_radius_m = float(os.getenv("TYPEFLY_WORKER_RADIUS_M", "0.30"))
 
     def _build_context_from_scene_summary(
         self,
@@ -37,20 +37,10 @@ class GcsSafetyAssessmentService:
             )
             uncertainty_scale_m = geometric_uncertainty_m
             distance_xy = float(safety_state.drone_to_user_distance_xy)
-            latest_gen = safety_state.latest_generation_timestamp
-            latest_recv = safety_state.latest_receive_timestamp
-            max_aoi_s = max(
-                now - float(safety_state.drone_packet.state_generation_timestamp),
-                now - float(safety_state.user_packet.state_generation_timestamp),
-            )
         else:
             envelope_gap_m = 0.0
             uncertainty_scale_m = 0.0
             distance_xy = 0.0
-            latest_gen = None
-            latest_recv = None
-            max_aoi_s = None
-        freshness = None if latest_recv is None else now - float(latest_recv)
 
         return SafetyContext(
             # Keep compatibility fields while changing semantics:
@@ -65,15 +55,10 @@ class GcsSafetyAssessmentService:
             uncertainty_scale_m=float(uncertainty_scale_m),
             drone_to_user_distance_xy=float(distance_xy),
             envelopes_overlap=bool(overlap_flag),
-            latest_generation_timestamp=latest_gen,
-            latest_receive_timestamp=latest_recv,
-            timing_freshness_s=freshness,
-            max_aoi_s=max_aoi_s,
             dominant_threat_type="worker",
             dominant_threat_id=str(dominant_worker_id),
             dominant_gap_m=float(envelope_gap_m),
             dominant_uncertainty_scale_m=float(uncertainty_scale_m),
-            dominant_freshness_s=max_aoi_s,
             current_collision_probability=float(current_probability),
             historical_max_collision_probability=float(historical_max_probability),
             per_worker_collision_probabilities=per_worker_probs,
@@ -140,15 +125,10 @@ class GcsSafetyAssessmentService:
                 uncertainty_scale_m=0.0,
                 drone_to_user_distance_xy=0.0,
                 envelopes_overlap=False,
-                latest_generation_timestamp=None,
-                latest_receive_timestamp=None,
-                timing_freshness_s=None,
-                max_aoi_s=None,
                 dominant_threat_type="worker",
                 dominant_threat_id="none",
                 dominant_gap_m=0.0,
                 dominant_uncertainty_scale_m=0.0,
-                dominant_freshness_s=None,
                 current_collision_probability=0.0,
                 historical_max_collision_probability=float(self._core.get_historical_max_probability()),
                 per_worker_collision_probabilities=[],

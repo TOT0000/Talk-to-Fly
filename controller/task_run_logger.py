@@ -80,13 +80,11 @@ class _RunRecord:
     any_collision_during_run: bool = False
     collision_event_count: int = 0
     max_uncertainty_scale_m_during_run: float = 0.0
-    max_aoi_s_during_run: float = 0.0
     worst_safety_score_during_run: float = 1.0
     peak_current_collision_probability_during_run: float = 0.0
     peak_historical_max_collision_probability_during_run: float = 0.0
     min_distance_xy_m_during_run: Optional[float] = None
     max_distance_xy_m_during_run: Optional[float] = None
-    max_timing_freshness_s_during_run: float = 0.0
 
     _last_overlap_state: bool = False
     _last_collision_state: bool = False
@@ -266,11 +264,6 @@ class TaskRunLogger:
         uncertainty = float(safety_context.uncertainty_scale_m)
         self._active.max_uncertainty_scale_m_during_run = max(self._active.max_uncertainty_scale_m_during_run, uncertainty)
 
-        max_aoi_s = float(safety_context.max_aoi_s or 0.0)
-        self._active.max_aoi_s_during_run = max(self._active.max_aoi_s_during_run, max_aoi_s)
-        timing_freshness = float(safety_context.timing_freshness_s or 0.0)
-        self._active.max_timing_freshness_s_during_run = max(self._active.max_timing_freshness_s_during_run, timing_freshness)
-
         score = float(safety_context.safety_score)
         if score < self._active.worst_safety_score_during_run:
             self._active.worst_safety_score_during_run = score
@@ -400,13 +393,11 @@ class TaskRunLogger:
                 "overlap_event_count": int(active.overlap_event_count),
                 "collision_event_count": int(active.collision_event_count),
                 "max_uncertainty_scale_m_during_run": float(active.max_uncertainty_scale_m_during_run),
-                "max_aoi_s_during_run": float(active.max_aoi_s_during_run),
                 "worst_safety_score_during_run": float(active.worst_safety_score_during_run),
                 "peak_current_collision_probability_during_run": float(active.peak_current_collision_probability_during_run),
                 "peak_historical_max_collision_probability_during_run": float(active.peak_historical_max_collision_probability_during_run),
                 "min_distance_xy_m_during_run": active.min_distance_xy_m_during_run,
                 "max_distance_xy_m_during_run": active.max_distance_xy_m_during_run,
-                "max_timing_freshness_s_during_run": active.max_timing_freshness_s_during_run,
             },
         }
         ws_debug = wb[DEBUG_SHEET]
