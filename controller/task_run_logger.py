@@ -36,7 +36,8 @@ RUN_COLUMNS = [
     "corridor_min_gap",
     "dominant_threat_type",
     "dominant_threat_id",
-    "safety_level",
+    "current_collision_probability",
+    "historical_max_collision_probability",
     "task_success",
     "task_completion_time_sec",
     "min_envelope_gap_m_during_run",
@@ -49,10 +50,9 @@ RUN_COLUMNS = [
 ]
 
 EVENT_COLUMNS = [
-    "run_id", "event_timestamp", "event_type", "envelope_gap_m", "distance_xy_m", "safety_level", "safety_score", "details",
+    "run_id", "event_timestamp", "event_type", "envelope_gap_m", "distance_xy_m",
+    "current_collision_probability", "historical_max_collision_probability", "safety_score", "details",
 ]
-
-LEVEL_RANK = {"SAFE": 3, "CAUTION": 2, "WARNING": 1, "DANGER": 0}
 
 
 @dataclass
@@ -80,16 +80,12 @@ class _RunRecord:
     any_collision_during_run: bool = False
     collision_event_count: int = 0
     max_uncertainty_scale_m_during_run: float = 0.0
-    max_aoi_s_during_run: float = 0.0
     worst_safety_score_during_run: float = 1.0
-    worst_safety_level_during_run: str = "SAFE"
-    any_level_drop_during_run: bool = False
-    safety_level_transition_trace: str = ""
+    peak_current_collision_probability_during_run: float = 0.0
+    peak_historical_max_collision_probability_during_run: float = 0.0
     min_distance_xy_m_during_run: Optional[float] = None
     max_distance_xy_m_during_run: Optional[float] = None
-    max_timing_freshness_s_during_run: float = 0.0
 
-    _level_trace: list = field(default_factory=list)
     _last_overlap_state: bool = False
     _last_collision_state: bool = False
     baseline_info: Dict = field(default_factory=dict)
@@ -268,23 +264,20 @@ class TaskRunLogger:
         uncertainty = float(safety_context.uncertainty_scale_m)
         self._active.max_uncertainty_scale_m_during_run = max(self._active.max_uncertainty_scale_m_during_run, uncertainty)
 
-        max_aoi_s = float(safety_context.max_aoi_s or 0.0)
-        self._active.max_aoi_s_during_run = max(self._active.max_aoi_s_during_run, max_aoi_s)
-        timing_freshness = float(safety_context.timing_freshness_s or 0.0)
-        self._active.max_timing_freshness_s_during_run = max(self._active.max_timing_freshness_s_during_run, timing_freshness)
-
         score = float(safety_context.safety_score)
         if score < self._active.worst_safety_score_during_run:
             self._active.worst_safety_score_during_run = score
 
-        level = str(safety_context.safety_level)
-        if not self._active._level_trace or self._active._level_trace[-1] != level:
-            self._active._level_trace.append(level)
-        prev_rank = LEVEL_RANK.get(self._active.worst_safety_level_during_run, 3)
-        cur_rank = LEVEL_RANK.get(level, 3)
-        if cur_rank < prev_rank:
-            self._active.worst_safety_level_during_run = level
-            self._active.any_level_drop_during_run = True
+        current_collision_probability = float(safety_context.current_collision_probability)
+        self._active.peak_current_collision_probability_during_run = max(
+            self._active.peak_current_collision_probability_during_run,
+            current_collision_probability,
+        )
+        historical_max_collision_probability = float(safety_context.historical_max_collision_probability)
+        self._active.peak_historical_max_collision_probability_during_run = max(
+            self._active.peak_historical_max_collision_probability_during_run,
+            historical_max_collision_probability,
+        )
 
         collision_now = self._detect_collision(snapshot)
         if collision_now and not self._active._last_collision_state:
@@ -320,7 +313,8 @@ class TaskRunLogger:
             "event_type": event_type,
             "envelope_gap_m": "" if safety_context is None else float(safety_context.envelope_gap_m),
             "distance_xy_m": "" if safety_context is None else float(safety_context.drone_to_user_distance_xy),
-            "safety_level": "" if safety_context is None else str(safety_context.safety_level),
+            "current_collision_probability": "" if safety_context is None else float(safety_context.current_collision_probability),
+            "historical_max_collision_probability": "" if safety_context is None else float(safety_context.historical_max_collision_probability),
             "safety_score": "" if safety_context is None else float(safety_context.safety_score),
             "details": self._json_text(details),
         }
@@ -342,7 +336,6 @@ class TaskRunLogger:
         active.run_status = run_status
         if failure_reason and not active.failure_reason:
             active.failure_reason = failure_reason
-        active.safety_level_transition_trace = " -> ".join(active._level_trace)
 
         initial = active.initial_snapshot
         final = active.final_snapshot or initial
@@ -368,7 +361,8 @@ class TaskRunLogger:
             "corridor_min_gap": active.baseline_info.get("corridor_min_gap", ""),
             "dominant_threat_type": "" if final_ctx is None else str(final_ctx.dominant_threat_type),
             "dominant_threat_id": "" if final_ctx is None else str(final_ctx.dominant_threat_id),
-            "safety_level": "" if final_ctx is None else str(final_ctx.safety_level),
+            "current_collision_probability": "" if final_ctx is None else float(final_ctx.current_collision_probability),
+            "historical_max_collision_probability": "" if final_ctx is None else float(final_ctx.historical_max_collision_probability),
             "task_success": bool(active.task_completed_bool and active.plan_execution_success),
             "task_completion_time_sec": round(end_ts - active.start_time, 3),
             "any_envelope_overlap_during_run": bool(active.any_envelope_overlap_during_run),
@@ -399,14 +393,11 @@ class TaskRunLogger:
                 "overlap_event_count": int(active.overlap_event_count),
                 "collision_event_count": int(active.collision_event_count),
                 "max_uncertainty_scale_m_during_run": float(active.max_uncertainty_scale_m_during_run),
-                "max_aoi_s_during_run": float(active.max_aoi_s_during_run),
                 "worst_safety_score_during_run": float(active.worst_safety_score_during_run),
-                "worst_safety_level_during_run": active.worst_safety_level_during_run,
-                "any_level_drop_during_run": bool(active.any_level_drop_during_run),
-                "safety_level_transition_trace": active.safety_level_transition_trace,
+                "peak_current_collision_probability_during_run": float(active.peak_current_collision_probability_during_run),
+                "peak_historical_max_collision_probability_during_run": float(active.peak_historical_max_collision_probability_during_run),
                 "min_distance_xy_m_during_run": active.min_distance_xy_m_during_run,
                 "max_distance_xy_m_during_run": active.max_distance_xy_m_during_run,
-                "max_timing_freshness_s_during_run": active.max_timing_freshness_s_during_run,
             },
         }
         ws_debug = wb[DEBUG_SHEET]

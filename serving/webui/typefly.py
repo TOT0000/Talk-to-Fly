@@ -92,12 +92,6 @@ class TypeFly:
             "user_gt": deque(maxlen=100),
             "user_est": deque(maxlen=100),
         }
-        self.timing_history = {
-            "drone_aoi_s": deque(maxlen=100),
-            "user_aoi_s": deque(maxlen=100),
-            "drone_delay_s": deque(maxlen=100),
-            "user_delay_s": deque(maxlen=100),
-        }
         self.plot_style = {
             "drone": {"main": "#0B57D0", "light": "#8AB4F8"},
             "user": {"main": "#C5221F", "light": "#F28B82"},
@@ -264,21 +258,8 @@ class TypeFly:
                     height=320,
                 )
             with gr.Row():
-                self.aoi_plot = gr.Image(
-                    value=self.create_sequence_plot("AoI Trend", "Sample", "AoI (s)", xlim=(0, 1), ylim=(0, 1)),
-                    label="AoI Trend",
-                    height=320,
-                )
-                self.delay_plot = gr.Image(
-                    value=self.create_sequence_plot("Delay Trend", "Sample", "Delay (s)", xlim=(0, 1), ylim=(0, 1)),
-                    label="Delay Trend",
-                    height=320,
-                )
-            with gr.Row():
                 self.coordinate_markdown = gr.Markdown(value="### Coordinates\nWaiting for live data...")
                 self.safety_markdown = gr.Markdown(value="### Safety / Risk\nWaiting for safety state...")
-                self.delay_markdown = gr.Markdown(value="### AoI / Delay\nWaiting for packets...")
-                self.baseline_markdown = gr.Markdown(value="### Baseline Status\nWaiting for baseline scene...")
 
             self.counter = gr.State(0)
             self.timer = Timer(value=0.08)
@@ -291,13 +272,9 @@ class TypeFly:
                     self.x_plot,
                     self.y_plot,
                     self.z_plot,
-                    self.aoi_plot,
-                    self.delay_plot,
                     self.counter,
                     self.coordinate_markdown,
                     self.safety_markdown,
-                    self.delay_markdown,
-                    self.baseline_markdown,
                 ]
             )
 
@@ -443,8 +420,8 @@ class TypeFly:
         normalized, report, runtime = self._apply_mode_and_collect(scenario_name)
         return (
             f"Scenario `{normalized}` applied. "
-            f"Live safety: {runtime.get('safety_level')} "
-            f"(score={self._fmt_float(runtime.get('safety_score'))})"
+            f"Live collision probability: {self._fmt_float(runtime.get('current_collision_probability'))} "
+            f"(historical_max={self._fmt_float(runtime.get('historical_max_collision_probability'))})"
         )
 
     def apply_baseline_scene(self, scene_id):
@@ -472,8 +449,8 @@ class TypeFly:
         runtime = self.llm_controller.get_scenario_runtime_status()
         return (
             f"User moved to {self._fmt_vec(updated)} | "
-            f"live safety={runtime.get('safety_level')} "
-            f"(score={self._fmt_float(runtime.get('safety_score'))})"
+            f"live collision_probability={self._fmt_float(runtime.get('current_collision_probability'))} "
+            f"(historical_max={self._fmt_float(runtime.get('historical_max_collision_probability'))})"
         )
 
     def move_user_forward(self, step_m: float):
@@ -634,22 +611,19 @@ class TypeFly:
         snapshot = self.llm_controller.get_live_ui_snapshot()
         self._append_history(snapshot)
         global_xy, xy, x, y, z = self.update_position_plot(snapshot)
-        aoi_img, delay_img = self.update_timing_plots()
         coordinate_md = self.render_coordinate_markdown(snapshot)
         safety_md = self.render_safety_markdown(snapshot)
-        delay_md = self.render_delay_markdown(snapshot)
-        baseline_md = self.render_baseline_markdown(snapshot)
         counter += 1
         print_debug(
             "[UI-CALLBACK] "
-            "outputs=[global_xy_plot,xy_plot,x_plot,y_plot,z_plot,aoi_plot,delay_plot,counter,coordinate_markdown,safety_markdown,delay_markdown] "
+            "outputs=[global_xy_plot,xy_plot,x_plot,y_plot,z_plot,counter,coordinate_markdown,safety_markdown] "
             f"drone_gt={None if not snapshot else snapshot.get('drone_gt')} "
             f"drone_est={None if not snapshot else snapshot.get('drone_est')} "
             f"user_gt={None if not snapshot else snapshot.get('user_gt')} "
             f"user_est={None if not snapshot else snapshot.get('user_est')} "
             f"counter={counter}"
         )
-        return global_xy, xy, x, y, z, aoi_img, delay_img, counter, coordinate_md, safety_md, delay_md, baseline_md
+        return global_xy, xy, x, y, z, counter, coordinate_md, safety_md
 
     def _fmt_vec(self, value):
         if value is None:
@@ -680,10 +654,6 @@ class TypeFly:
             if value is not None:
                 self.position_history[key].append(tuple(float(v) for v in value))
                 print_debug(f"[UI-HISTORY] key={key} appended={self.position_history[key][-1]}")
-        for key in ("drone_aoi_s", "user_aoi_s", "drone_delay_s", "user_delay_s"):
-            value = snapshot.get(key)
-            if value is not None:
-                self.timing_history[key].append(float(value))
 
     def render_coordinate_markdown(self, snapshot):
         if not snapshot:
@@ -718,88 +688,17 @@ class TypeFly:
         return "\n".join(
             [
                 "### Safety / Risk",
-                f"- safety_score: {safety_context.safety_score:.3f}",
-                f"- safety_level: {safety_context.safety_level}",
-                f"- planning_bias: {safety_context.planning_bias}",
+                f"- current_collision_probability: {float(getattr(safety_context, 'current_collision_probability', 0.0)):.6f}",
+                f"- historical_max_collision_probability: {float(getattr(safety_context, 'historical_max_collision_probability', 0.0)):.6f}",
+                f"- safety_score (compat): {safety_context.safety_score:.3f}",
                 f"- dominant_threat_type: {getattr(safety_context, 'dominant_threat_type', 'user')}",
                 f"- dominant_threat_id: {getattr(safety_context, 'dominant_threat_id', 'user')}",
                 f"- dominant_gap_m: {float(getattr(safety_context, 'dominant_gap_m', safety_context.envelope_gap_m)):.3f} m",
                 f"- dominant_uncertainty_scale_m: {float(getattr(safety_context, 'dominant_uncertainty_scale_m', safety_context.uncertainty_scale_m)):.3f} m",
-                f"- dominant_freshness_s: {self._fmt_float(getattr(safety_context, 'dominant_freshness_s', None), ' s')}",
                 f"- envelope_gap_m (centerline ray-gap): {safety_context.envelope_gap_m:.3f} m",
                 f"- uncertainty_scale_m: {safety_context.uncertainty_scale_m:.3f} m",
                 f"- envelopes_overlap (centerline): {safety_context.envelopes_overlap}",
             ]
-        )
-
-    def render_delay_markdown(self, snapshot):
-        if not snapshot:
-            return "### AoI / Delay\nWaiting for packets..."
-        return (
-            "### AoI / Delay\n"
-            f"- drone AoI (blue): {self._fmt_float(snapshot.get('drone_aoi_s'), ' s')}\n"
-            f"- drone observed uplink delay (blue): {self._fmt_float(snapshot.get('drone_delay_s'), ' s')}\n"
-            f"- user AoI (red): {self._fmt_float(snapshot.get('user_aoi_s'), ' s')}\n"
-            f"- user observed uplink delay (red): {self._fmt_float(snapshot.get('user_delay_s'), ' s')}"
-        )
-
-    def render_baseline_markdown(self, snapshot):
-        if not snapshot:
-            return "### Baseline Status\nWaiting for baseline state..."
-        scene = snapshot.get("baseline_scene")
-        path_eval = snapshot.get("path_eval")
-        target_task_point = snapshot.get("target_task_point") or "A"
-        blocking = "none"
-        path_clear = "n/a"
-        min_gap = "n/a"
-        if path_eval is not None:
-            blocking = path_eval.blocking_entity
-            path_clear = str(bool(path_eval.path_clear))
-            min_gap = f"{float(path_eval.corridor_min_gap):.3f}"
-        expectation_lines = []
-        for row in snapshot.get("baseline_expectation_summary") or []:
-            expectation_lines.append(
-                f"  - {row.get('target_task_point')}: clear={row.get('expected_path_clear')} "
-                f"blocker={row.get('expected_blocking_entity')} mode={row.get('expected_motion_mode')}"
-            )
-        expectation_block = "\n".join(expectation_lines) if expectation_lines else "  - (n/a)"
-        all_rows = snapshot.get("baseline_all_scene_expectations") or []
-        all_scene_block = {}
-        for row in all_rows:
-            scene_id = row.get("scene_id")
-            item = (
-                f"{row.get('target_task_point')}="
-                f"{row.get('expected_motion_mode')}/"
-                f"{row.get('expected_blocking_entity')}"
-            )
-            all_scene_block.setdefault(scene_id, []).append(item)
-        all_scene_lines = []
-        for scene_id, items in all_scene_block.items():
-            all_scene_lines.append(f"  - {scene_id}: " + ", ".join(items))
-        all_scene_summary = "\n".join(all_scene_lines) if all_scene_lines else "  - (n/a)"
-        audit = snapshot.get("envelope_audit") or {}
-        major_minor_lines = []
-        for entity in audit.get("entities", []):
-            major_minor_lines.append(
-                f"  - {entity.get('id')}: major={float(entity.get('major_axis')):.3f}, minor={float(entity.get('minor_axis')):.3f}"
-            )
-        ratio_lines = []
-        for key, value in sorted((audit.get("ratios") or {}).items()):
-            ratio_lines.append(f"  - {key}: {float(value):.3f}")
-        major_minor_block = "\n".join(major_minor_lines) if major_minor_lines else "  - (n/a)"
-        ratio_block = "\n".join(ratio_lines) if ratio_lines else "  - (n/a)"
-        return (
-            "### Baseline Status\n"
-            f"- current scene id: {None if scene is None else scene.id}\n"
-            f"- current target task point: {target_task_point}\n"
-            f"- path_clear: {path_clear}\n"
-            f"- blocking entity: {blocking}\n"
-            f"- corridor_min_gap_m: {min_gap}\n"
-            f"- user_heading_yaw_deg: {math.degrees(float(snapshot.get('user_heading_yaw_rad') or 0.0)):.1f}\n"
-            f"- envelope major/minor audit:\n{major_minor_block}\n"
-            f"- obstacle/drone-user major ratios:\n{ratio_block}\n"
-            f"- current scene expected behavior:\n{expectation_block}\n"
-            f"- all scenes quick matrix (mode/blocker):\n{all_scene_summary}"
         )
 
     def _estimate_heading_from_history(self, primary_key: str, fallback_key: str = None):
@@ -843,48 +742,6 @@ class TypeFly:
         pad = 0.5
         return (min(xs) - pad, max(xs) + pad), (min(ys) - pad, max(ys) + pad)
 
-    def _render_timing_plot(self, history_keys, title, ylabel):
-        fig, ax = plt.subplots(figsize=(5, 4))
-        values = []
-        series_specs = [
-            (history_keys[0], "Drone", self.plot_style["drone"]["main"]),
-            (history_keys[1], "User", self.plot_style["user"]["main"]),
-        ]
-        for key, label, color in series_specs:
-            history = list(self.timing_history[key])
-            if not history:
-                ax.plot([], [], color=color, label=label)
-                continue
-            x_vals = list(range(len(history)))
-            values.extend(history)
-            ax.plot(x_vals, history, color=color, linestyle="-", marker="o", markersize=3, label=label)
-
-        max_len = max((len(self.timing_history[key]) for key, _, _ in series_specs), default=1)
-        ax.set_xlim(0, max(max_len - 1, 1))
-        if values:
-            ymin = max(0.0, min(values) - 0.05)
-            ymax = max(values) + 0.05
-        else:
-            ymin, ymax = 0.0, 1.0
-        if ymax <= ymin:
-            ymax = ymin + 1.0
-        ax.set_ylim(ymin, ymax)
-        ax.set_title(title)
-        ax.set_xlabel("Sample")
-        ax.set_ylabel(ylabel)
-        ax.grid(True, linestyle='--', linewidth=0.5)
-        ax.legend(fontsize=8)
-
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight')
-        buf.seek(0)
-        plt.close(fig)
-        return Image.open(buf)
-
-    def update_timing_plots(self):
-        aoi_img = self._render_timing_plot(("drone_aoi_s", "user_aoi_s"), "AoI Trend", "AoI (s)")
-        delay_img = self._render_timing_plot(("drone_delay_s", "user_delay_s"), "Delay Trend", "Delay (s)")
-        return aoi_img, delay_img
 
     def _render_xy_view(self, snapshot, xlim, ylim, title, figsize=(5, 4), show_legend=True):
         positions = self._extract_ui_positions(snapshot)

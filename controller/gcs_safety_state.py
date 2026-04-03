@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
@@ -24,7 +23,6 @@ class GcsSafetyState:
     envelope_gap_m: float
     envelopes_overlap: bool
     latest_generation_timestamp: float
-    latest_receive_timestamp: Optional[float]
 
 
 class GcsSafetyStateService:
@@ -51,13 +49,6 @@ class GcsSafetyStateService:
         user_radius = user_envelope.ray_radius(-unit_vec)
         envelope_gap_m = float(distance_xy - (drone_radius + user_radius))
 
-        receive_candidates = [
-            ts
-            for ts in [drone_packet.received_packet_timestamp, user_packet.received_packet_timestamp]
-            if ts is not None
-        ]
-        latest_receive_timestamp = max(receive_candidates) if receive_candidates else None
-
         return GcsSafetyState(
             drone_packet=drone_packet.copy(),
             user_packet=user_packet.copy(),
@@ -75,7 +66,6 @@ class GcsSafetyStateService:
             latest_generation_timestamp=float(
                 max(drone_packet.state_generation_timestamp, user_packet.state_generation_timestamp)
             ),
-            latest_receive_timestamp=latest_receive_timestamp,
         )
 
     @staticmethod
