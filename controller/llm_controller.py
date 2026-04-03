@@ -782,60 +782,16 @@ class LLMController():
         if safety_state is None:
             return None
 
-        drone_envelope = safety_state.drone_envelope
-        drone_packet = safety_state.drone_packet
-
-        candidates = []
-
-        def _build_candidate(entity_type: str, entity_id: str, entity_envelope, entity_packet):
-            delta = drone_envelope.center_xy - entity_envelope.center_xy
-            distance_xy = float(np.linalg.norm(delta))
-            unit_vec = np.array([1.0, 0.0], dtype=float) if distance_xy < 1e-9 else (delta / distance_xy)
-            drone_radius = float(drone_envelope.ray_radius(unit_vec))
-            entity_radius = float(entity_envelope.ray_radius(-unit_vec))
-            gap = float(distance_xy - (drone_radius + entity_radius))
-            uncertainty = float(drone_radius + entity_radius)
-            freshness = float(
-                max(
-                    now - float(drone_packet.state_generation_timestamp),
-                    now - float(entity_packet.state_generation_timestamp),
-                )
-            )
-            return {
-                "type": entity_type,
-                "id": entity_id,
-                "gap": gap,
-                "uncertainty": uncertainty,
-                "freshness": freshness,
-                "distance_xy": distance_xy,
-                "entity_packet": entity_packet,
-            }
-
-        candidates.append(
-            _build_candidate("user", "user", safety_state.user_envelope, safety_state.user_packet)
-        )
+        worker_packets = [("user", safety_state.user_packet)]
         for obs in obstacle_states or []:
-            candidates.append(
-                _build_candidate("obstacle", str(obs.id), obs.envelope, obs.localization_packet)
-            )
-        if not candidates:
-            return self.safety_assessor.build_from_safety_state(safety_state, now=now)
+            worker_packets.append((str(obs.id), obs.localization_packet))
 
-        candidates.sort(key=lambda item: (item["gap"], -item["uncertainty"], -item["freshness"], item["id"]))
-        dominant = candidates[0]
-        assessed = self.safety_assessor.assessor.assess(
-            envelope_gap_m=float(dominant["gap"]),
-            uncertainty_scale_m=float(dominant["uncertainty"]),
-            envelopes_overlap=bool(float(dominant["gap"]) < 0.0),
-            freshness_aoi_s=float(dominant["freshness"]),
+        assessed_context = self.safety_assessor.build_from_packets(
+            drone_packet=safety_state.drone_packet,
+            worker_packets=worker_packets,
+            now=now,
+            safety_state=safety_state,
         )
-        dom_packet = dominant["entity_packet"]
-        latest_gen_ts = float(max(drone_packet.state_generation_timestamp, dom_packet.state_generation_timestamp))
-        receive_candidates = [drone_packet.received_packet_timestamp, dom_packet.received_packet_timestamp]
-        receive_candidates = [float(ts) for ts in receive_candidates if ts is not None]
-        latest_recv_ts = max(receive_candidates) if receive_candidates else None
-        timing_freshness = None if latest_recv_ts is None else float(now - latest_recv_ts)
-        reason_tags = list(assessed.reason_tags) + [f"dominant_threat_{dominant['id']}"]
 
         task_points_summary = []
         for point in scene.task_points if scene is not None else []:
@@ -854,31 +810,12 @@ class LLMController():
                     "freshness_s": float(now - float(obs_packet.state_generation_timestamp)),
                 }
             )
-        return SafetyContext(
-            safety_score=float(assessed.safety_score),
-            safety_level=str(assessed.safety_level),
-            planning_bias=str(assessed.planning_bias),
-            preferred_standoff_m=float(assessed.preferred_standoff_m),
-            reason_tags=reason_tags,
-            envelope_gap_m=float(dominant["gap"]),
-            uncertainty_scale_m=float(dominant["uncertainty"]),
-            drone_to_user_distance_xy=float(safety_state.drone_to_user_distance_xy),
-            envelopes_overlap=bool(float(dominant["gap"]) < 0.0),
-            latest_generation_timestamp=latest_gen_ts,
-            latest_receive_timestamp=latest_recv_ts,
-            timing_freshness_s=timing_freshness,
-            max_aoi_s=float(dominant["freshness"]),
-            dominant_threat_type=str(dominant["type"]),
-            dominant_threat_id=str(dominant["id"]),
-            dominant_gap_m=float(dominant["gap"]),
-            dominant_uncertainty_scale_m=float(dominant["uncertainty"]),
-            dominant_freshness_s=float(dominant["freshness"]),
-            task_points_summary=task_points_summary,
-            obstacles_summary=obstacles_summary,
-            path_summary=None,
-            candidate_targets_summary=candidate_targets_summary or [],
-            candidate_path_summaries=candidate_path_summaries or [],
-        )
+        assessed_context.task_points_summary = task_points_summary
+        assessed_context.obstacles_summary = obstacles_summary
+        assessed_context.path_summary = None
+        assessed_context.candidate_targets_summary = candidate_targets_summary or []
+        assessed_context.candidate_path_summaries = candidate_path_summaries or []
+        return assessed_context
 
     def get_live_ui_snapshot(self):
         provider = getattr(self, "state_provider", None)
