@@ -633,6 +633,10 @@ class TypeFly:
 
     def update_and_step(self, counter, show_error_ellipse=False, show_raw_estimate=False):
         snapshot = self.llm_controller.get_live_ui_snapshot()
+        safety_context = snapshot.get("safety_context") if snapshot else None
+        ui_pc = None if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
+        if hasattr(self.llm_controller, "update_ui_collision_probability"):
+            self.llm_controller.update_ui_collision_probability(ui_pc)
         self._sync_objective_state(snapshot)
         self._append_history(snapshot)
         self._update_checkpoint_progress(snapshot)
@@ -709,7 +713,8 @@ class TypeFly:
             return
         order = self.benchmark_progress["order"]
         completed = self.benchmark_progress["completed"]
-        current_target = next((cid for cid in order if cid not in completed), None)
+        active_ids = set(self.objective_state.get("active_checkpoint_ids", set()))
+        current_target = next((cid for cid in order if cid in active_ids and cid not in completed), None)
         self.benchmark_progress["current_target"] = current_target
         if current_target is None:
             self.benchmark_progress["active_enter_ts"] = None
@@ -731,12 +736,16 @@ class TypeFly:
             self.benchmark_progress["active_enter_ts"] = None
             self.benchmark_progress["active_progress"] = 0.0
 
-        active_ids = set(self.objective_state.get("active_checkpoint_ids", set()))
         mission_completed = bool(active_ids) and all(cid in completed for cid in active_ids)
         self.mission_clock["objective_completed"] = mission_completed
         if mission_completed and self.mission_clock.get("started_at") is not None and self.mission_clock.get("completed_at") is None:
             self.mission_clock["completed_at"] = now
             self.mission_clock["is_running"] = False
+        if hasattr(self.llm_controller, "update_benchmark_progress"):
+            self.llm_controller.update_benchmark_progress(
+                completed_checkpoint_ids=sorted(completed),
+                current_target_checkpoint=current_target,
+            )
 
     def render_anchor_3d_plot(self):
         fig = plt.figure(figsize=(5.2, 4.2))
