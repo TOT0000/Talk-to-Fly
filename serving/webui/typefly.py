@@ -713,7 +713,8 @@ class TypeFly:
             return
         order = self.benchmark_progress["order"]
         completed = self.benchmark_progress["completed"]
-        current_target = next((cid for cid in order if cid not in completed), None)
+        active_ids = set(self.objective_state.get("active_checkpoint_ids", set()))
+        current_target = next((cid for cid in order if cid in active_ids and cid not in completed), None)
         self.benchmark_progress["current_target"] = current_target
         if current_target is None:
             self.benchmark_progress["active_enter_ts"] = None
@@ -735,7 +736,6 @@ class TypeFly:
             self.benchmark_progress["active_enter_ts"] = None
             self.benchmark_progress["active_progress"] = 0.0
 
-        active_ids = set(self.objective_state.get("active_checkpoint_ids", set()))
         mission_completed = bool(active_ids) and all(cid in completed for cid in active_ids)
         self.mission_clock["objective_completed"] = mission_completed
         if mission_completed and self.mission_clock.get("started_at") is not None and self.mission_clock.get("completed_at") is None:

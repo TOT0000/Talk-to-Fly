@@ -417,8 +417,17 @@ class LLMController():
 
         max_step_m = 1.0
         min_axis_step_m = 0.12
-        max_iterations = 12
         no_progress_limit = 3
+
+        initial_snapshot = self.get_live_ui_snapshot()
+        initial_control = (
+            initial_snapshot.get("drone_est_bias_corrected")
+            or initial_snapshot.get("drone_est")
+            or initial_snapshot.get("drone_gt")
+            or (0.0, 0.0, 0.0)
+        )
+        initial_dist = math.hypot(float(checkpoint.x) - float(initial_control[0]), float(checkpoint.y) - float(initial_control[1]))
+        max_iterations = max(12, min(80, int(math.ceil(initial_dist / 0.35)) + 6))
 
         reached = False
         final_dist = None
@@ -520,7 +529,8 @@ class LLMController():
             f"stop_reason={stop_reason}"
         )
         print_t(f"[C] {summary}")
-        return summary, False
+        # If not arrived, request replan so downstream dwell steps are not executed blindly.
+        return summary, (not reached)
 
     def append_message(self, message: str):
         if self.message_queue is not None:
@@ -1273,12 +1283,52 @@ class LLMController():
             )
         self._debug_log_obstacle_envelopes(snapshot.get("obstacle_envelope_states"))
         self._debug_log_localization_pipeline_comparison(snapshot)
+        self._debug_log_collision_probability_pipeline(snapshot)
         print_debug(
             "[UI-SNAPSHOT] "
             f"drone_gt={snapshot['drone_gt']} drone_est={snapshot['drone_est']} "
             f"user_gt={snapshot['user_gt']} user_est={snapshot['user_est']}"
         )
         return snapshot
+
+    def _debug_log_collision_probability_pipeline(self, snapshot: dict):
+        if not isinstance(snapshot, dict):
+            return
+        safety_context = snapshot.get("safety_context")
+        workers = snapshot.get("workers") or []
+        if safety_context is None:
+            return
+        per_worker = list(getattr(safety_context, "per_worker_collision_probabilities", []) or [])
+        if not per_worker:
+            return
+        worker_gt_map = {str(w.get("id")): w.get("gt_xy") for w in workers}
+        worker_est_map = {str(w.get("id")): w.get("est_xy_bias_corrected") for w in workers}
+        drone_gt = snapshot.get("drone_gt")
+        drone_est_bias = snapshot.get("drone_est_bias_corrected") or snapshot.get("drone_est")
+        lines = [
+            "[COLLISION_DEBUG] pipeline_snapshot",
+            f"  drone_true_xy={None if drone_gt is None else (float(drone_gt[0]), float(drone_gt[1]))}",
+            f"  drone_bias_corrected_xy={None if drone_est_bias is None else (float(drone_est_bias[0]), float(drone_est_bias[1]))}",
+        ]
+        for item in per_worker:
+            wid = str(item.get("id"))
+            lines.append(
+                "  "
+                + f"worker={wid} "
+                + f"worker_true_xy={worker_gt_map.get(wid)} "
+                + f"worker_bias_corrected_xy={worker_est_map.get(wid)} "
+                + f"mu={item.get('mu_xy')} "
+                + f"sigma_rel={item.get('sigma_rel')} "
+                + f"r_u={item.get('r_u')} r_h={item.get('r_h')} r_c={item.get('r_c')} "
+                + f"p_exact={item.get('exact_series_probability')} "
+                + f"p_mc={item.get('monte_carlo_probability')} "
+                + f"p_worker={item.get('collision_probability')}"
+            )
+        lines.append(
+            "  "
+            + f"scene_current_collision_probability={float(getattr(safety_context, 'current_collision_probability', 0.0)):.6f}"
+        )
+        print_debug("\n".join(lines))
 
     def _get_drone_yaw_rad(self) -> float:
         get_yaw = getattr(self.drone, "get_drone_yaw", None)

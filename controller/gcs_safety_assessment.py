@@ -106,6 +106,9 @@ class GcsSafetyAssessmentService:
                 "monte_carlo_probability": (None if item.monte_carlo_probability is None else float(item.monte_carlo_probability)),
                 "mu_xy": [float(item.mu_xy[0]), float(item.mu_xy[1])],
                 "sigma_rel": [[float(item.sigma_rel[0][0]), float(item.sigma_rel[0][1])], [float(item.sigma_rel[1][0]), float(item.sigma_rel[1][1])]],
+                "r_u": float(self._uav_radius_m),
+                "r_h": float(self._worker_radius_m),
+                "r_c": float(self._uav_radius_m + self._worker_radius_m),
             }
             for item in summary.per_entity
         ]
