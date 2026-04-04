@@ -737,6 +737,11 @@ class TypeFly:
         if mission_completed and self.mission_clock.get("started_at") is not None and self.mission_clock.get("completed_at") is None:
             self.mission_clock["completed_at"] = now
             self.mission_clock["is_running"] = False
+        if hasattr(self.llm_controller, "update_benchmark_progress"):
+            self.llm_controller.update_benchmark_progress(
+                completed_checkpoint_ids=sorted(completed),
+                current_target_checkpoint=current_target,
+            )
 
     def render_anchor_3d_plot(self):
         fig = plt.figure(figsize=(5.2, 4.2))
