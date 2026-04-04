@@ -295,8 +295,13 @@ class Statement:
             args = split_args(args)
             print_debug(f'split_args returned: {args}')
             for i in range(0, len(args)):
-                args[i] = args[i].strip().strip('\'"')
-                if args[i].startswith('_') or args[i].startswith('-') or any(op in args[i] for op in '+-*/'):
+                raw_arg = args[i].strip()
+                is_quoted_literal = (
+                    len(raw_arg) >= 2
+                    and ((raw_arg[0] == "'" and raw_arg[-1] == "'") or (raw_arg[0] == '"' and raw_arg[-1] == '"'))
+                )
+                args[i] = raw_arg.strip('\'"')
+                if (not is_quoted_literal) and (args[i].startswith('_') or args[i].startswith('-') or any(op in args[i] for op in '+-*/')):
                     args[i] = self.eval_expr(args[i]).value  # 注意這裡用 eval_expr，並取 .value
 
             if name == 'p':
@@ -637,8 +642,8 @@ class MiniSpecInterpreter:
                     self.timestamp_end_execution = time.time()
                     self.timestamp_start_execution = None
                     error_message = f"MiniSpec execution error at statement `{statement}`: {e}"
-                    print_t(f"[I] {error_message}")
-                    self.ret_queue.put(MiniSpecReturnValue(error_message, True))
+                    print_t(f"[EXECUTION_ERROR] {error_message}")
+                    self.ret_queue.put(MiniSpecReturnValue(error_message, False))
                     return
                 print_t(f'Queue statement done: {statement}')
                 if statement.ret:

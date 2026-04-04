@@ -7,7 +7,7 @@ Scene:
 - current_collision_probability=0.220
 Task: [A] Complete zone_A search.
 Rationale: Collision risk is below replan threshold (0.65), so checkpoint primitive is allowed. Visit all active checkpoints in zone_A and dwell 2.0s at each.
-Response: lo('initial plan: zone_A checkpoints A1->A2->A3->A4');gc('A1');d(2.0);gc('A2');d(2.0);gc('A3');d(2.0);gc('A4');d(2.0);
+Response: lo('initial plan for zone_A checkpoints: A1, A2, A3, A4');gc('A1');d(2.0);gc('A2');d(2.0);gc('A3');d(2.0);gc('A4');d(2.0);
 
 Example 2 (replan: high collision probability, resume unfinished checkpoints)
 Scene:

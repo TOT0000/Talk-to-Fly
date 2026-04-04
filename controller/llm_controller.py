@@ -489,6 +489,8 @@ class LLMController():
         interpreter.execute(minispec)
         self.execution_history = interpreter.execution_history
         ret_val = interpreter.ret_queue.get()
+        if hasattr(ret_val, "value") and isinstance(ret_val.value, str) and ret_val.value.startswith("MiniSpec execution error"):
+            raise RuntimeError(ret_val.value)
         return ret_val
 
     def _should_abort_current_execution_for_replan(self) -> Tuple[bool, str]:
