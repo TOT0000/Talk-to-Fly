@@ -436,6 +436,7 @@ class LLMController():
             progress = dict(snapshot.get("benchmark_progress") or {})
             completed_set = set(str(v).upper() for v in list(progress.get("completed") or []))
             completion_state = checkpoint.id in completed_set
+            runtime_target = None if progress.get("current_target") is None else str(progress.get("current_target")).upper()
 
             dx_w = float(checkpoint.x) - float(control_pos[0])
             dy_w = float(checkpoint.y) - float(control_pos[1])
@@ -450,9 +451,10 @@ class LLMController():
             stop_condition = bool(in_radius_by_control or in_radius_by_true or completion_state)
 
             body_forward = math.cos(yaw) * dx_w + math.sin(yaw) * dy_w
-            body_right = math.sin(yaw) * dx_w - math.cos(yaw) * dy_w
+            body_right = -math.sin(yaw) * dx_w + math.cos(yaw) * dy_w
 
             chosen_action = "none"
+            dist_trend = "improving" if dist_control + 0.02 < best_dist else "flat_or_worse"
             if stop_condition:
                 reached = True
                 stop_reason = "completion_state" if completion_state else ("true_radius" if in_radius_by_true else "estimated_radius")
@@ -492,13 +494,18 @@ class LLMController():
                 "[GC_DEBUG] "
                 f"cp={checkpoint.id} "
                 f"target=({checkpoint.x:.2f},{checkpoint.y:.2f}) "
+                f"zone={checkpoint.zone_id} "
                 f"iter={idx + 1}/{max_iterations} "
                 f"true_pos={true_pos} est_raw={est_raw} est_bias={est_bias} "
+                f"control_pos={control_pos} "
                 f"dx={dx_w:.3f} dy={dy_w:.3f} "
                 f"dist_control={dist_control:.3f} dist_true={'n/a' if dist_true is None else f'{dist_true:.3f}'} "
                 f"yaw={yaw:.3f} "
+                f"body_forward={body_forward:.3f} body_right={body_right:.3f} "
+                f"runtime_target={runtime_target} "
                 f"action={chosen_action} "
                 f"stop_condition={stop_condition} completion_state={completion_state} "
+                f"dist_trend={dist_trend} "
                 f"reason={stop_reason if stop_condition else 'continue'}"
             )
 
