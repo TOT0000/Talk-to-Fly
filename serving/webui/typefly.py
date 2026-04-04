@@ -633,6 +633,10 @@ class TypeFly:
 
     def update_and_step(self, counter, show_error_ellipse=False, show_raw_estimate=False):
         snapshot = self.llm_controller.get_live_ui_snapshot()
+        safety_context = snapshot.get("safety_context") if snapshot else None
+        ui_pc = None if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
+        if hasattr(self.llm_controller, "update_ui_collision_probability"):
+            self.llm_controller.update_ui_collision_probability(ui_pc)
         self._sync_objective_state(snapshot)
         self._append_history(snapshot)
         self._update_checkpoint_progress(snapshot)

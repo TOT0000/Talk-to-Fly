@@ -162,6 +162,8 @@ class LLMController():
             "completed": [],
             "current_target": None,
         }
+        self.latest_ui_collision_probability = None
+        self.latest_ui_collision_timestamp = 0.0
         self.planner_mode = str(os.getenv("TYPEFLY_PLANNER_MODE", "llm_baseline")).strip().lower()
         if self.planner_mode not in {"llm_baseline", "rule_baseline"}:
             self.planner_mode = "llm_baseline"
@@ -390,6 +392,7 @@ class LLMController():
         return None, False
     
     def skill_re_plan(self) -> Tuple[None, bool]:
+        print_t("[REPLAN_DEBUG] source=rp_skill")
         return None, True
 
     def skill_takeoff(self) -> Tuple[None, bool]:
@@ -465,6 +468,12 @@ class LLMController():
             "current_target": (None if current_target_checkpoint is None else str(current_target_checkpoint).upper()),
         }
 
+    def update_ui_collision_probability(self, current_collision_probability: Optional[float]):
+        if current_collision_probability is None:
+            return
+        self.latest_ui_collision_probability = float(current_collision_probability)
+        self.latest_ui_collision_timestamp = time.time()
+
     def stop_controller(self):
         self.controller_active = False
 
@@ -490,8 +499,20 @@ class LLMController():
         if safety_context is None:
             return False, ""
         current_p = float(getattr(safety_context, "current_collision_probability", 0.0))
-        if current_p >= COLLISION_PROBABILITY_REPLAN_THRESHOLD:
+        should_abort = bool(current_p >= COLLISION_PROBABILITY_REPLAN_THRESHOLD)
+        if should_abort:
             dominant = str(getattr(safety_context, "dominant_threat_id", "unknown"))
+            ui_p = self.latest_ui_collision_probability
+            ui_p_text = "n/a" if ui_p is None else f"{float(ui_p):.6f}"
+            print_t(
+                "[REPLAN_DEBUG] "
+                f"source=collision_threshold "
+                f"ui_pc={ui_p_text} "
+                f"callback_pc={current_p:.6f} "
+                f"threshold={COLLISION_PROBABILITY_REPLAN_THRESHOLD:.6f} "
+                f"should_abort={should_abort} "
+                f"dominant={dominant}"
+            )
             return True, f"current_collision_probability={current_p:.6f}>=0.65, dominant={dominant}"
         return False, ""
 
@@ -708,6 +729,13 @@ class LLMController():
                 if isinstance(ret_val, tuple) and len(ret_val) >= 2:
                     execution_success = bool(ret_val[0] is not False)
                 if hasattr(ret_val, "replan") and bool(ret_val.replan):
+                    replan_source = "interpreter_return_flag"
+                    replan_value = str(getattr(ret_val, "value", "") or "")
+                    if "interrupted for replan" in replan_value:
+                        replan_source = "collision_threshold_callback"
+                    elif "High-level skill" in replan_value:
+                        replan_source = "high_level_skill_failure"
+                    print_t(f"[REPLAN_DEBUG] source={replan_source} ret_val={replan_value}")
                     replan_attempts += 1
                     self.task_run_logger.update_execution_info(
                         execution_success=False,
