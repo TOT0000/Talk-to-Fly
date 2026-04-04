@@ -416,43 +416,101 @@ class LLMController():
             raise ValueError(f"Unknown checkpoint_id `{checkpoint_id}`")
 
         max_step_m = 1.0
-        min_axis_step_m = 0.15
-        max_iterations = 8
+        min_axis_step_m = 0.12
+        max_iterations = 12
+        no_progress_limit = 3
 
         reached = False
         final_dist = None
-        for _ in range(max_iterations):
-            context = self._get_planner_position_context()
-            drone_x, drone_y, _ = context["drone_pos"]
-            dx = float(checkpoint.x) - float(drone_x)
-            dy = float(checkpoint.y) - float(drone_y)
-            dist = math.hypot(dx, dy)
-            final_dist = dist
+        best_dist = float("inf")
+        no_progress_count = 0
+        stop_reason = "max_iterations"
 
-            if dist <= float(checkpoint.radius_m):
+        for idx in range(max_iterations):
+            snapshot = self.get_live_ui_snapshot()
+            true_pos = snapshot.get("drone_gt")
+            est_raw = snapshot.get("drone_est")
+            est_bias = snapshot.get("drone_est_bias_corrected") or est_raw
+            control_pos = est_bias or true_pos or (0.0, 0.0, 0.0)
+            yaw = float(snapshot.get("drone_yaw_rad") or 0.0)
+            progress = dict(snapshot.get("benchmark_progress") or {})
+            completed_set = set(str(v).upper() for v in list(progress.get("completed") or []))
+            completion_state = checkpoint.id in completed_set
+
+            dx_w = float(checkpoint.x) - float(control_pos[0])
+            dy_w = float(checkpoint.y) - float(control_pos[1])
+            dist_control = math.hypot(dx_w, dy_w)
+            dist_true = None
+            if true_pos is not None:
+                dist_true = math.hypot(float(checkpoint.x) - float(true_pos[0]), float(checkpoint.y) - float(true_pos[1]))
+            final_dist = dist_control
+
+            in_radius_by_control = dist_control <= float(checkpoint.radius_m)
+            in_radius_by_true = (dist_true is not None and dist_true <= float(checkpoint.radius_m))
+            stop_condition = bool(in_radius_by_control or in_radius_by_true or completion_state)
+
+            body_forward = math.cos(yaw) * dx_w + math.sin(yaw) * dy_w
+            body_right = math.sin(yaw) * dx_w - math.cos(yaw) * dy_w
+
+            chosen_action = "none"
+            if stop_condition:
                 reached = True
+                stop_reason = "completion_state" if completion_state else ("true_radius" if in_radius_by_true else "estimated_radius")
+            else:
+                if dist_control + 0.02 < best_dist:
+                    best_dist = dist_control
+                    no_progress_count = 0
+                else:
+                    no_progress_count += 1
+                if no_progress_count >= no_progress_limit:
+                    stop_reason = "no_progress_fail_safe"
+                    break
+
+                local_step_cap = 0.25 if dist_control < 0.35 else max_step_m
+                if abs(body_forward) < min_axis_step_m and abs(body_right) < min_axis_step_m:
+                    stop_reason = "tiny_residual_vector"
+                    break
+
+                if abs(body_forward) >= abs(body_right):
+                    step = min(local_step_cap, abs(body_forward))
+                    if body_forward > 0:
+                        self.drone.move_forward(step)
+                        chosen_action = f"move_forward({step:.2f})"
+                    else:
+                        self.drone.move_backward(step)
+                        chosen_action = f"move_backward({step:.2f})"
+                else:
+                    step = min(local_step_cap, abs(body_right))
+                    if body_right > 0:
+                        self.drone.move_right(step)
+                        chosen_action = f"move_right({step:.2f})"
+                    else:
+                        self.drone.move_left(step)
+                        chosen_action = f"move_left({step:.2f})"
+
+            print_t(
+                "[GC_DEBUG] "
+                f"cp={checkpoint.id} "
+                f"target=({checkpoint.x:.2f},{checkpoint.y:.2f}) "
+                f"iter={idx + 1}/{max_iterations} "
+                f"true_pos={true_pos} est_raw={est_raw} est_bias={est_bias} "
+                f"dx={dx_w:.3f} dy={dy_w:.3f} "
+                f"dist_control={dist_control:.3f} dist_true={'n/a' if dist_true is None else f'{dist_true:.3f}'} "
+                f"yaw={yaw:.3f} "
+                f"action={chosen_action} "
+                f"stop_condition={stop_condition} completion_state={completion_state} "
+                f"reason={stop_reason if stop_condition else 'continue'}"
+            )
+
+            if stop_condition:
                 break
-
-            move_x = max(-max_step_m, min(max_step_m, dx))
-            move_y = max(-max_step_m, min(max_step_m, dy))
-
-            if abs(move_x) >= min_axis_step_m:
-                if move_x > 0:
-                    self.drone.move_right(abs(move_x))
-                else:
-                    self.drone.move_left(abs(move_x))
-
-            if abs(move_y) >= min_axis_step_m:
-                if move_y > 0:
-                    self.drone.move_forward(abs(move_y))
-                else:
-                    self.drone.move_backward(abs(move_y))
 
         status = "reached" if reached else "approached"
         summary = (
             f"go_checkpoint({checkpoint.id}) {status}: "
             f"zone={checkpoint.zone_id}, target=({checkpoint.x:.2f},{checkpoint.y:.2f}), "
-            f"remaining_dist={0.0 if final_dist is None else float(final_dist):.2f}m"
+            f"remaining_dist={0.0 if final_dist is None else float(final_dist):.2f}m, "
+            f"stop_reason={stop_reason}"
         )
         print_t(f"[C] {summary}")
         return summary, False
