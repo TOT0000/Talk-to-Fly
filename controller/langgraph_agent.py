@@ -253,21 +253,31 @@ class LangGraphOrchestrationRunner:
         collision_risk = float(state.get("current_collision_risk", 0.0))
         no_progress_steps = int(state.get("no_progress_steps", 0))
         repeated_action_count = int(state.get("repeated_action_count", 0))
-        plan = self.controller.planner.plan_langgraph_step_action(
-            task_description=str(state.get("user_task", "")),
-            current_subgoal=str(subgoal),
-            remaining_checkpoints=remaining,
-            current_collision_risk=collision_risk,
-            historical_max_collision_risk=float(state.get("historical_max_collision_risk", 0.0)),
-            per_worker_collision_risks=dict(state.get("per_worker_collision_risks", {})),
-            dominant_risky_worker=state.get("dominant_risky_worker"),
-            worker_states_summary=list(state.get("worker_states", [])),
-            last_action=str(state.get("last_action_text", "")),
-            last_result=str((state.get("last_action_result") or {}).get("message", "")),
-            stall_count=no_progress_steps,
-            repeated_action_count=repeated_action_count,
-            recent_history=list(state.get("execution_history", [])),
-        )
+        last_action = str(state.get("last_action_text", "")).strip()
+        if (
+            subgoal_phase == "APPROACH_SUBGOAL"
+            and subgoal is not None
+            and collision_risk < 0.35
+            and last_action
+            and not last_action.startswith("go_checkpoint(")
+        ):
+            plan = f'go_checkpoint("{str(subgoal).upper()}");'
+        else:
+            plan = self.controller.planner.plan_langgraph_step_action(
+                task_description=str(state.get("user_task", "")),
+                current_subgoal=str(subgoal),
+                remaining_checkpoints=remaining,
+                current_collision_risk=collision_risk,
+                historical_max_collision_risk=float(state.get("historical_max_collision_risk", 0.0)),
+                per_worker_collision_risks=dict(state.get("per_worker_collision_risks", {})),
+                dominant_risky_worker=state.get("dominant_risky_worker"),
+                worker_states_summary=list(state.get("worker_states", [])),
+                last_action=last_action,
+                last_result=str((state.get("last_action_result") or {}).get("message", "")),
+                stall_count=no_progress_steps,
+                repeated_action_count=repeated_action_count,
+                recent_history=list(state.get("execution_history", [])),
+            )
         if not plan:
             plan = f'go_checkpoint("{subgoal}");'
         action_target = self._extract_checkpoint_target(plan)
@@ -295,7 +305,7 @@ class LangGraphOrchestrationRunner:
                 "last_error": "empty_plan",
             }
         try:
-            ret = self.controller.execute_minispec(plan, silent=True)
+            ret = self.controller.execute_minispec(plan, silent=True, allow_auto_interrupt=False)
             ok = True
             recoverable = False
             if isinstance(ret, tuple) and len(ret) >= 2:
@@ -392,7 +402,9 @@ class LangGraphOrchestrationRunner:
         elif phase == "COMPLETE_SUBGOAL":
             phase = "VERIFY_COMPLETE"
         elif phase == "VERIFY_COMPLETE" and subgoal is not None and str(subgoal).upper() not in completed:
-            phase = "COMPLETE_SUBGOAL"
+            phase = "APPROACH_SUBGOAL"
+            reached_flag = False
+            self._emit_agent_message(f"[RESULT] verify incomplete for {str(subgoal).upper()}, re-approach subgoal.")
         progress_signature = f"{subgoal}:{','.join(remaining)}"
         prev_signature = str(state.get("last_progress_signature", ""))
         if len(history) >= 2 and str(history[-1].get("plan", "")) == str(history[-2].get("plan", "")):
