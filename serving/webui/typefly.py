@@ -158,25 +158,25 @@ class TypeFly:
 
             with gr.Row():
                 with gr.Column(scale=1, min_width=260, elem_classes="scenario-panel"):
-                    self.scenario_selector = gr.Dropdown(
-                        choices=list(SCENARIOS.keys()),
-                        value=self.active_scenario,
-                        label="Scenario Mode",
-                    )
-                    self.scenario_apply_btn = gr.Button("Apply Scenario")
+                    baseline_scene_choices = [sid for sid in ("SCENE_BENCHMARK_DEMO", "SCENE_MANUAL_WORKER_CONTROL") if sid in BASELINE_SCENES]
                     self.baseline_scene_selector = gr.Dropdown(
-                        choices=list(BASELINE_SCENES.keys()),
+                        choices=baseline_scene_choices,
                         value=normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_BENCHMARK_DEMO")),
                         label="Baseline Scene",
                     )
                     self.baseline_scene_apply_btn = gr.Button("Apply Baseline Scene")
                 with gr.Column(scale=1, min_width=320, elem_classes="user-move-panel"):
+                    self.worker_selector = gr.Dropdown(
+                        choices=["worker_1", "worker_2", "worker_3"],
+                        value="worker_1",
+                        label="Controlled Worker",
+                    )
                     self.user_move_step = gr.Slider(
                         minimum=0.1,
                         maximum=1.0,
                         value=0.5,
                         step=0.1,
-                        label="User Move Step (m)",
+                        label="Worker Move Step (m)",
                         elem_classes="user-move-step",
                     )
                     self.user_turn_step = gr.Slider(
@@ -184,7 +184,7 @@ class TypeFly:
                         maximum=90,
                         value=15,
                         step=5,
-                        label="User Turn Step (deg)",
+                        label="Worker Turn Step (deg)",
                         elem_classes="user-move-step",
                     )
                     with gr.Row(elem_classes="user-move-row"):
@@ -204,44 +204,44 @@ class TypeFly:
                         self.user_turn_cw_btn = gr.Button("Turn Clockwise", elem_classes="user-move-btn")
             self.scenario_status = gr.Markdown(value="")
 
-            self.scenario_apply_btn.click(
-                fn=self.apply_scenario,
-                inputs=[self.scenario_selector],
-                outputs=[self.scenario_status],
-            )
             self.baseline_scene_apply_btn.click(
                 fn=self.apply_baseline_scene,
                 inputs=[self.baseline_scene_selector],
                 outputs=[self.scenario_status],
             )
+            self.worker_selector.change(
+                fn=self.select_controlled_worker,
+                inputs=[self.worker_selector],
+                outputs=[self.scenario_status],
+            )
 
             self.user_move_forward_btn.click(
-                fn=self.move_user_forward,
+                fn=self.move_worker_forward,
                 inputs=[self.user_move_step],
                 outputs=[self.scenario_status],
             )
             self.user_move_backward_btn.click(
-                fn=self.move_user_backward,
+                fn=self.move_worker_backward,
                 inputs=[self.user_move_step],
                 outputs=[self.scenario_status],
             )
             self.user_move_left_btn.click(
-                fn=self.move_user_left,
+                fn=self.move_worker_left,
                 inputs=[self.user_move_step],
                 outputs=[self.scenario_status],
             )
             self.user_move_right_btn.click(
-                fn=self.move_user_right,
+                fn=self.move_worker_right,
                 inputs=[self.user_move_step],
                 outputs=[self.scenario_status],
             )
             self.user_turn_cw_btn.click(
-                fn=self.turn_user_cw,
+                fn=self.turn_worker_cw,
                 inputs=[self.user_turn_step],
                 outputs=[self.scenario_status],
             )
             self.user_turn_ccw_btn.click(
-                fn=self.turn_user_ccw,
+                fn=self.turn_worker_ccw,
                 inputs=[self.user_turn_step],
                 outputs=[self.scenario_status],
             )
@@ -498,6 +498,43 @@ class TypeFly:
     def turn_user_ccw(self, deg_step: float):
         yaw = self.llm_controller.turn_user_heading(float(deg_step))
         return f"User heading turned CCW by {deg_step:.1f}°. new_yaw={math.degrees(yaw):.1f}°"
+
+    def select_controlled_worker(self, worker_id: str):
+        selected = self.llm_controller.set_manual_worker_selection(worker_id)
+        return f"Controlled worker set to {selected}"
+
+    def _move_worker(self, local_forward: float, local_right: float, step_m: float):
+        state = self.llm_controller.move_selected_worker_relative(local_forward=local_forward, local_right=local_right, step_m=step_m)
+        if state is None:
+            return "Manual worker control is only available in SCENE_MANUAL_WORKER_CONTROL."
+        return (
+            f"{state['worker_id']} moved to ({state['x']:.2f}, {state['y']:.2f}), "
+            f"heading={state['yaw_deg']:.1f}°"
+        )
+
+    def move_worker_forward(self, step_m: float):
+        return self._move_worker(local_forward=1.0, local_right=0.0, step_m=step_m)
+
+    def move_worker_backward(self, step_m: float):
+        return self._move_worker(local_forward=-1.0, local_right=0.0, step_m=step_m)
+
+    def move_worker_left(self, step_m: float):
+        return self._move_worker(local_forward=0.0, local_right=-1.0, step_m=step_m)
+
+    def move_worker_right(self, step_m: float):
+        return self._move_worker(local_forward=0.0, local_right=1.0, step_m=step_m)
+
+    def turn_worker_cw(self, deg_step: float):
+        state = self.llm_controller.turn_selected_worker(-float(deg_step))
+        if state is None:
+            return "Manual worker control is only available in SCENE_MANUAL_WORKER_CONTROL."
+        return f"{state['worker_id']} heading={state['yaw_deg']:.1f}°"
+
+    def turn_worker_ccw(self, deg_step: float):
+        state = self.llm_controller.turn_selected_worker(float(deg_step))
+        if state is None:
+            return "Manual worker control is only available in SCENE_MANUAL_WORKER_CONTROL."
+        return f"{state['worker_id']} heading={state['yaw_deg']:.1f}°"
 
     def process_message(self, message, history):
         print_t(f"[S] Receiving task description: {message}")
@@ -979,6 +1016,12 @@ class TypeFly:
             if est_xy is not None:
                 ax_xy.add_patch(Circle((est_xy[0], est_xy[1]), WORKER_RADIUS_M, fill=False, edgecolor="#CE93D8", linewidth=1.3, linestyle="--"))
                 ax_xy.text(est_xy[0] + 0.08, est_xy[1] + 0.08, str(wid), fontsize=8, color="#4A148C")
+                heading = float(worker.get("heading_yaw_rad", 0.0))
+                arrow_len = 0.45
+                wx, wy = float(est_xy[0]), float(est_xy[1])
+                wdx = arrow_len * float(math.cos(heading))
+                wdy = arrow_len * float(math.sin(heading))
+                ax_xy.arrow(wx, wy, wdx, wdy, head_width=0.12, head_length=0.14, color="#6A1B9A", linewidth=1.2, length_includes_head=True, zorder=4)
             if gt_xy is not None and est_xy is not None:
                 ax_xy.plot([gt_xy[0], est_xy[0]], [gt_xy[1], est_xy[1]], color="#8E24AA", linewidth=0.7, alpha=0.8)
             if show_raw_estimate and worker.get("est_xy_raw") is not None:

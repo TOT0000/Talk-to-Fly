@@ -32,6 +32,7 @@ from .task_run_logger import TaskRunLogger
 from .baseline_scenes import (
     BASELINE_SCENES,
     BaselineScene,
+    ObstacleEnvelopeState,
     build_all_scene_expectations,
     build_scene_expectations,
     compute_obstacle_envelope_states,
@@ -39,6 +40,7 @@ from .baseline_scenes import (
     get_task_point,
     normalize_baseline_scene_id,
 )
+from .safety_envelope import build_safety_envelope
 from .benchmark_layout import (
     BENCHMARK_CHECKPOINT_ORDER,
     BENCHMARK_CHECKPOINTS_BY_ID,
@@ -154,7 +156,7 @@ class LLMController():
         self._task_id_counter = 0
         self.latest_scenario_report = None
         self.initial_scenario_state = None
-        self.baseline_scene_id = normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_1_CLEAR_PATH"))
+        self.baseline_scene_id = normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_BENCHMARK_DEMO"))
         self.baseline_scene_state = None
         self.latest_baseline_decision = None
         self.execution_mode = "Waiting"
@@ -169,6 +171,8 @@ class LLMController():
         if self.planner_mode not in {"llm_baseline", "rule_baseline"}:
             self.planner_mode = "llm_baseline"
         self.user_heading_yaw_rad = 0.0
+        self.manual_worker_selection_id = "worker_1"
+        self.manual_worker_poses: dict[str, dict] = {}
 
         # PX4_SIM optional managed user-position publisher lifecycle
         self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
@@ -906,6 +910,7 @@ class LLMController():
             "captured_at": time.time(),
         }
         self.user_heading_yaw_rad = float(scene.user_initial_yaw_rad)
+        self._reset_manual_worker_poses_from_scene(scene)
         return self.baseline_scene_state
 
     def get_baseline_scene_state(self):
@@ -921,6 +926,63 @@ class LLMController():
     def turn_user_heading(self, delta_deg: float):
         self.user_heading_yaw_rad = float(self.user_heading_yaw_rad + math.radians(float(delta_deg)))
         return self.user_heading_yaw_rad
+
+    def set_manual_worker_selection(self, worker_id: str) -> str:
+        candidate = str(worker_id or "").strip()
+        if candidate not in {"worker_1", "worker_2", "worker_3"}:
+            candidate = "worker_1"
+        self.manual_worker_selection_id = candidate
+        return self.manual_worker_selection_id
+
+    def _reset_manual_worker_poses_from_scene(self, scene: BaselineScene):
+        self.manual_worker_poses = {}
+        for obstacle in scene.obstacles:
+            worker_id = str(obstacle.id)
+            if worker_id not in {"worker_1", "worker_2", "worker_3"}:
+                continue
+            self.manual_worker_poses[worker_id] = {
+                "x": float(obstacle.gt_x),
+                "y": float(obstacle.gt_y),
+                "z": 0.0,
+                "yaw_rad": 0.0,
+            }
+
+    def move_selected_worker_relative(self, local_forward: float, local_right: float, step_m: float):
+        if self.get_baseline_scene().id != "SCENE_MANUAL_WORKER_CONTROL":
+            return None
+        worker_id = str(self.manual_worker_selection_id or "worker_1")
+        pose = self.manual_worker_poses.get(worker_id)
+        if pose is None:
+            return None
+        step = max(0.0, float(step_m))
+        yaw = float(pose.get("yaw_rad", 0.0))
+        forward = float(local_forward) * step
+        right = float(local_right) * step
+        dx = math.cos(yaw) * forward - math.sin(yaw) * right
+        dy = math.sin(yaw) * forward + math.cos(yaw) * right
+        pose["x"] = float(pose["x"] + dx)
+        pose["y"] = float(pose["y"] + dy)
+        return {
+            "worker_id": worker_id,
+            "x": float(pose["x"]),
+            "y": float(pose["y"]),
+            "yaw_deg": float(math.degrees(pose["yaw_rad"])),
+        }
+
+    def turn_selected_worker(self, delta_deg: float):
+        if self.get_baseline_scene().id != "SCENE_MANUAL_WORKER_CONTROL":
+            return None
+        worker_id = str(self.manual_worker_selection_id or "worker_1")
+        pose = self.manual_worker_poses.get(worker_id)
+        if pose is None:
+            return None
+        pose["yaw_rad"] = float(pose.get("yaw_rad", 0.0) + math.radians(float(delta_deg)))
+        return {
+            "worker_id": worker_id,
+            "x": float(pose["x"]),
+            "y": float(pose["y"]),
+            "yaw_deg": float(math.degrees(pose["yaw_rad"])),
+        }
 
     def set_active_scenario(self, scenario_name: str):
         scenario = self.scenario_manager.select(scenario_name)
@@ -1017,7 +1079,46 @@ class LLMController():
 
     def _simulate_obstacle_returns(self, obstacle_states, now: float):
         _ = now
-        return list(obstacle_states or [])
+        states = list(obstacle_states or [])
+        if self.get_baseline_scene().id != "SCENE_MANUAL_WORKER_CONTROL":
+            return states
+        updated_states = []
+        for state in states:
+            worker_id = str(state.id)
+            pose = self.manual_worker_poses.get(worker_id)
+            if pose is None:
+                updated_states.append(state)
+                continue
+            packet = state.localization_packet.copy()
+            gt_x = float(pose["x"])
+            gt_y = float(pose["y"])
+            packet.gt_position_3d[0] = gt_x
+            packet.gt_position_3d[1] = gt_y
+            packet.estimated_position_3d[0] = float(gt_x + float(packet.b_xy[0]))
+            packet.estimated_position_3d[1] = float(gt_y + float(packet.b_xy[1]))
+            packet.localization_error_vector_3d[0] = float(packet.estimated_position_3d[0] - gt_x)
+            packet.localization_error_vector_3d[1] = float(packet.estimated_position_3d[1] - gt_y)
+            envelope = build_safety_envelope(packet)
+            updated_states.append(
+                replace(
+                    state,
+                    gt_xy=(gt_x, gt_y),
+                    est_xy=(float(packet.estimated_position_3d[0]), float(packet.estimated_position_3d[1])),
+                    matrix_xy=((float(packet.M_xy[0][0]), float(packet.M_xy[0][1])), (float(packet.M_xy[1][0]), float(packet.M_xy[1][1]))),
+                    localization_packet=packet,
+                    envelope=envelope,
+                )
+            )
+        return updated_states
+
+    def _build_collision_worker_packets_from_obstacles(self, obstacle_states):
+        obstacle_map = {str(obs.id): obs for obs in (obstacle_states or [])}
+        packets = []
+        for worker_id in COLLISION_RISK_WORKER_IDS:
+            obs = obstacle_map.get(worker_id)
+            if obs is not None:
+                packets.append((worker_id, obs.localization_packet))
+        return packets
 
     def _build_collision_worker_packets_from_obstacles(self, obstacle_states):
         obstacle_map = {str(obs.id): obs for obs in (obstacle_states or [])}
@@ -1265,6 +1366,7 @@ class LLMController():
                         float(obs.localization_packet.estimated_position_3d[0] - obs.localization_packet.b_xy[0]),
                         float(obs.localization_packet.estimated_position_3d[1] - obs.localization_packet.b_xy[1]),
                     ),
+                    "heading_yaw_rad": float(self.manual_worker_poses.get(str(obs.id), {}).get("yaw_rad", 0.0)),
                     "P_xy": np.asarray(obs.localization_packet.P_xy, dtype=float).copy(),
                 }
                 for obs in obstacle_states
