@@ -45,6 +45,77 @@ class LLMPlanner():
         self.low_level_skillset = low_level_skillset
         self.vision_skill = vision_skill
 
+    def _fmt_xyz(self, value) -> str:
+        if value is None:
+            return "(n/a)"
+        try:
+            x, y, z = value
+            return f"({float(x):.2f}, {float(y):.2f}, {float(z):.2f})"
+        except Exception:
+            return "(n/a)"
+
+    def _build_runtime_context_block(self, safety_context: Optional[SafetyContext]) -> str:
+        snapshot = {}
+        if self.controller is not None and hasattr(self.controller, "get_live_ui_snapshot"):
+            try:
+                snapshot = self.controller.get_live_ui_snapshot() or {}
+            except Exception:
+                snapshot = {}
+
+        drone_pos = snapshot.get("drone_est_bias_corrected") or snapshot.get("drone_est") or snapshot.get("drone_gt")
+        workers = list(snapshot.get("workers") or [])
+        workers_sorted = sorted(workers, key=lambda row: str(row.get("id", "")))
+        worker_lines = []
+        for idx in range(3):
+            label = f"worker_{idx + 1}"
+            if idx < len(workers_sorted):
+                row = workers_sorted[idx]
+                est_xy = row.get("est_xy_bias_corrected") or row.get("est_xy_raw")
+                if est_xy is None:
+                    worker_lines.append(f"- {label} bias-corrected estimated position: (n/a)")
+                else:
+                    worker_lines.append(f"- {label} bias-corrected estimated position: ({float(est_xy[0]):.2f}, {float(est_xy[1]):.2f}, 0.00)")
+            else:
+                worker_lines.append(f"- {label} bias-corrected estimated position: (n/a)")
+
+        current_collision_probability = 0.0 if safety_context is None else float(safety_context.current_collision_probability)
+        dominant_worker = "n/a"
+        if safety_context is not None:
+            dominant_worker = str(getattr(safety_context, "dominant_threat_id", "n/a") or "n/a")
+
+        objective = dict(snapshot.get("active_objective_set") or {})
+        active_zone_ids = [str(v) for v in objective.get("active_zone_ids", [])]
+        active_checkpoint_ids = [str(v) for v in objective.get("active_checkpoint_ids", [])]
+        checkpoint_map = {
+            str(row.get("id")): row
+            for row in (snapshot.get("benchmark_checkpoints") or [])
+            if row.get("id") is not None
+        }
+        checkpoint_lines = []
+        for cid in active_checkpoint_ids:
+            row = checkpoint_map.get(cid)
+            if row is None:
+                checkpoint_lines.append(f"- {cid}: (x=n/a, y=n/a)")
+            else:
+                checkpoint_lines.append(f"- {cid}: (x={float(row.get('x')):.2f}, y={float(row.get('y')):.2f})")
+        if not checkpoint_lines:
+            checkpoint_lines.append("- (n/a)")
+
+        return (
+            "UAV state:\n"
+            f"- UAV bias-corrected estimated position: {self._fmt_xyz(drone_pos)}\n"
+            "Workers state:\n"
+            + "\n".join(worker_lines)
+            + "\n"
+            f"- dominant risky worker: {dominant_worker}\n"
+            f"- current collision probability: {current_collision_probability:.6f}\n"
+            "Mission objective:\n"
+            f"- active zones: {active_zone_ids if active_zone_ids else ['(n/a)']}\n"
+            f"- active checkpoints: {active_checkpoint_ids if active_checkpoint_ids else ['(n/a)']}\n"
+            "Active checkpoint coordinates (x, y):\n"
+            + "\n".join(checkpoint_lines)
+        )
+
     def plan(self, task_description: str, scene_description: Optional[str] = None, location_info: Optional[str] = None, error_message: Optional[str] = None, execution_history: Optional[str] = None, safety_context: Optional[SafetyContext] = None):
     
         # by default, the task_description is an action
@@ -93,16 +164,7 @@ class LLMPlanner():
                 )
 
         full_scene = f"{scene_description}\n{location_info}".strip()
-        safety_context_block = (
-            safety_context.to_prompt_block()
-            if safety_context is not None
-            else (
-                "current_collision_probability: 0.000000\nhistorical_max_collision_probability: 0.000000\nsafety_score: 0.000\nreason_tags: ['safety_context_unavailable']\n"
-                "dominant_threat_type: user\ndominant_threat_id: user\ndominant_gap_m: 0.00\ndominant_uncertainty_scale_m: 1.00\n"
-                "drone_to_user_distance_xy: 0.00\nenvelope_gap_m: 0.00\nuncertainty_scale_m: 1.00\nenvelopes_overlap: False\n"
-                "TaskPoints:\n- (n/a)\nCandidateTargets:\n- (n/a)\nObstacles:\n- (n/a)\nPathSummaries:\n- (n/a)"
-            )
-        )
+        runtime_context_block = self._build_runtime_context_block(safety_context)
 
         prompt = self.prompt_plan.format(
             system_skill_description_low=self.low_level_skillset,
@@ -112,7 +174,7 @@ class LLMPlanner():
             scene_description=full_scene,
             task_description=task_description,
             execution_history=execution_history,
-            safety_context=safety_context_block,
+            runtime_context=runtime_context_block,
         )
         dump_prompt = str(os.getenv("TYPEFLY_DUMP_LLM_PROMPT", "1")).strip().lower() not in {"0", "false", "no"}
         if dump_prompt:
@@ -128,7 +190,7 @@ class LLMPlanner():
         print_debug(
             f"[P-PROMPT-PATHS] prompt_plan={self.prompt_plan_path} guides={self.guides_path} examples={self.plan_examples_path}"
         )
-        print_debug(f"[P-SAFETY-CONTEXT]\n{safety_context_block}")
+        print_debug(f"[P-RUNTIME-CONTEXT]\n{runtime_context_block}")
         print_debug(f"[P] Full prompt debug log: {chat_log_path}")
         return self.llm.request(prompt, self.model_name, stream=False)
     
