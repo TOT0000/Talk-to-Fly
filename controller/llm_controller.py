@@ -620,10 +620,10 @@ class LLMController():
             YoloClient.plot_results_oi(image, self.vision.object_list)
         return image
     
-    def execute_minispec(self, minispec: str, silent: bool = False):
+    def execute_minispec(self, minispec: str, silent: bool = False, allow_auto_interrupt: bool = True):
         interpreter = MiniSpecInterpreter(
             None if silent else self.message_queue,
-            should_abort=self._should_abort_current_execution_for_replan,
+            should_abort=(self._should_abort_current_execution_for_replan if allow_auto_interrupt else None),
             on_statement_executed=self._on_statement_executed_for_replan,
         )
         interpreter.execute(minispec)
