@@ -138,6 +138,7 @@ class LLMPlanner():
         execution_history,
         safety_context: Optional[SafetyContext],
         active_checkpoint_ids: list[str],
+        benchmark_progress: Optional[dict] = None,
     ) -> str:
         current_collision_probability = 0.0 if safety_context is None else float(safety_context.current_collision_probability)
         if current_collision_probability < 0.65:
@@ -145,9 +146,16 @@ class LLMPlanner():
         if previous_plan is None and execution_history is None:
             return ""
 
-        completed = self._extract_completed_checkpoints_from_history(execution_history)
+        progress = dict(benchmark_progress or {})
+        completed = [str(v).upper() for v in list(progress.get("completed") or [])]
+        if not completed:
+            completed = self._extract_completed_checkpoints_from_history(execution_history)
         remaining = [cid for cid in active_checkpoint_ids if cid not in completed]
-        current_target = "(n/a)" if not remaining else remaining[0]
+        current_target = progress.get("current_target")
+        if current_target is not None:
+            current_target = str(current_target).upper()
+        if not current_target:
+            current_target = "(n/a)" if not remaining else remaining[0]
         dominant_worker = "n/a"
         if safety_context is not None:
             dominant_worker = str(getattr(safety_context, "dominant_threat_id", "n/a") or "n/a")
@@ -225,12 +233,14 @@ class LLMPlanner():
                 snapshot = {}
         objective = dict(snapshot.get("active_objective_set") or {})
         active_checkpoint_ids = [str(v) for v in objective.get("active_checkpoint_ids", [])]
+        benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
         replan_history_block = self._build_replan_history_block(
             task_description=task_description,
             previous_plan=previous_plan,
             execution_history=execution_history,
             safety_context=safety_context,
             active_checkpoint_ids=active_checkpoint_ids,
+            benchmark_progress=benchmark_progress,
         )
 
         prompt = self.prompt_plan.format(

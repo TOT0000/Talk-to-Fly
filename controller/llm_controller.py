@@ -157,6 +157,10 @@ class LLMController():
         self.latest_baseline_decision = None
         self.execution_mode = "Waiting"
         self.active_objective_set = self._default_active_objective_set()
+        self.latest_benchmark_progress = {
+            "completed": [],
+            "current_target": None,
+        }
         self.planner_mode = str(os.getenv("TYPEFLY_PLANNER_MODE", "llm_baseline")).strip().lower()
         if self.planner_mode not in {"llm_baseline", "rule_baseline"}:
             self.planner_mode = "llm_baseline"
@@ -453,6 +457,13 @@ class LLMController():
         if self.message_queue is not None:
             self.message_queue.put(message)
 
+    def update_benchmark_progress(self, completed_checkpoint_ids, current_target_checkpoint):
+        completed = [str(v).upper() for v in list(completed_checkpoint_ids or [])]
+        self.latest_benchmark_progress = {
+            "completed": sorted(set(completed)),
+            "current_target": (None if current_target_checkpoint is None else str(current_target_checkpoint).upper()),
+        }
+
     def stop_controller(self):
         self.controller_active = False
 
@@ -600,6 +611,8 @@ class LLMController():
         ret_val = None
         monitor_stop = threading.Event()
         monitor_thread = None
+        replan_attempts = 0
+        max_replan_attempts = 3
         def _run_monitor():
             while not monitor_stop.is_set():
                 try:
@@ -680,6 +693,18 @@ class LLMController():
                 task_completed = True
                 if isinstance(ret_val, tuple) and len(ret_val) >= 2:
                     execution_success = bool(ret_val[0] is not False)
+                if hasattr(ret_val, "replan") and bool(ret_val.replan):
+                    replan_attempts += 1
+                    self.task_run_logger.update_execution_info(
+                        execution_success=False,
+                        failure_reason="replan_requested",
+                        task_completed=False,
+                    )
+                    if replan_attempts > max_replan_attempts:
+                        raise RuntimeError(f"Exceeded max replan attempts ({max_replan_attempts})")
+                    self.append_message(f"[LOG] Replan requested, attempt={replan_attempts}")
+                    self.execution_mode = "Planning"
+                    continue
                 self.task_run_logger.update_execution_info(
                     execution_success=execution_success,
                     task_completed=task_completed,
@@ -1109,6 +1134,7 @@ class LLMController():
             "mode_name": self.get_active_scenario_name(),
             "execution_mode": self.execution_mode,
             "active_objective_set": dict(self.active_objective_set),
+            "benchmark_progress": dict(self.latest_benchmark_progress),
             "checkpoint_order": list(BENCHMARK_CHECKPOINT_ORDER),
             "benchmark_checkpoints": [
                 {"id": cp.id, "zone_id": cp.zone_id, "x": float(cp.x), "y": float(cp.y), "radius_m": float(cp.radius_m)}
