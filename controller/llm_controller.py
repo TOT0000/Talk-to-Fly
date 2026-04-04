@@ -638,6 +638,7 @@ class LLMController():
                     final_plan_source = "baseline_rule"
                     baseline_shortcut_triggered = True
                 else:
+                    previous_plan = self.current_plan
                     self.execution_mode = "Planning"
                     self.current_plan = self.planner.plan(
                         task_description=task_description,
@@ -645,6 +646,7 @@ class LLMController():
                         location_info=location_info,
                         execution_history=self.execution_history,
                         safety_context=safety_context,
+                        previous_plan=previous_plan,
                     )
                     llm_called = True
                     final_plan_source = "llm"

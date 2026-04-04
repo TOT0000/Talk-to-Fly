@@ -1,4 +1,4 @@
-import os, ast
+import os, ast, re
 from typing import Optional
 
 from .safety_context import SafetyContext
@@ -116,7 +116,59 @@ class LLMPlanner():
             + "\n".join(checkpoint_lines)
         )
 
-    def plan(self, task_description: str, scene_description: Optional[str] = None, location_info: Optional[str] = None, error_message: Optional[str] = None, execution_history: Optional[str] = None, safety_context: Optional[SafetyContext] = None):
+    def _extract_completed_checkpoints_from_history(self, execution_history) -> list[str]:
+        if execution_history is None:
+            return []
+        if isinstance(execution_history, list):
+            history_text = ";".join(str(v) for v in execution_history)
+        else:
+            history_text = str(execution_history)
+        found = re.findall(r"(?:gc|go_checkpoint)\(\s*['\"]?\s*([A-Za-z]\d+)\s*['\"]?\s*\)", history_text)
+        ordered = []
+        for cid in found:
+            norm = str(cid).upper()
+            if norm not in ordered:
+                ordered.append(norm)
+        return ordered
+
+    def _build_replan_history_block(
+        self,
+        task_description: str,
+        previous_plan: Optional[str],
+        execution_history,
+        safety_context: Optional[SafetyContext],
+        active_checkpoint_ids: list[str],
+    ) -> str:
+        current_collision_probability = 0.0 if safety_context is None else float(safety_context.current_collision_probability)
+        if current_collision_probability < 0.65:
+            return ""
+        if previous_plan is None and execution_history is None:
+            return ""
+
+        completed = self._extract_completed_checkpoints_from_history(execution_history)
+        remaining = [cid for cid in active_checkpoint_ids if cid not in completed]
+        current_target = "(n/a)" if not remaining else remaining[0]
+        dominant_worker = "n/a"
+        if safety_context is not None:
+            dominant_worker = str(getattr(safety_context, "dominant_threat_id", "n/a") or "n/a")
+
+        previous_plan_text = str(previous_plan or "").strip()
+        if not previous_plan_text:
+            previous_plan_text = "(n/a)"
+
+        return (
+            "Replan runtime history (this call is replan, not a fresh task):\n"
+            f"- original user task: {task_description}\n"
+            f"- previous plan: {previous_plan_text}\n"
+            f"- completed checkpoints: {completed if completed else ['(none_detected)']}\n"
+            f"- remaining checkpoints: {remaining if remaining else ['(none)']}\n"
+            f"- current target checkpoint: {current_target}\n"
+            "- replan trigger reason:\n"
+            f"  - current collision probability >= 0.65 (current={current_collision_probability:.6f})\n"
+            f"  - dominant risky worker = {dominant_worker}"
+        )
+
+    def plan(self, task_description: str, scene_description: Optional[str] = None, location_info: Optional[str] = None, error_message: Optional[str] = None, execution_history: Optional[str] = None, safety_context: Optional[SafetyContext] = None, previous_plan: Optional[str] = None):
     
         # by default, the task_description is an action
         if not task_description.startswith("["):
@@ -165,6 +217,21 @@ class LLMPlanner():
 
         full_scene = f"{scene_description}\n{location_info}".strip()
         runtime_context_block = self._build_runtime_context_block(safety_context)
+        snapshot = {}
+        if self.controller is not None and hasattr(self.controller, "get_live_ui_snapshot"):
+            try:
+                snapshot = self.controller.get_live_ui_snapshot() or {}
+            except Exception:
+                snapshot = {}
+        objective = dict(snapshot.get("active_objective_set") or {})
+        active_checkpoint_ids = [str(v) for v in objective.get("active_checkpoint_ids", [])]
+        replan_history_block = self._build_replan_history_block(
+            task_description=task_description,
+            previous_plan=previous_plan,
+            execution_history=execution_history,
+            safety_context=safety_context,
+            active_checkpoint_ids=active_checkpoint_ids,
+        )
 
         prompt = self.prompt_plan.format(
             system_skill_description_low=self.low_level_skillset,
@@ -175,6 +242,7 @@ class LLMPlanner():
             task_description=task_description,
             execution_history=execution_history,
             runtime_context=runtime_context_block,
+            replan_history_block=replan_history_block,
         )
         dump_prompt = str(os.getenv("TYPEFLY_DUMP_LLM_PROMPT", "1")).strip().lower() not in {"0", "false", "no"}
         if dump_prompt:
@@ -191,6 +259,8 @@ class LLMPlanner():
             f"[P-PROMPT-PATHS] prompt_plan={self.prompt_plan_path} guides={self.guides_path} examples={self.plan_examples_path}"
         )
         print_debug(f"[P-RUNTIME-CONTEXT]\n{runtime_context_block}")
+        if replan_history_block:
+            print_debug(f"[P-REPLAN-HISTORY]\n{replan_history_block}")
         print_debug(f"[P] Full prompt debug log: {chat_log_path}")
         return self.llm.request(prompt, self.model_name, stream=False)
     

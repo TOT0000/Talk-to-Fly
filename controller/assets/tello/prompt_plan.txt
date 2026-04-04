@@ -36,9 +36,11 @@ Planning contract:
 - For checkpoint tasks in normal risk (`current_collision_probability < 0.65`), `gc(...)` is allowed as the primary primitive.
 - Replan condition: `current_collision_probability >= 0.65`.
 - Under replan condition:
+  - this is continuation, not a fresh task from zero
+  - continue unfinished checkpoints; do not redo completed checkpoints
   - first apply conservative low-level avoidance (e.g., `ml/mr/mf/mb/tc/tu/d`)
+  - if needed, briefly pause or increase distance from the dominant risky worker
   - then continue unfinished checkpoints using `gc(...)`
-  - do not repeat already completed checkpoints
   - do not start replan plans with immediate `gc(...)` as first action
 
 Guides:
@@ -55,5 +57,8 @@ Execution history:
 
 Runtime mission context:
 {runtime_context}
+
+Replan runtime history (only present for replan calls):
+{replan_history_block}
 
 response:
