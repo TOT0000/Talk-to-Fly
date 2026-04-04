@@ -93,6 +93,8 @@ class TypeFly:
         self.use_llama3 = False
         self.robot_type = controller_robot_type
         self.selected_framework_mode = "typefly_baseline"
+        self.selected_worker_move_step = 0.5
+        self.selected_worker_turn_step = 15.0
 
         # 狀態資料
         self.anchor_count = 0
@@ -225,35 +227,45 @@ class TypeFly:
                 inputs=[self.worker_selector],
                 outputs=[self.scenario_status],
             )
+            self.user_move_step.change(
+                fn=self.set_worker_move_step,
+                inputs=[self.user_move_step],
+                outputs=[],
+            )
+            self.user_turn_step.change(
+                fn=self.set_worker_turn_step,
+                inputs=[self.user_turn_step],
+                outputs=[],
+            )
 
             self.user_move_forward_btn.click(
                 fn=self.move_worker_forward,
-                inputs=[self.user_move_step],
+                inputs=[],
                 outputs=[self.scenario_status],
             )
             self.user_move_backward_btn.click(
                 fn=self.move_worker_backward,
-                inputs=[self.user_move_step],
+                inputs=[],
                 outputs=[self.scenario_status],
             )
             self.user_move_left_btn.click(
                 fn=self.move_worker_left,
-                inputs=[self.user_move_step],
+                inputs=[],
                 outputs=[self.scenario_status],
             )
             self.user_move_right_btn.click(
                 fn=self.move_worker_right,
-                inputs=[self.user_move_step],
+                inputs=[],
                 outputs=[self.scenario_status],
             )
             self.user_turn_cw_btn.click(
                 fn=self.turn_worker_cw,
-                inputs=[self.user_turn_step],
+                inputs=[],
                 outputs=[self.scenario_status],
             )
             self.user_turn_ccw_btn.click(
                 fn=self.turn_worker_ccw,
-                inputs=[self.user_turn_step],
+                inputs=[],
                 outputs=[self.scenario_status],
             )
 
@@ -521,8 +533,15 @@ class TypeFly:
         selected = self.llm_controller.set_manual_worker_selection(worker_id)
         return f"Controlled worker set to {selected}"
 
-    def _move_worker(self, local_forward: float, local_right: float, step_m: float):
-        state = self.llm_controller.move_selected_worker_relative(local_forward=local_forward, local_right=local_right, step_m=step_m)
+    def set_worker_move_step(self, step_m: float):
+        self.selected_worker_move_step = float(step_m)
+
+    def set_worker_turn_step(self, deg_step: float):
+        self.selected_worker_turn_step = float(deg_step)
+
+    def _move_worker(self, local_forward: float, local_right: float, step_m: float | None = None):
+        step = float(self.selected_worker_move_step if step_m is None else step_m)
+        state = self.llm_controller.move_selected_worker_relative(local_forward=local_forward, local_right=local_right, step_m=step)
         if state is None:
             return "Manual worker control is only available in SCENE_MANUAL_WORKER_CONTROL."
         return (
@@ -530,26 +549,28 @@ class TypeFly:
             f"heading={state['yaw_deg']:.1f}°"
         )
 
-    def move_worker_forward(self, step_m: float):
+    def move_worker_forward(self, step_m: float | None = None):
         return self._move_worker(local_forward=1.0, local_right=0.0, step_m=step_m)
 
-    def move_worker_backward(self, step_m: float):
+    def move_worker_backward(self, step_m: float | None = None):
         return self._move_worker(local_forward=-1.0, local_right=0.0, step_m=step_m)
 
-    def move_worker_left(self, step_m: float):
+    def move_worker_left(self, step_m: float | None = None):
         return self._move_worker(local_forward=0.0, local_right=-1.0, step_m=step_m)
 
-    def move_worker_right(self, step_m: float):
+    def move_worker_right(self, step_m: float | None = None):
         return self._move_worker(local_forward=0.0, local_right=1.0, step_m=step_m)
 
-    def turn_worker_cw(self, deg_step: float):
-        state = self.llm_controller.turn_selected_worker(-float(deg_step))
+    def turn_worker_cw(self, deg_step: float | None = None):
+        turn_step = float(self.selected_worker_turn_step if deg_step is None else deg_step)
+        state = self.llm_controller.turn_selected_worker(-turn_step)
         if state is None:
             return "Manual worker control is only available in SCENE_MANUAL_WORKER_CONTROL."
         return f"{state['worker_id']} heading={state['yaw_deg']:.1f}°"
 
-    def turn_worker_ccw(self, deg_step: float):
-        state = self.llm_controller.turn_selected_worker(float(deg_step))
+    def turn_worker_ccw(self, deg_step: float | None = None):
+        turn_step = float(self.selected_worker_turn_step if deg_step is None else deg_step)
+        state = self.llm_controller.turn_selected_worker(turn_step)
         if state is None:
             return "Manual worker control is only available in SCENE_MANUAL_WORKER_CONTROL."
         return f"{state['worker_id']} heading={state['yaw_deg']:.1f}°"
