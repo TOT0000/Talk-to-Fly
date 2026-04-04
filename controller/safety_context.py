@@ -28,50 +28,7 @@ class SafetyContext:
     collision_debug_info: Optional[Dict[str, Any]] = None
 
     def to_prompt_block(self) -> str:
-        task_points = self.task_points_summary or []
-        obstacles = self.obstacles_summary or []
-        candidate_targets = self.candidate_targets_summary or []
-        candidate_paths = self.candidate_path_summaries or []
         per_worker_probs = self.per_worker_collision_probabilities or []
-        task_points_block = (
-            "\n".join(
-                f"- {row.get('id')}: x={float(row.get('x')):.2f}, y={float(row.get('y')):.2f}, z={float(row.get('z')):.2f}"
-                for row in task_points
-            )
-            if task_points
-            else "- (n/a)"
-        )
-        obstacle_block = (
-            "\n".join(
-                (
-                    f"- {row.get('id')}: est=({float(row.get('est_x')):.2f},{float(row.get('est_y')):.2f}), "
-                    f"env=major:{float(row.get('major_axis_m')):.2f}/minor:{float(row.get('minor_axis_m')):.2f}/ori:{float(row.get('orientation_deg')):.1f}"
-                )
-                for row in obstacles
-            )
-            if obstacles
-            else "- (n/a)"
-        )
-        candidate_targets_block = (
-            "\n".join(
-                f"- {row.get('id')}: est=({float(row.get('x')):.2f},{float(row.get('y')):.2f},{float(row.get('z')):.2f})"
-                for row in candidate_targets
-            )
-            if candidate_targets
-            else "- (n/a)"
-        )
-        candidate_paths_block = (
-            "\n".join(
-                (
-                    f"- to {row.get('target_id')}: path_clear={row.get('path_clear')}, "
-                    f"blocking_entity={row.get('blocking_entity')}, "
-                    f"corridor_min_gap_m={row.get('corridor_min_gap')}"
-                )
-                for row in candidate_paths
-            )
-            if candidate_paths
-            else "- (n/a)"
-        )
         per_worker_prob_block = (
             "\n".join(
                 f"- {row.get('id')}: P_c={float(row.get('collision_probability')):.6f}"
@@ -93,9 +50,5 @@ class SafetyContext:
             f"envelope_gap_m(centerline_ray_gap): {self.envelope_gap_m:.2f}\n"
             f"uncertainty_scale_m: {self.uncertainty_scale_m:.2f}\n"
             f"envelopes_overlap(centerline): {self.envelopes_overlap}\n"
-            f"TaskPoints:\n{task_points_block}\n"
-            f"CandidateTargets:\n{candidate_targets_block}\n"
-            f"Obstacles:\n{obstacle_block}\n"
-            f"PathSummaries:\n{candidate_paths_block}\n"
             f"PerWorkerCollisionProbabilities:\n{per_worker_prob_block}"
         )
