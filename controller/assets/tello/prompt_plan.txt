@@ -47,16 +47,13 @@ Guides:
 Examples:
 {plan_examples}
 
-Scene description:
-{scene_description}
-
 Task description:
 {task_description}
 
 Execution history:
 {execution_history}
 
-Safety context:
-{safety_context}
+Runtime mission context:
+{runtime_context}
 
 response:
