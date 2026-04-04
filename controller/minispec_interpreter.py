@@ -583,6 +583,7 @@ class MiniSpecInterpreter:
         if Statement.low_level_skillset is None or \
             Statement.high_level_skillset is None:
             raise Exception('Statement: Skillset is not initialized')
+        self.should_abort = should_abort
         
         Statement.execution_queue = Queue()
         self.execution_thread = Thread(target=self.executor)
