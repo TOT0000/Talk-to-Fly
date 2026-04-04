@@ -183,7 +183,7 @@ def approximate_collision_probability_gauss_hermite(
     sigma_xy: np.ndarray,
     r_c: float,
     *,
-    quadrature_order: int = 12,
+    quadrature_order: int = 20,
 ) -> float:
     mu_xy = np.asarray(mu_xy, dtype=float).reshape(2)
     sigma_xy = np.asarray(sigma_xy, dtype=float).reshape(2, 2)
@@ -209,7 +209,7 @@ class CollisionProbabilityCore:
         self._historical_max_probability = 0.0
         self._debug_mc_cache: Dict[Tuple[str, Tuple[float, ...], Tuple[float, ...], float], float] = {}
         self._sanity_cache: Optional[Dict[str, float]] = None
-        self._gh_order = int(os.getenv("COLLISION_GAUSS_HERMITE_ORDER", "12"))
+        self._gh_order = int(os.getenv("COLLISION_GAUSS_HERMITE_ORDER", "20"))
 
     def reset_history(self):
         self._historical_max_probability = 0.0
