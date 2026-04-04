@@ -61,6 +61,8 @@ class AgentState(TypedDict, total=False):
     last_subgoal_distance_m: float | None
     no_progress_steps: int
     repeated_action_count: int
+    subgoal_phase: str
+    subgoal_reached: bool
 
 
 class LangGraphOrchestrationRunner:
@@ -115,6 +117,8 @@ class LangGraphOrchestrationRunner:
             "last_subgoal_distance_m": None,
             "no_progress_steps": 0,
             "repeated_action_count": 0,
+            "subgoal_phase": "APPROACH_SUBGOAL",
+            "subgoal_reached": False,
         }
         self._emit_agent_message(
             f"[AGENT] subgoal queue: {' -> '.join(list(decomposed)) if decomposed else '(empty)'}"
@@ -199,8 +203,12 @@ class LangGraphOrchestrationRunner:
         remaining = list(state.get("remaining_checkpoint_ids", []))
         current_subgoal = state.get("current_subgoal_id")
         completed = set(state.get("completed_checkpoint_ids", []))
+        subgoal_phase = str(state.get("subgoal_phase", "APPROACH_SUBGOAL"))
+        subgoal_reached = bool(state.get("subgoal_reached", False))
         if current_subgoal is None or current_subgoal in completed:
             current_subgoal = remaining[0] if remaining else None
+            subgoal_phase = "APPROACH_SUBGOAL"
+            subgoal_reached = False
         if (
             state.get("route_decision") == "reselect_subgoal"
             and current_subgoal in remaining
@@ -209,9 +217,13 @@ class LangGraphOrchestrationRunner:
         ):
             idx = remaining.index(current_subgoal)
             current_subgoal = remaining[(idx + 1) % len(remaining)]
+            subgoal_phase = "APPROACH_SUBGOAL"
+            subgoal_reached = False
         return {
             "current_subgoal_type": "checkpoint",
             "current_subgoal_id": current_subgoal,
+            "subgoal_phase": subgoal_phase,
+            "subgoal_reached": subgoal_reached,
         }
 
     def _node_plan_step(self, state: AgentState) -> AgentState:
@@ -224,6 +236,19 @@ class LangGraphOrchestrationRunner:
             subgoal = remaining[0]
         if subgoal is None:
             return {"last_plan_text": "", "last_action_text": "", "route_decision": "end"}
+        subgoal_phase = str(state.get("subgoal_phase", "APPROACH_SUBGOAL"))
+        if subgoal_phase in {"COMPLETE_SUBGOAL", "VERIFY_COMPLETE"}:
+            plan = "delay(2.0);"
+            action_text = plan
+            self._emit_agent_message(f"[STEP] current subgoal: {subgoal}")
+            self._emit_agent_message(f"[ACTION] {plan}")
+            return {
+                "last_plan_text": plan,
+                "last_action_text": action_text,
+                "route_decision": "continue",
+                "current_subgoal_id": subgoal,
+                "current_subgoal_type": "checkpoint",
+            }
 
         collision_risk = float(state.get("current_collision_risk", 0.0))
         no_progress_steps = int(state.get("no_progress_steps", 0))
@@ -352,11 +377,22 @@ class LangGraphOrchestrationRunner:
         reached_area = (" reached:" in result_msg or " reached " in result_msg) and ("approached" not in result_msg)
         if action_target and reached_area:
             self._emit_agent_message(f"[RESULT] reached checkpoint area: {action_target} (not yet completed)")
+        phase = str(state.get("subgoal_phase", "APPROACH_SUBGOAL"))
+        reached_flag = bool(state.get("subgoal_reached", False))
+        if action_target and reached_area and action_target == str(subgoal).upper():
+            phase = "COMPLETE_SUBGOAL"
+            reached_flag = True
         if subgoal is not None and str(subgoal).upper() in completed:
             self._emit_agent_message(f"[RESULT] checkpoint completed: {str(subgoal).upper()}")
+            phase = "DONE"
             subgoal = None
+            reached_flag = False
             repeated_action_count = 0
             no_progress_steps = 0
+        elif phase == "COMPLETE_SUBGOAL":
+            phase = "VERIFY_COMPLETE"
+        elif phase == "VERIFY_COMPLETE" and subgoal is not None and str(subgoal).upper() not in completed:
+            phase = "COMPLETE_SUBGOAL"
         progress_signature = f"{subgoal}:{','.join(remaining)}"
         prev_signature = str(state.get("last_progress_signature", ""))
         if len(history) >= 2 and str(history[-1].get("plan", "")) == str(history[-2].get("plan", "")):
@@ -395,6 +431,8 @@ class LangGraphOrchestrationRunner:
                         "no_progress_steps": no_progress_steps,
                         "repeated_action_count": repeated_action_count,
                         "last_progress_signature": progress_signature,
+                        "subgoal_phase": phase,
+                        "subgoal_reached": reached_flag,
                     }
 
         if not remaining:
@@ -407,6 +445,8 @@ class LangGraphOrchestrationRunner:
                 "completed_checkpoint_ids": sorted(completed),
                 "remaining_checkpoint_ids": remaining,
                 "current_subgoal_id": subgoal,
+                "subgoal_phase": ("APPROACH_SUBGOAL" if subgoal is None else phase),
+                "subgoal_reached": reached_flag,
                 "last_progress_signature": progress_signature,
                 "last_subgoal_distance_m": last_subgoal_distance,
                 "no_progress_steps": no_progress_steps,
@@ -422,6 +462,8 @@ class LangGraphOrchestrationRunner:
                 "completed_checkpoint_ids": sorted(completed),
                 "remaining_checkpoint_ids": remaining,
                 "current_subgoal_id": subgoal,
+                "subgoal_phase": ("APPROACH_SUBGOAL" if subgoal is None else phase),
+                "subgoal_reached": reached_flag,
                 "last_progress_signature": progress_signature,
                 "last_subgoal_distance_m": last_subgoal_distance,
                 "no_progress_steps": no_progress_steps,
@@ -436,6 +478,8 @@ class LangGraphOrchestrationRunner:
             "completed_checkpoint_ids": sorted(completed),
             "remaining_checkpoint_ids": remaining,
             "current_subgoal_id": subgoal,
+            "subgoal_phase": ("APPROACH_SUBGOAL" if subgoal is None else phase),
+            "subgoal_reached": reached_flag,
             "last_progress_signature": progress_signature,
             "last_subgoal_distance_m": last_subgoal_distance,
             "no_progress_steps": no_progress_steps,
