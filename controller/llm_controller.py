@@ -41,12 +41,14 @@ from .baseline_scenes import (
 )
 from .benchmark_layout import (
     BENCHMARK_CHECKPOINT_ORDER,
+    BENCHMARK_CHECKPOINTS_BY_ID,
     BENCHMARK_CHECKPOINTS,
     BENCHMARK_ZONES,
 )
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = 0.30
+COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.65
 
 class LLMController():
     def __init__(self, robot_type, virtual_queue, use_http=False, message_queue: Optional[queue.Queue]=None, enable_video=False, state_provider: Optional[StateProvider]=None):
@@ -118,6 +120,7 @@ class LLMController():
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_right", self.drone.move_right, "Move right by a distance", args=[SkillArg("distance", float)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_up", self.drone.move_up, "Move up by a distance", args=[SkillArg("distance", float)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_down", self.drone.move_down, "Move down by a distance", args=[SkillArg("distance", float)]))
+        self.low_level_skillset.add_skill(LowLevelSkillItem("go_checkpoint", self.skill_go_checkpoint, "Navigate toward a benchmark checkpoint by ID", args=[SkillArg("checkpoint_id", str)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("takeoff", self.skill_takeoff, "Take off and climb to a safe hover height"))
         self.low_level_skillset.add_skill(LowLevelSkillItem("land", self.skill_land, "Land safely at current location"))
         self.low_level_skillset.add_skill(LowLevelSkillItem("turn_cw", self.drone.turn_cw, "Rotate clockwise/right by certain degrees", args=[SkillArg("degrees", int)]))
@@ -155,6 +158,12 @@ class LLMController():
         self.latest_baseline_decision = None
         self.execution_mode = "Waiting"
         self.active_objective_set = self._default_active_objective_set()
+        self.latest_benchmark_progress = {
+            "completed": [],
+            "current_target": None,
+        }
+        self.latest_ui_collision_probability = None
+        self.latest_ui_collision_timestamp = 0.0
         self.planner_mode = str(os.getenv("TYPEFLY_PLANNER_MODE", "llm_baseline")).strip().lower()
         if self.planner_mode not in {"llm_baseline", "rule_baseline"}:
             self.planner_mode = "llm_baseline"
@@ -383,6 +392,7 @@ class LLMController():
         return None, False
     
     def skill_re_plan(self) -> Tuple[None, bool]:
+        print_t("[REPLAN_DEBUG] source=rp_skill")
         return None, True
 
     def skill_takeoff(self) -> Tuple[None, bool]:
@@ -399,9 +409,128 @@ class LLMController():
         time.sleep(s)
         return None, False
 
+    def skill_go_checkpoint(self, checkpoint_id: str) -> Tuple[str, bool]:
+        checkpoint_key = str(checkpoint_id or "").strip().strip("'\"").upper()
+        checkpoint = BENCHMARK_CHECKPOINTS_BY_ID.get(checkpoint_key)
+        if checkpoint is None:
+            raise ValueError(f"Unknown checkpoint_id `{checkpoint_id}`")
+
+        max_step_m = 1.0
+        min_axis_step_m = 0.12
+        max_iterations = 12
+        no_progress_limit = 3
+
+        reached = False
+        final_dist = None
+        best_dist = float("inf")
+        no_progress_count = 0
+        stop_reason = "max_iterations"
+
+        for idx in range(max_iterations):
+            snapshot = self.get_live_ui_snapshot()
+            true_pos = snapshot.get("drone_gt")
+            est_raw = snapshot.get("drone_est")
+            est_bias = snapshot.get("drone_est_bias_corrected") or est_raw
+            control_pos = est_bias or true_pos or (0.0, 0.0, 0.0)
+            yaw = float(snapshot.get("drone_yaw_rad") or 0.0)
+            progress = dict(snapshot.get("benchmark_progress") or {})
+            completed_set = set(str(v).upper() for v in list(progress.get("completed") or []))
+            completion_state = checkpoint.id in completed_set
+
+            dx_w = float(checkpoint.x) - float(control_pos[0])
+            dy_w = float(checkpoint.y) - float(control_pos[1])
+            dist_control = math.hypot(dx_w, dy_w)
+            dist_true = None
+            if true_pos is not None:
+                dist_true = math.hypot(float(checkpoint.x) - float(true_pos[0]), float(checkpoint.y) - float(true_pos[1]))
+            final_dist = dist_control
+
+            in_radius_by_control = dist_control <= float(checkpoint.radius_m)
+            in_radius_by_true = (dist_true is not None and dist_true <= float(checkpoint.radius_m))
+            stop_condition = bool(in_radius_by_control or in_radius_by_true or completion_state)
+
+            body_forward = math.cos(yaw) * dx_w + math.sin(yaw) * dy_w
+            body_right = math.sin(yaw) * dx_w - math.cos(yaw) * dy_w
+
+            chosen_action = "none"
+            if stop_condition:
+                reached = True
+                stop_reason = "completion_state" if completion_state else ("true_radius" if in_radius_by_true else "estimated_radius")
+            else:
+                if dist_control + 0.02 < best_dist:
+                    best_dist = dist_control
+                    no_progress_count = 0
+                else:
+                    no_progress_count += 1
+                if no_progress_count >= no_progress_limit:
+                    stop_reason = "no_progress_fail_safe"
+                    break
+
+                local_step_cap = 0.25 if dist_control < 0.35 else max_step_m
+                if abs(body_forward) < min_axis_step_m and abs(body_right) < min_axis_step_m:
+                    stop_reason = "tiny_residual_vector"
+                    break
+
+                if abs(body_forward) >= abs(body_right):
+                    step = min(local_step_cap, abs(body_forward))
+                    if body_forward > 0:
+                        self.drone.move_forward(step)
+                        chosen_action = f"move_forward({step:.2f})"
+                    else:
+                        self.drone.move_backward(step)
+                        chosen_action = f"move_backward({step:.2f})"
+                else:
+                    step = min(local_step_cap, abs(body_right))
+                    if body_right > 0:
+                        self.drone.move_right(step)
+                        chosen_action = f"move_right({step:.2f})"
+                    else:
+                        self.drone.move_left(step)
+                        chosen_action = f"move_left({step:.2f})"
+
+            print_t(
+                "[GC_DEBUG] "
+                f"cp={checkpoint.id} "
+                f"target=({checkpoint.x:.2f},{checkpoint.y:.2f}) "
+                f"iter={idx + 1}/{max_iterations} "
+                f"true_pos={true_pos} est_raw={est_raw} est_bias={est_bias} "
+                f"dx={dx_w:.3f} dy={dy_w:.3f} "
+                f"dist_control={dist_control:.3f} dist_true={'n/a' if dist_true is None else f'{dist_true:.3f}'} "
+                f"yaw={yaw:.3f} "
+                f"action={chosen_action} "
+                f"stop_condition={stop_condition} completion_state={completion_state} "
+                f"reason={stop_reason if stop_condition else 'continue'}"
+            )
+
+            if stop_condition:
+                break
+
+        status = "reached" if reached else "approached"
+        summary = (
+            f"go_checkpoint({checkpoint.id}) {status}: "
+            f"zone={checkpoint.zone_id}, target=({checkpoint.x:.2f},{checkpoint.y:.2f}), "
+            f"remaining_dist={0.0 if final_dist is None else float(final_dist):.2f}m, "
+            f"stop_reason={stop_reason}"
+        )
+        print_t(f"[C] {summary}")
+        return summary, False
+
     def append_message(self, message: str):
         if self.message_queue is not None:
             self.message_queue.put(message)
+
+    def update_benchmark_progress(self, completed_checkpoint_ids, current_target_checkpoint):
+        completed = [str(v).upper() for v in list(completed_checkpoint_ids or [])]
+        self.latest_benchmark_progress = {
+            "completed": sorted(set(completed)),
+            "current_target": (None if current_target_checkpoint is None else str(current_target_checkpoint).upper()),
+        }
+
+    def update_ui_collision_probability(self, current_collision_probability: Optional[float]):
+        if current_collision_probability is None:
+            return
+        self.latest_ui_collision_probability = float(current_collision_probability)
+        self.latest_ui_collision_timestamp = time.time()
 
     def stop_controller(self):
         self.controller_active = False
@@ -414,11 +543,38 @@ class LLMController():
         return image
     
     def execute_minispec(self, minispec: str):
-        interpreter = MiniSpecInterpreter(self.message_queue)
+        interpreter = MiniSpecInterpreter(self.message_queue, should_abort=self._should_abort_current_execution_for_replan)
         interpreter.execute(minispec)
         self.execution_history = interpreter.execution_history
         ret_val = interpreter.ret_queue.get()
+        if hasattr(ret_val, "value") and isinstance(ret_val.value, str) and ret_val.value.startswith("MiniSpec execution error"):
+            raise RuntimeError(ret_val.value)
         return ret_val
+
+    def _should_abort_current_execution_for_replan(self) -> Tuple[bool, str]:
+        snapshot = self.get_live_ui_snapshot()
+        if not isinstance(snapshot, dict):
+            return False, ""
+        safety_context = snapshot.get("safety_context")
+        if safety_context is None:
+            return False, ""
+        current_p = float(getattr(safety_context, "current_collision_probability", 0.0))
+        should_abort = bool(current_p >= COLLISION_PROBABILITY_REPLAN_THRESHOLD)
+        if should_abort:
+            dominant = str(getattr(safety_context, "dominant_threat_id", "unknown"))
+            ui_p = self.latest_ui_collision_probability
+            ui_p_text = "n/a" if ui_p is None else f"{float(ui_p):.6f}"
+            print_t(
+                "[REPLAN_DEBUG] "
+                f"source=collision_threshold "
+                f"ui_pc={ui_p_text} "
+                f"callback_pc={current_p:.6f} "
+                f"threshold={COLLISION_PROBABILITY_REPLAN_THRESHOLD:.6f} "
+                f"should_abort={should_abort} "
+                f"dominant={dominant}"
+            )
+            return True, f"current_collision_probability={current_p:.6f}>=0.65, dominant={dominant}"
+        return False, ""
 
     def _sanitize_minispec_plan(self, raw_plan: str) -> str:
         if raw_plan is None:
@@ -550,6 +706,8 @@ class LLMController():
         ret_val = None
         monitor_stop = threading.Event()
         monitor_thread = None
+        replan_attempts = 0
+        max_replan_attempts = 3
         def _run_monitor():
             while not monitor_stop.is_set():
                 try:
@@ -588,6 +746,7 @@ class LLMController():
                     final_plan_source = "baseline_rule"
                     baseline_shortcut_triggered = True
                 else:
+                    previous_plan = self.current_plan
                     self.execution_mode = "Planning"
                     self.current_plan = self.planner.plan(
                         task_description=task_description,
@@ -595,6 +754,7 @@ class LLMController():
                         location_info=location_info,
                         execution_history=self.execution_history,
                         safety_context=safety_context,
+                        previous_plan=previous_plan,
                     )
                     llm_called = True
                     final_plan_source = "llm"
@@ -628,6 +788,25 @@ class LLMController():
                 task_completed = True
                 if isinstance(ret_val, tuple) and len(ret_val) >= 2:
                     execution_success = bool(ret_val[0] is not False)
+                if hasattr(ret_val, "replan") and bool(ret_val.replan):
+                    replan_source = "interpreter_return_flag"
+                    replan_value = str(getattr(ret_val, "value", "") or "")
+                    if "interrupted for replan" in replan_value:
+                        replan_source = "collision_threshold_callback"
+                    elif "High-level skill" in replan_value:
+                        replan_source = "high_level_skill_failure"
+                    print_t(f"[REPLAN_DEBUG] source={replan_source} ret_val={replan_value}")
+                    replan_attempts += 1
+                    self.task_run_logger.update_execution_info(
+                        execution_success=False,
+                        failure_reason="replan_requested",
+                        task_completed=False,
+                    )
+                    if replan_attempts > max_replan_attempts:
+                        raise RuntimeError(f"Exceeded max replan attempts ({max_replan_attempts})")
+                    self.append_message(f"[LOG] Replan requested, attempt={replan_attempts}")
+                    self.execution_mode = "Planning"
+                    continue
                 self.task_run_logger.update_execution_info(
                     execution_success=execution_success,
                     task_completed=task_completed,
@@ -1057,6 +1236,7 @@ class LLMController():
             "mode_name": self.get_active_scenario_name(),
             "execution_mode": self.execution_mode,
             "active_objective_set": dict(self.active_objective_set),
+            "benchmark_progress": dict(self.latest_benchmark_progress),
             "checkpoint_order": list(BENCHMARK_CHECKPOINT_ORDER),
             "benchmark_checkpoints": [
                 {"id": cp.id, "zone_id": cp.zone_id, "x": float(cp.x), "y": float(cp.y), "radius_m": float(cp.radius_m)}
