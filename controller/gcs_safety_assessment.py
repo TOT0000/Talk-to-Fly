@@ -17,6 +17,7 @@ class GcsSafetyAssessmentService:
         self._core = CollisionProbabilityCore()
         self._uav_radius_m = float(os.getenv("TYPEFLY_UAV_RADIUS_M", "0.22"))
         self._worker_radius_m = float(os.getenv("TYPEFLY_WORKER_RADIUS_M", "0.30"))
+        self._risk_worker_ids = ("worker_1", "worker_2", "worker_3")
 
     def _build_context_from_scene_summary(
         self,
@@ -82,17 +83,28 @@ class GcsSafetyAssessmentService:
             bias_xy=np.asarray(drone_packet.b_xy, dtype=float),
             radius_m=float(self._uav_radius_m),
         )
-        worker_entities = []
+        worker_packet_map: dict[str, object] = {}
         for worker_id, packet in worker_packets:
+            worker_key = str(worker_id)
+            if worker_key not in self._risk_worker_ids:
+                continue
+            worker_packet_map[worker_key] = packet
+        worker_entities = []
+        for worker_key in self._risk_worker_ids:
+            packet = worker_packet_map.get(worker_key)
+            if packet is None:
+                continue
             worker_entities.append(
                 CollisionEntity2D(
-                    entity_id=str(worker_id),
+                    entity_id=str(worker_key),
                     mean_xy=np.asarray(packet.estimated_position_3d[:2], dtype=float),
                     cov_xy=np.asarray(packet.P_xy, dtype=float),
                     bias_xy=np.asarray(packet.b_xy, dtype=float),
                     radius_m=float(self._worker_radius_m),
                 )
             )
+        risk_entity_ids = [str(entity.entity_id) for entity in worker_entities]
+        print(f"[COLLISION_DEBUG] risk_entities={risk_entity_ids}")
 
         summary = self._core.evaluate_scene(
             uav=uav_entity,
@@ -117,6 +129,8 @@ class GcsSafetyAssessmentService:
             "uav_radius_m": float(self._uav_radius_m),
             "worker_radius_m": float(self._worker_radius_m),
             "collision_radius_m": float(self._uav_radius_m + self._worker_radius_m),
+            "risk_entities": list(risk_entity_ids),
+            "risk_entities_expected": list(self._risk_worker_ids),
         }
         return self._build_context_from_scene_summary(
             current_probability=float(summary.current_probability),
@@ -131,9 +145,14 @@ class GcsSafetyAssessmentService:
     def build_from_provider(self, state_provider, now: Optional[float] = None) -> Optional[SafetyContext]:
         now = time.time() if now is None else float(now)
         safety_state = GcsSafetyStateService.build_from_provider(state_provider, now=now)
-        return self.build_from_safety_state(safety_state, now=now)
+        return self.build_from_safety_state(safety_state, now=now, worker_packets=None)
 
-    def build_from_safety_state(self, safety_state, now: Optional[float] = None) -> Optional[SafetyContext]:
+    def build_from_safety_state(
+        self,
+        safety_state,
+        now: Optional[float] = None,
+        worker_packets: Optional[list[tuple[str, object]]] = None,
+    ) -> Optional[SafetyContext]:
         now = time.time() if now is None else float(now)
         if safety_state is None:
             return SafetyContext(
@@ -153,9 +172,37 @@ class GcsSafetyAssessmentService:
                 per_worker_collision_probabilities=[],
                 collision_debug_info=None,
             )
+        if worker_packets is None:
+            print("[COLLISION_DEBUG] risk_entities=[] (worker packets unavailable; skipping user legacy path)")
+            return SafetyContext(
+                safety_score=0.0,
+                preferred_standoff_m=float(self._uav_radius_m + self._worker_radius_m),
+                reason_tags=["collision_probability_core", "risk_workers_unavailable"],
+                envelope_gap_m=float(safety_state.envelope_gap_m),
+                uncertainty_scale_m=float(
+                    safety_state.drone_radius_along_user_direction
+                    + safety_state.user_radius_along_drone_direction
+                ),
+                drone_to_user_distance_xy=float(safety_state.drone_to_user_distance_xy),
+                envelopes_overlap=False,
+                dominant_threat_type="worker",
+                dominant_threat_id="none",
+                dominant_gap_m=float(safety_state.envelope_gap_m),
+                dominant_uncertainty_scale_m=float(
+                    safety_state.drone_radius_along_user_direction
+                    + safety_state.user_radius_along_drone_direction
+                ),
+                current_collision_probability=0.0,
+                historical_max_collision_probability=float(self._core.get_historical_max_probability()),
+                per_worker_collision_probabilities=[],
+                collision_debug_info={
+                    "risk_entities": [],
+                    "risk_entities_expected": list(self._risk_worker_ids),
+                },
+            )
         return self.build_from_packets(
             drone_packet=safety_state.drone_packet,
-            worker_packets=[("user", safety_state.user_packet)],
+            worker_packets=worker_packets,
             now=now,
             safety_state=safety_state,
         )

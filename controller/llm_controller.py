@@ -49,6 +49,7 @@ from .benchmark_layout import (
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = 0.30
 COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.65
+COLLISION_RISK_WORKER_IDS = ("worker_1", "worker_2", "worker_3")
 
 class LLMController():
     def __init__(self, robot_type, virtual_queue, use_http=False, message_queue: Optional[queue.Queue]=None, enable_video=False, state_provider: Optional[StateProvider]=None):
@@ -1008,6 +1009,15 @@ class LLMController():
         _ = now
         return list(obstacle_states or [])
 
+    def _build_collision_worker_packets_from_obstacles(self, obstacle_states):
+        obstacle_map = {str(obs.id): obs for obs in (obstacle_states or [])}
+        packets = []
+        for worker_id in COLLISION_RISK_WORKER_IDS:
+            obs = obstacle_map.get(worker_id)
+            if obs is not None:
+                packets.append((worker_id, obs.localization_packet))
+        return packets
+
     def _build_dominant_threat_context(
         self,
         safety_state,
@@ -1020,9 +1030,7 @@ class LLMController():
         if safety_state is None:
             return None
 
-        worker_packets = [("user", safety_state.user_packet)]
-        for obs in obstacle_states or []:
-            worker_packets.append((str(obs.id), obs.localization_packet))
+        worker_packets = self._build_collision_worker_packets_from_obstacles(obstacle_states)
 
         assessed_context = self.safety_assessor.build_from_packets(
             drone_packet=safety_state.drone_packet,
@@ -1118,6 +1126,14 @@ class LLMController():
         elapsed_scene_s = max(0.0, now - scene_start_ts)
         obstacle_states_generated = compute_obstacle_envelope_states(self.get_baseline_scene(), now_s=elapsed_scene_s)
         obstacle_states = self._simulate_obstacle_returns(obstacle_states_generated, now=now)
+        if safety_state is not None:
+            worker_packets = self._build_collision_worker_packets_from_obstacles(obstacle_states)
+            safety_context = self.safety_assessor.build_from_packets(
+                drone_packet=safety_state.drone_packet,
+                worker_packets=worker_packets,
+                now=now,
+                safety_state=safety_state,
+            )
         user_heading = float(self.get_user_heading_yaw())
         user_ref = user_est or user_gt
         right_offset_m = 1.0
@@ -1183,11 +1199,8 @@ class LLMController():
             safety_context = dominant_safety_context
         elif drone_packet is not None:
             # Fallback: when provider-level safety_state is unavailable, still
-            # compute collision probability with UAV + user/worker localization packets.
-            worker_packets = []
-            if user_packet is not None:
-                worker_packets.append(("user", user_packet))
-            worker_packets.extend((str(obs.id), obs.localization_packet) for obs in obstacle_states)
+            # compute collision probability with UAV + canonical worker localization packets.
+            worker_packets = self._build_collision_worker_packets_from_obstacles(obstacle_states)
             if worker_packets:
                 safety_context = self.safety_assessor.build_from_packets(
                     drone_packet=drone_packet,
