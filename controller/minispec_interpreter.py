@@ -1,4 +1,4 @@
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, Callable
 import re, queue
 import ast
 from enum import Enum
@@ -575,7 +575,7 @@ class Statement:
         return s
 
 class MiniSpecInterpreter:
-    def __init__(self, message_queue: queue.Queue):
+    def __init__(self, message_queue: queue.Queue, should_abort: Optional[Callable[[], Tuple[bool, str]]] = None):
         self.env = {}
         self.ret = False
         self.code_buffer: str = ''
@@ -583,6 +583,7 @@ class MiniSpecInterpreter:
         if Statement.low_level_skillset is None or \
             Statement.high_level_skillset is None:
             raise Exception('Statement: Skillset is not initialized')
+        self.should_abort = should_abort
         
         Statement.execution_queue = Queue()
         self.execution_thread = Thread(target=self.executor)
@@ -607,6 +608,20 @@ class MiniSpecInterpreter:
 
     def executor(self):
         while True:
+            if callable(self.should_abort):
+                try:
+                    should_abort, reason = self.should_abort()
+                except Exception:
+                    should_abort, reason = (False, "")
+                if should_abort:
+                    while not Statement.execution_queue.empty():
+                        Statement.execution_queue.get()
+                    self.timestamp_end_execution = time.time()
+                    self.timestamp_start_execution = None
+                    msg = f"MiniSpec execution interrupted for replan: {reason or 'runtime_high_risk'}"
+                    print_t(f"[I] {msg}")
+                    self.ret_queue.put(MiniSpecReturnValue(msg, True))
+                    return
             if not Statement.execution_queue.empty():
                 if self.timestamp_start_execution is None:
                     self.timestamp_start_execution = time.time()
