@@ -104,7 +104,6 @@ class GcsSafetyAssessmentService:
                 )
             )
         risk_entity_ids = [str(entity.entity_id) for entity in worker_entities]
-        print(f"[COLLISION_DEBUG] risk_entities={risk_entity_ids}")
 
         summary = self._core.evaluate_scene(
             uav=uav_entity,
@@ -114,6 +113,7 @@ class GcsSafetyAssessmentService:
             {
                 "id": item.entity_id,
                 "collision_probability": float(item.probability),
+                "approximate_probability": float(item.approximate_probability),
                 "exact_series_probability": float(item.exact_series_probability),
                 "monte_carlo_probability": (None if item.monte_carlo_probability is None else float(item.monte_carlo_probability)),
                 "mu_xy": [float(item.mu_xy[0]), float(item.mu_xy[1])],
