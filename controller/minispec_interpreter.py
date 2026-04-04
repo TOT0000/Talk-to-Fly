@@ -580,7 +580,12 @@ class Statement:
         return s
 
 class MiniSpecInterpreter:
-    def __init__(self, message_queue: queue.Queue, should_abort: Optional[Callable[[], Tuple[bool, str]]] = None):
+    def __init__(
+        self,
+        message_queue: queue.Queue,
+        should_abort: Optional[Callable[[], Tuple[bool, str]]] = None,
+        on_statement_executed: Optional[Callable[[], None]] = None,
+    ):
         self.env = {}
         self.ret = False
         self.code_buffer: str = ''
@@ -589,6 +594,7 @@ class MiniSpecInterpreter:
             Statement.high_level_skillset is None:
             raise Exception('Statement: Skillset is not initialized')
         self.should_abort = should_abort
+        self.on_statement_executed = on_statement_executed
         
         Statement.execution_queue = Queue()
         self.execution_thread = Thread(target=self.executor)
@@ -652,6 +658,11 @@ class MiniSpecInterpreter:
                     self.ret_queue.put(ret_val)
                     return
                 self.execution_history.append(statement)
+                if callable(self.on_statement_executed):
+                    try:
+                        self.on_statement_executed()
+                    except Exception:
+                        pass
                 # if ret_val.replan:
                 #     print_t(f'Queue statement replan: {statement}')
                 #     self.ret_queue.put(ret_val)

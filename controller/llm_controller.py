@@ -51,6 +51,8 @@ from .benchmark_layout import (
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = 0.30
 COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.65
+COLLISION_PROBABILITY_REARM_THRESHOLD = 0.45
+AUTO_REPLAN_PROTECTION_STATEMENTS = 2
 COLLISION_RISK_WORKER_IDS = ("worker_1", "worker_2", "worker_3")
 
 class LLMController():
@@ -173,6 +175,8 @@ class LLMController():
         self.user_heading_yaw_rad = 0.0
         self.manual_worker_selection_id = "worker_1"
         self.manual_worker_poses: dict[str, dict] = {}
+        self.auto_replan_armed = True
+        self.auto_replan_protection_remaining = 0
 
         # PX4_SIM optional managed user-position publisher lifecycle
         self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
@@ -453,7 +457,7 @@ class LLMController():
             runtime_target = None if progress.get("current_target") is None else str(progress.get("current_target")).upper()
             safety_context = snapshot.get("safety_context")
             current_p = 0.0 if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
-            if current_p >= COLLISION_PROBABILITY_REPLAN_THRESHOLD:
+            if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
                 stop_reason = f"collision_probability_high({current_p:.3f})"
                 break
 
@@ -559,6 +563,50 @@ class LLMController():
         self.latest_ui_collision_probability = float(current_collision_probability)
         self.latest_ui_collision_timestamp = time.time()
 
+    def _on_statement_executed_for_replan(self):
+        if self.auto_replan_protection_remaining > 0:
+            self.auto_replan_protection_remaining -= 1
+            print_t(
+                "[REPLAN_DEBUG] "
+                f"protection_window_active remaining_statements={self.auto_replan_protection_remaining}"
+            )
+
+    def _should_trigger_auto_replan(self, current_p: float, source: str) -> bool:
+        current_p = float(current_p)
+        if self.auto_replan_protection_remaining > 0:
+            print_t(
+                "[REPLAN_DEBUG] "
+                f"auto_replan_suppressed p={current_p:.6f} reason=protection_window "
+                f"remaining_statements={self.auto_replan_protection_remaining} source={source}"
+            )
+            return False
+
+        if not self.auto_replan_armed:
+            if current_p <= COLLISION_PROBABILITY_REARM_THRESHOLD:
+                self.auto_replan_armed = True
+                print_t(
+                    "[REPLAN_DEBUG] "
+                    f"auto_replan_rearmed p={current_p:.6f} "
+                    f"threshold={COLLISION_PROBABILITY_REARM_THRESHOLD:.2f}"
+                )
+            else:
+                print_t(
+                    "[REPLAN_DEBUG] "
+                    f"auto_replan_suppressed p={current_p:.6f} reason=disarmed source={source}"
+                )
+            return False
+
+        if current_p >= COLLISION_PROBABILITY_REPLAN_THRESHOLD:
+            self.auto_replan_armed = False
+            print_t(
+                "[REPLAN_DEBUG] "
+                f"auto_replan_triggered p={current_p:.6f} armed=True source={source} "
+                f"trigger_threshold={COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}"
+            )
+            print_t("[REPLAN_DEBUG] auto_replan_armed=False")
+            return True
+        return False
+
     def stop_controller(self):
         self.controller_active = False
 
@@ -570,7 +618,11 @@ class LLMController():
         return image
     
     def execute_minispec(self, minispec: str):
-        interpreter = MiniSpecInterpreter(self.message_queue, should_abort=self._should_abort_current_execution_for_replan)
+        interpreter = MiniSpecInterpreter(
+            self.message_queue,
+            should_abort=self._should_abort_current_execution_for_replan,
+            on_statement_executed=self._on_statement_executed_for_replan,
+        )
         interpreter.execute(minispec)
         self.execution_history = interpreter.execution_history
         ret_val = interpreter.ret_queue.get()
@@ -591,7 +643,7 @@ class LLMController():
         ui_is_fresh = bool(ui_p is not None and (time.time() - float(self.latest_ui_collision_timestamp)) <= 1.5)
         if ui_is_fresh:
             current_p = max(float(current_p), float(ui_p))
-        should_abort = bool(current_p >= COLLISION_PROBABILITY_REPLAN_THRESHOLD)
+        should_abort = self._should_trigger_auto_replan(current_p, source="interpreter_callback")
         if should_abort:
             dominant = str(getattr(safety_context, "dominant_threat_id", "unknown"))
             ui_p_text = "n/a" if ui_p is None else f"{float(ui_p):.6f}"
@@ -740,6 +792,8 @@ class LLMController():
         monitor_thread = None
         replan_attempts = 0
         max_replan_attempts = 3
+        self.auto_replan_armed = True
+        self.auto_replan_protection_remaining = 0
         def _run_monitor():
             while not monitor_stop.is_set():
                 try:
@@ -815,6 +869,11 @@ class LLMController():
                 self.append_message(f'[Plan]: \\\\')
                 self.execution_time = time.time()
                 self.execution_mode = "Executing"
+                self.auto_replan_protection_remaining = int(AUTO_REPLAN_PROTECTION_STATEMENTS)
+                print_t(
+                    "[REPLAN_DEBUG] "
+                    f"protection_window_active remaining_statements={self.auto_replan_protection_remaining}"
+                )
                 ret_val = self.execute_minispec(self.current_plan)
                 execution_success = True
                 task_completed = True
@@ -958,8 +1017,8 @@ class LLMController():
         yaw = float(pose.get("yaw_rad", 0.0))
         forward = float(local_forward) * step
         right = float(local_right) * step
-        dx = math.cos(yaw) * forward - math.sin(yaw) * right
-        dy = math.sin(yaw) * forward + math.cos(yaw) * right
+        dx = math.cos(yaw) * forward + math.sin(yaw) * right
+        dy = math.sin(yaw) * forward - math.cos(yaw) * right
         pose["x"] = float(pose["x"] + dx)
         pose["y"] = float(pose["y"] + dy)
         return {
@@ -1110,15 +1169,6 @@ class LLMController():
                 )
             )
         return updated_states
-
-    def _build_collision_worker_packets_from_obstacles(self, obstacle_states):
-        obstacle_map = {str(obs.id): obs for obs in (obstacle_states or [])}
-        packets = []
-        for worker_id in COLLISION_RISK_WORKER_IDS:
-            obs = obstacle_map.get(worker_id)
-            if obs is not None:
-                packets.append((worker_id, obs.localization_packet))
-        return packets
 
     def _build_collision_worker_packets_from_obstacles(self, obstacle_states):
         obstacle_map = {str(obs.id): obs for obs in (obstacle_states or [])}
