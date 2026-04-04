@@ -92,6 +92,7 @@ class TypeFly:
         self.asyncio_loop = asyncio.get_event_loop()
         self.use_llama3 = False
         self.robot_type = controller_robot_type
+        self.selected_framework_mode = "typefly_baseline"
 
         # 狀態資料
         self.anchor_count = 0
@@ -158,6 +159,11 @@ class TypeFly:
 
             with gr.Row():
                 with gr.Column(scale=1, min_width=260, elem_classes="scenario-panel"):
+                    self.framework_mode_selector = gr.Dropdown(
+                        choices=["typefly_baseline", "langgraph_agent"],
+                        value="typefly_baseline",
+                        label="Framework Mode",
+                    )
                     baseline_scene_choices = [sid for sid in ("SCENE_BENCHMARK_DEMO", "SCENE_MANUAL_WORKER_CONTROL") if sid in BASELINE_SCENES]
                     self.baseline_scene_selector = gr.Dropdown(
                         choices=baseline_scene_choices,
@@ -207,6 +213,11 @@ class TypeFly:
             self.baseline_scene_apply_btn.click(
                 fn=self.apply_baseline_scene,
                 inputs=[self.baseline_scene_selector],
+                outputs=[self.scenario_status],
+            )
+            self.framework_mode_selector.change(
+                fn=self.set_framework_mode,
+                inputs=[self.framework_mode_selector],
                 outputs=[self.scenario_status],
             )
             self.worker_selector.change(
@@ -456,6 +467,13 @@ class TypeFly:
         user_yaw_deg = math.degrees(self.llm_controller.get_user_heading_yaw())
         return f"Baseline scene `{normalized}` applied. drone_init={self._fmt_vec(state.get('drone_initial_pose'))} user={self._fmt_vec(state.get('user_position'))} user_yaw={user_yaw_deg:.1f}deg"
 
+    def set_framework_mode(self, framework_mode: str):
+        normalized = str(framework_mode or "typefly_baseline").strip().lower()
+        if normalized not in {"typefly_baseline", "langgraph_agent"}:
+            normalized = "typefly_baseline"
+        self.selected_framework_mode = normalized
+        return f"Framework mode switched to `{normalized}`."
+
     def _apply_mode_and_collect(self, scenario_name):
         normalized = normalize_scenario_name(scenario_name)
         self.llm_controller.set_active_scenario(normalized)
@@ -551,7 +569,11 @@ class TypeFly:
             self.mission_clock["objective_completed"] = False
             self.worker_collision_active = {k: False for k in self.worker_collision_active.keys()}
             self.mission_collision_count = 0
-            task_thread = Thread(target=self.llm_controller.execute_task_description, args=(message,))
+            framework_mode = str(getattr(self, "selected_framework_mode", "typefly_baseline"))
+            task_thread = Thread(
+                target=self.llm_controller.execute_task_description,
+                args=(message, framework_mode),
+            )
             task_thread.start()
             complete_response = ''
             while True:
