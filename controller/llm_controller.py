@@ -48,6 +48,7 @@ from .benchmark_layout import (
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = 0.30
+COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.65
 
 class LLMController():
     def __init__(self, robot_type, virtual_queue, use_http=False, message_queue: Optional[queue.Queue]=None, enable_video=False, state_provider: Optional[StateProvider]=None):
@@ -475,11 +476,24 @@ class LLMController():
         return image
     
     def execute_minispec(self, minispec: str):
-        interpreter = MiniSpecInterpreter(self.message_queue)
+        interpreter = MiniSpecInterpreter(self.message_queue, should_abort=self._should_abort_current_execution_for_replan)
         interpreter.execute(minispec)
         self.execution_history = interpreter.execution_history
         ret_val = interpreter.ret_queue.get()
         return ret_val
+
+    def _should_abort_current_execution_for_replan(self) -> Tuple[bool, str]:
+        snapshot = self.get_live_ui_snapshot()
+        if not isinstance(snapshot, dict):
+            return False, ""
+        safety_context = snapshot.get("safety_context")
+        if safety_context is None:
+            return False, ""
+        current_p = float(getattr(safety_context, "current_collision_probability", 0.0))
+        if current_p >= COLLISION_PROBABILITY_REPLAN_THRESHOLD:
+            dominant = str(getattr(safety_context, "dominant_threat_id", "unknown"))
+            return True, f"current_collision_probability={current_p:.6f}>=0.65, dominant={dominant}"
+        return False, ""
 
     def _sanitize_minispec_plan(self, raw_plan: str) -> str:
         if raw_plan is None:
