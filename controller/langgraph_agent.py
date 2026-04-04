@@ -57,6 +57,10 @@ class AgentState(TypedDict, total=False):
 
     # internal routing
     route_decision: RouteDecision
+    last_progress_signature: str
+    last_subgoal_distance_m: float | None
+    no_progress_steps: int
+    repeated_action_count: int
 
 
 class LangGraphOrchestrationRunner:
@@ -68,6 +72,13 @@ class LangGraphOrchestrationRunner:
     def run_task(self, task_description: str, task_id: str, active_objective_set: dict[str, Any]) -> AgentState:
         active_checkpoint_ids = [str(v).upper() for v in active_objective_set.get("active_checkpoint_ids", [])]
         active_zone_ids = [str(v) for v in active_objective_set.get("active_zone_ids", [])]
+        decomposed = self.controller.planner.decompose_task_for_langgraph(
+            task_description=task_description,
+            active_checkpoint_ids=active_checkpoint_ids,
+            active_zone_ids=active_zone_ids,
+        )
+        if not decomposed:
+            decomposed = list(active_checkpoint_ids)
         initial_state: AgentState = {
             "user_task": task_description,
             "task_id": task_id,
@@ -76,10 +87,10 @@ class LangGraphOrchestrationRunner:
             "active_zone_ids": active_zone_ids,
             "active_checkpoint_ids": active_checkpoint_ids,
             "completed_checkpoint_ids": [],
-            "remaining_checkpoint_ids": list(active_checkpoint_ids),
+            "remaining_checkpoint_ids": list(decomposed),
             "current_subgoal_type": "checkpoint",
             "current_subgoal_id": None,
-            "subgoal_queue": list(active_checkpoint_ids),
+            "subgoal_queue": list(decomposed),
             "latest_snapshot": None,
             "uav_est_xy": None,
             "worker_states": [],
@@ -100,7 +111,14 @@ class LangGraphOrchestrationRunner:
             "max_replan_attempts": 8,
             "last_error": None,
             "route_decision": "continue",
+            "last_progress_signature": "",
+            "last_subgoal_distance_m": None,
+            "no_progress_steps": 0,
+            "repeated_action_count": 0,
         }
+        self._emit_agent_message(
+            f"[AGENT] subgoal queue: {' -> '.join(list(decomposed)) if decomposed else '(empty)'}"
+        )
         config = {"configurable": {"thread_id": task_id}}
         return self.graph.invoke(initial_state, config=config)
 
@@ -178,6 +196,14 @@ class LangGraphOrchestrationRunner:
         completed = set(state.get("completed_checkpoint_ids", []))
         if current_subgoal is None or current_subgoal in completed:
             current_subgoal = remaining[0] if remaining else None
+        if (
+            state.get("route_decision") == "reselect_subgoal"
+            and current_subgoal in remaining
+            and len(remaining) > 1
+            and int(state.get("no_progress_steps", 0)) >= 2
+        ):
+            idx = remaining.index(current_subgoal)
+            current_subgoal = remaining[(idx + 1) % len(remaining)]
         return {
             "current_subgoal_type": "checkpoint",
             "current_subgoal_id": current_subgoal,
@@ -189,12 +215,21 @@ class LangGraphOrchestrationRunner:
             return {"last_plan_text": "", "last_action_text": "", "route_decision": "end"}
 
         collision_risk = float(state.get("current_collision_risk", 0.0))
-        if collision_risk >= 0.70:
-            plan = "delay(1.0);"
-            action_text = "Hold position for 1s due to elevated collision risk."
-        else:
+        plan = self.controller.planner.plan_langgraph_step_action(
+            task_description=str(state.get("user_task", "")),
+            current_subgoal=str(subgoal),
+            remaining_checkpoints=list(state.get("remaining_checkpoint_ids", [])),
+            current_collision_risk=collision_risk,
+            last_action=str(state.get("last_action_text", "")),
+            last_result=str((state.get("last_action_result") or {}).get("message", "")),
+            stall_count=int(state.get("no_progress_steps", 0)),
+            recent_history=list(state.get("execution_history", [])),
+        )
+        if not plan:
             plan = f'go_checkpoint("{subgoal}");'
-            action_text = f"Navigate one step toward checkpoint {subgoal}."
+        action_text = plan
+        self._emit_agent_message(f"[STEP] current subgoal: {subgoal}")
+        self._emit_agent_message(f"[ACTION] {plan}")
         return {
             "last_plan_text": plan,
             "last_action_text": action_text,
@@ -209,7 +244,7 @@ class LangGraphOrchestrationRunner:
                 "last_error": "empty_plan",
             }
         try:
-            ret = self.controller.execute_minispec(plan)
+            ret = self.controller.execute_minispec(plan, silent=True)
             ok = True
             recoverable = False
             if isinstance(ret, tuple) and len(ret) >= 2:
@@ -249,6 +284,9 @@ class LangGraphOrchestrationRunner:
         )
         if not bool(result.get("ok", False)):
             replan_count += 1
+        self._emit_agent_message(
+            f"[RESULT] {'ok' if bool(result.get('ok', False)) else 'failed'}: {str(result.get('message', ''))[:120]}"
+        )
 
         max_steps = int(state.get("max_agent_steps", 64))
         max_replans = int(state.get("max_replan_attempts", 8))
@@ -273,6 +311,15 @@ class LangGraphOrchestrationRunner:
 
         remaining = list(state.get("remaining_checkpoint_ids", []))
         subgoal = state.get("current_subgoal_id")
+        progress_signature = f"{subgoal}:{','.join(remaining)}"
+        prev_signature = str(state.get("last_progress_signature", ""))
+        no_progress_steps = int(state.get("no_progress_steps", 0))
+        repeated_action_count = int(state.get("repeated_action_count", 0))
+        if len(history) >= 2 and str(history[-1].get("plan", "")) == str(history[-2].get("plan", "")):
+            repeated_action_count += 1
+        else:
+            repeated_action_count = 0
+        last_subgoal_distance = state.get("last_subgoal_distance_m")
         if subgoal in remaining:
             snapshot = state.get("latest_snapshot") or {}
             drone_xy = None
@@ -282,7 +329,13 @@ class LangGraphOrchestrationRunner:
                     drone_xy = (float(drone_gt[0]), float(drone_gt[1]))
             checkpoint = BENCHMARK_CHECKPOINTS_BY_ID.get(str(subgoal))
             if checkpoint is not None and drone_xy is not None:
-                if math.hypot(drone_xy[0] - float(checkpoint.x), drone_xy[1] - float(checkpoint.y)) <= float(checkpoint.radius_m):
+                distance_m = math.hypot(drone_xy[0] - float(checkpoint.x), drone_xy[1] - float(checkpoint.y))
+                previous_distance = state.get("last_subgoal_distance_m")
+                if previous_distance is not None and (float(previous_distance) - float(distance_m)) < 0.05:
+                    no_progress_steps += 1
+                else:
+                    no_progress_steps = 0
+                if distance_m <= float(checkpoint.radius_m):
                     completed = set(state.get("completed_checkpoint_ids", []))
                     completed.add(str(subgoal))
                     remaining = [cid for cid in remaining if cid != subgoal]
@@ -292,6 +345,26 @@ class LangGraphOrchestrationRunner:
                         "remaining_checkpoint_ids": remaining,
                         "current_subgoal_id": None,
                     }
+                    no_progress_steps = 0
+                    repeated_action_count = 0
+                    self._emit_agent_message(f"[RESULT] checkpoint completed: {subgoal}")
+                progress_signature = f"{state.get('current_subgoal_id')}:{','.join(remaining)}"
+                if progress_signature == prev_signature:
+                    no_progress_steps += 1
+                last_subgoal_distance = float(distance_m)
+                if repeated_action_count >= 2 and no_progress_steps >= 2:
+                    self._emit_agent_message("[AGENT] planning stalled, trigger subgoal reselection.")
+                    return {
+                        "route_decision": "reselect_subgoal",
+                        "mission_status": "running",
+                        "agent_step_count": step_count,
+                        "replan_count": replan_count,
+                        "execution_history": history,
+                        "last_subgoal_distance_m": last_subgoal_distance,
+                        "no_progress_steps": no_progress_steps,
+                        "repeated_action_count": repeated_action_count,
+                        "last_progress_signature": progress_signature,
+                    }
 
         if not remaining:
             return {
@@ -300,6 +373,10 @@ class LangGraphOrchestrationRunner:
                 "execution_history": history,
                 "mission_status": "completed",
                 "route_decision": "end",
+                "last_progress_signature": progress_signature,
+                "last_subgoal_distance_m": last_subgoal_distance,
+                "no_progress_steps": no_progress_steps,
+                "repeated_action_count": repeated_action_count,
             }
         if not bool(result.get("ok", False)):
             return {
@@ -308,6 +385,10 @@ class LangGraphOrchestrationRunner:
                 "execution_history": history,
                 "mission_status": "running",
                 "route_decision": "retry_plan" if bool(result.get("recoverable", True)) else "reselect_subgoal",
+                "last_progress_signature": progress_signature,
+                "last_subgoal_distance_m": last_subgoal_distance,
+                "no_progress_steps": no_progress_steps,
+                "repeated_action_count": repeated_action_count,
             }
         return {
             "agent_step_count": step_count,
@@ -315,7 +396,15 @@ class LangGraphOrchestrationRunner:
             "execution_history": history,
             "mission_status": "running",
             "route_decision": "continue",
+            "last_progress_signature": progress_signature,
+            "last_subgoal_distance_m": last_subgoal_distance,
+            "no_progress_steps": no_progress_steps,
+            "repeated_action_count": repeated_action_count,
         }
 
     def _route_from_evaluation(self, state: AgentState) -> RouteDecision:
         return str(state.get("route_decision", "continue"))  # type: ignore[return-value]
+
+    def _emit_agent_message(self, message: str):
+        if hasattr(self.controller, "append_message"):
+            self.controller.append_message(message)
