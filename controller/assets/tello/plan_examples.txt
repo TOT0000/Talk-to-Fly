@@ -57,3 +57,9 @@ Scene: CandidateTargets B=(2.0,6.4,-1.5), C=(8.8,8.4,-1.5), user_right_side=(6.2
 Task: [A] Go to C, then B, then come back to my right side.
 Rationale: Complete C first, then B, then switch to the user_right_side target.
 Response: _1=p('For target C blocked by O2, is the safer bypass side left or right?');?_1=='left'{ml(0.7)};?_1=='right'{mr(0.7)};d(0.2);_2=p('Is target C ahead of the drone, to the left, or to the right?');?_2=='left'{tu(30)};?_2=='right'{tc(30)};mf(1.0);d(0.2);_3=p('Is target B ahead of the drone, to the left, or to the right?');?_3=='left'{tu(30)};?_3=='right'{tc(30)};mf(1.0);d(0.2);_4=p('Is user_right_side ahead of the drone, to the left, or to the right?');?_4=='left'{tu(30)};?_4=='right'{tc(30)};mf(1.0);d(0.2);_5=p('Is the drone close to user_right_side?');?_5=='False'{_6=p('Is user_right_side ahead of the drone, to the left, or to the right?');?_6=='left'{tu(15)};?_6=='right'{tc(15)};mf(0.8)};
+
+Example 11 (checkpoint primitive)
+Scene: Active checkpoints include A1; BackgroundSafety current_collision_probability=0.080
+Task: [A] Go to checkpoint A1 and hold.
+Rationale: Use the checkpoint primitive for navigation; checkpoint completion still depends on runtime dwell logic.
+Response: go_checkpoint('A1');d(2.0);
