@@ -39,6 +39,11 @@ from .baseline_scenes import (
     get_task_point,
     normalize_baseline_scene_id,
 )
+from .benchmark_layout import (
+    BENCHMARK_CHECKPOINT_ORDER,
+    BENCHMARK_CHECKPOINTS,
+    BENCHMARK_ZONES,
+)
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = 0.30
@@ -148,6 +153,8 @@ class LLMController():
         self.baseline_scene_id = normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_1_CLEAR_PATH"))
         self.baseline_scene_state = None
         self.latest_baseline_decision = None
+        self.execution_mode = "Waiting"
+        self.active_objective_set = self._default_active_objective_set()
         self.planner_mode = str(os.getenv("TYPEFLY_PLANNER_MODE", "llm_baseline")).strip().lower()
         if self.planner_mode not in {"llm_baseline", "rule_baseline"}:
             self.planner_mode = "llm_baseline"
@@ -156,6 +163,65 @@ class LLMController():
         # PX4_SIM optional managed user-position publisher lifecycle
         self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
         self._owns_sim_user_publisher = False
+
+    def _default_active_objective_set(self) -> dict:
+        return {
+            "active_zone_ids": [zone.id for zone in BENCHMARK_ZONES],
+            "active_checkpoint_ids": list(BENCHMARK_CHECKPOINT_ORDER),
+            "source": "default_all",
+        }
+
+    def _resolve_active_objective_set(self, task_text: str) -> dict:
+        text = str(task_text or "")
+        normalized = text.upper()
+        all_zone_ids = [zone.id for zone in BENCHMARK_ZONES]
+        zone_to_checkpoints = {
+            "zone_A": [cid for cid in BENCHMARK_CHECKPOINT_ORDER if cid.startswith("A")],
+            "zone_B": [cid for cid in BENCHMARK_CHECKPOINT_ORDER if cid.startswith("B")],
+            "zone_C": [cid for cid in BENCHMARK_CHECKPOINT_ORDER if cid.startswith("C")],
+        }
+
+        all_keywords = (
+            "ALL ZONES",
+            "ALL CHECKPOINT",
+            "COMPLETE ALL",
+            "全部區域",
+            "全部检查点",
+            "全部檢查點",
+            "全部巡檢點",
+        )
+        if any(key in normalized for key in all_keywords) or any(key in text for key in all_keywords):
+            return {
+                "active_zone_ids": all_zone_ids,
+                "active_checkpoint_ids": list(BENCHMARK_CHECKPOINT_ORDER),
+                "source": "task_parse_all",
+            }
+
+        zone_tokens = set()
+        context_hits = any(word in normalized for word in ("ZONE", "ZONES", "AREA", "CHECKPOINT", "INSPECT", "SEARCH"))
+        context_hits = context_hits or any(word in text for word in ("區域", "巡檢", "搜尋", "搜索", "檢查點", "检查点"))
+        for token, zone_id in (("A", "zone_A"), ("B", "zone_B"), ("C", "zone_C")):
+            if re.search(rf"\b(?:ZONE|AREA)\s*{token}\b", normalized):
+                zone_tokens.add(zone_id)
+            if re.search(rf"\b{token}\b\s*(?:ZONE|AREA)\b", normalized):
+                zone_tokens.add(zone_id)
+            if f"{token}區域" in text or f"{token} 區域" in text or f"區域{token}" in text:
+                zone_tokens.add(zone_id)
+            if context_hits and re.search(rf"\b{token}\b", normalized):
+                zone_tokens.add(zone_id)
+
+        if not zone_tokens:
+            return self._default_active_objective_set()
+
+        active_zone_ids = sorted(zone_tokens)
+        active_checkpoint_ids = []
+        for zid in active_zone_ids:
+            active_checkpoint_ids.extend(zone_to_checkpoints.get(zid, []))
+        return {
+            "active_zone_ids": active_zone_ids,
+            "active_checkpoint_ids": active_checkpoint_ids,
+            "source": "task_parse_zone",
+        }
         
     def register_position_callback(self, callback):
         self.position_update_callback = callback
@@ -469,6 +535,8 @@ class LLMController():
         if self.controller_wait_takeoff:
             self.append_message("[Warning] Controller is waiting for takeoff...")
             return
+        self.execution_mode = "Planning"
+        self.active_objective_set = self._resolve_active_objective_set(task_description)
         self._task_id_counter += 1
         task_id = f"task_{self._task_id_counter:05d}"
         initial_snapshot = self.get_live_ui_snapshot()
@@ -520,6 +588,7 @@ class LLMController():
                     final_plan_source = "baseline_rule"
                     baseline_shortcut_triggered = True
                 else:
+                    self.execution_mode = "Planning"
                     self.current_plan = self.planner.plan(
                         task_description=task_description,
                         scene_description=scene_description,
@@ -553,6 +622,7 @@ class LLMController():
 
                 self.append_message(f'[Plan]: \\\\')
                 self.execution_time = time.time()
+                self.execution_mode = "Executing"
                 ret_val = self.execute_minispec(self.current_plan)
                 execution_success = True
                 task_completed = True
@@ -563,6 +633,7 @@ class LLMController():
                     task_completed=task_completed,
                 )
             except Exception as e:
+                self.execution_mode = "Yielding"
                 error_message = f"[C] Error: {e}"
                 print_t(error_message)
                 self.append_message(error_message)
@@ -580,9 +651,11 @@ class LLMController():
                 self.append_message('end')
                 self.current_plan = None
                 self.execution_history = None
+                self.execution_mode = "Waiting"
                 return
 
             break
+        self.execution_mode = "Completed"
         self.task_run_logger.consume_runtime_snapshot(self.get_live_ui_snapshot())
         self.task_run_logger.end_run(run_status="completed")
         monitor_stop.set()
@@ -592,6 +665,7 @@ class LLMController():
         self.append_message('end')
         self.current_plan = None
         self.execution_history = None
+        self.execution_mode = "Waiting"
 
     def get_active_scenario_name(self) -> str:
         return self.scenario_manager.selected_name()
@@ -843,7 +917,10 @@ class LLMController():
         else:
             user_packet = provider.get_latest_received_user_packet() if hasattr(provider, "get_latest_received_user_packet") else None
 
-        obstacle_states_generated = compute_obstacle_envelope_states(self.get_baseline_scene(), now_s=now)
+        baseline_state = self.baseline_scene_state or {}
+        scene_start_ts = float(baseline_state.get("captured_at", now))
+        elapsed_scene_s = max(0.0, now - scene_start_ts)
+        obstacle_states_generated = compute_obstacle_envelope_states(self.get_baseline_scene(), now_s=elapsed_scene_s)
         obstacle_states = self._simulate_obstacle_returns(obstacle_states_generated, now=now)
         user_heading = float(self.get_user_heading_yaw())
         user_ref = user_est or user_gt
@@ -908,11 +985,46 @@ class LLMController():
         if dominant_safety_context is not None:
             dominant_safety_context.path_summary = None
             safety_context = dominant_safety_context
+        elif drone_packet is not None:
+            # Fallback: when provider-level safety_state is unavailable, still
+            # compute collision probability with UAV + user/worker localization packets.
+            worker_packets = []
+            if user_packet is not None:
+                worker_packets.append(("user", user_packet))
+            worker_packets.extend((str(obs.id), obs.localization_packet) for obs in obstacle_states)
+            if worker_packets:
+                safety_context = self.safety_assessor.build_from_packets(
+                    drone_packet=drone_packet,
+                    worker_packets=worker_packets,
+                    now=now,
+                    safety_state=None,
+                )
+        drone_bias_xy = None if drone_packet is None else tuple(float(v) for v in drone_packet.b_xy[:2])
+        user_bias_xy = None if user_packet is None else tuple(float(v) for v in user_packet.b_xy[:2])
+        drone_corrected = None if drone_est is None else (
+            float(drone_est[0] - (0.0 if drone_bias_xy is None else drone_bias_xy[0])),
+            float(drone_est[1] - (0.0 if drone_bias_xy is None else drone_bias_xy[1])),
+            float(drone_est[2]),
+        )
+        user_corrected = None if user_est is None else (
+            float(user_est[0] - (0.0 if user_bias_xy is None else user_bias_xy[0])),
+            float(user_est[1] - (0.0 if user_bias_xy is None else user_bias_xy[1])),
+            float(user_est[2]),
+        )
+
         snapshot = {
             "drone_gt": drone_gt,
             "drone_est": drone_est,
+            "drone_est_bias_corrected": drone_corrected,
+            "drone_est_raw": drone_est,
+            "drone_bias_xy": drone_bias_xy,
+            "drone_P_xy": (None if drone_packet is None else np.asarray(drone_packet.P_xy, dtype=float).copy()),
             "user_gt": user_gt,
             "user_est": user_est,
+            "user_est_bias_corrected": user_corrected,
+            "user_est_raw": user_est,
+            "user_bias_xy": user_bias_xy,
+            "user_P_xy": (None if user_packet is None else np.asarray(user_packet.P_xy, dtype=float).copy()),
             "safety_state": safety_state,
             "safety_context": safety_context,
             "drone_yaw_rad": self._get_drone_yaw_rad(),
@@ -921,9 +1033,41 @@ class LLMController():
             "baseline_scene": self.get_baseline_scene(),
             "baseline_scene_state": self.baseline_scene_state,
             "obstacle_envelope_states": obstacle_states,
+            "workers": [
+                {
+                    "id": str(obs.id),
+                    "gt_xy": tuple(float(v) for v in obs.gt_xy),
+                    "est_xy_raw": (
+                        float(obs.localization_packet.estimated_position_3d[0]),
+                        float(obs.localization_packet.estimated_position_3d[1]),
+                    ),
+                    "bias_xy": tuple(float(v) for v in obs.localization_packet.b_xy[:2]),
+                    "est_xy_bias_corrected": (
+                        float(obs.localization_packet.estimated_position_3d[0] - obs.localization_packet.b_xy[0]),
+                        float(obs.localization_packet.estimated_position_3d[1] - obs.localization_packet.b_xy[1]),
+                    ),
+                    "P_xy": np.asarray(obs.localization_packet.P_xy, dtype=float).copy(),
+                }
+                for obs in obstacle_states
+            ],
             "candidate_targets": candidate_targets,
             "candidate_path_summaries": candidate_path_summaries,
             "baseline_decision": self.latest_baseline_decision,
+            "framework_name": "TypeFly baseline",
+            "mode_name": self.get_active_scenario_name(),
+            "execution_mode": self.execution_mode,
+            "active_objective_set": dict(self.active_objective_set),
+            "checkpoint_order": list(BENCHMARK_CHECKPOINT_ORDER),
+            "benchmark_checkpoints": [
+                {"id": cp.id, "zone_id": cp.zone_id, "x": float(cp.x), "y": float(cp.y), "radius_m": float(cp.radius_m)}
+                for cp in BENCHMARK_CHECKPOINTS
+            ],
+            "benchmark_zones": [
+                {"id": zone.id, "x_range": zone.x_range, "y_range": zone.y_range, "label_xy": zone.label_xy}
+                for zone in BENCHMARK_ZONES
+            ],
+            "original_planned_path": None,
+            "updated_path": None,
         }
         if safety_state is not None and safety_context is not None:
             consistency_from_gap = bool(float(safety_state.envelope_gap_m) < 0.0)
