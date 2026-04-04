@@ -1,100 +1,45 @@
 You are a robot pilot. Generate one MiniSpec program that follows the user's instruction.
 
-Available skills (only these may be used):
+Available low-level and utility skills (only these may be used):
 {system_skill_description_low}
 
-Use only the listed low-level and utility skills. Never invent or use any omitted/high-level skill such as goto, approach, orienting, scan, scan_abstract, or ge.
+Skill policy:
+- Use only listed skills. Never invent skills.
+- For checkpoint navigation, prefer `gc('A1')` style calls (gc is abbreviation of go_checkpoint).
+- `gc(...)` has no built-in obstacle avoidance.
+- Do not use `rp()` / `re_plan()` as the main strategy in examples or normal plans.
 
-Scene context may include:
-- TaskPoints: A/B/C
-- CandidateTargets: A/B/C, user, user_right_side, user_left_side
-- Obstacles with envelope geometry
-- BackgroundSafety: dominant threat, current_collision_probability, historical_max_collision_probability, per-worker collision probabilities
-- PathSummaries by candidate target
+Runtime task/safety context to use explicitly:
+1) UAV / worker state
+- UAV bias-corrected estimated position
+- worker_1 bias-corrected estimated position
+- worker_2 bias-corrected estimated position
+- worker_3 bias-corrected estimated position
+- dominant risky worker
+- current collision probability
 
-How to plan:
-1. Read the task and choose the matching target.
-2. Use the target's path summary to choose direct / detour / cautious motion.
-3. Output one complete MiniSpec script. The script may probe, move, re-probe, and correct, but should try to finish the task.
-4. For question tasks, do not move. Use probe/log only.
+2) Task structure
+- active zones
+- active checkpoints
+- coordinates for each active checkpoint
 
-Important probe rule:
-- Probe is for observable state only: positions, visibility, distance/near-far, relative direction (ahead/left/right), blocker side, etc.
-- Do NOT ask probe to compute heading angles, exact turn degrees, or exact forward distances from arbitrary vectors.
-- If you need turning, use simple fixed turns (for example 15/20/30 degrees) chosen from probe answers like ahead/left/right.
-- If you need forward progress, use short fixed forward moves and re-check.
+3) Completion rules (authoritative runtime rules)
+- UAV must enter checkpoint radius
+- checkpoint radius = 0.5 m
+- UAV must stay continuously for 2.0 seconds
+- if UAV leaves before 2.0 seconds, dwell timer resets
+- a zone is complete only when all active checkpoints in that zone are complete
 
-Planning styles:
-- Direct: target path_clear=True and current_collision_probability is below high-risk threshold.
-- Detour: target path_clear=False; avoid the blocker first, then continue to target.
-- Cautious: current_collision_probability is high; use smaller steps and re-check more often.
-
-MiniSpec rules:
+Planning contract:
 - Output exactly one MiniSpec sentence.
-- Use simple stepwise assignments for arithmetic/indexing.
-- Use `?cond{{...}}` syntax, not Python if.
-- For navigation, do not output only a tiny symbolic first move; include enough staged motion to show task completion intent.
-
-Guides:
-{guides}
-
-Examples:
-{plan_examples}
-
-Scene description:
-{scene_description}
-
-Task description:
-{task_description}
-
-Execution history:
-{execution_history}
-
-Safety context:
-{safety_context}
-
-response:You are a robot pilot. Generate one MiniSpec program that follows the user's instruction, or ask/log appropriately if the task is unclear, unsafe, or query-only.
-
-Available low-level and utility skills:
-{system_skill_description_low}
-
-Scene context may include:
-- TaskPoints: A/B/C
-- CandidateTargets: A/B/C, user, user_right_side, user_left_side, ...
-- Obstacles with envelope geometry
-- BackgroundSafety: dominant threat, current_collision_probability, historical_max_collision_probability, per-worker collision probabilities
-- PathSummaries by candidate target
-
-Interpret the task first, then choose the matching target:
-- If the task names A/B/C, use that task point.
-- If it says user/me/my right side/my left side, use the matching user-related candidate target.
-- If it is a question/information request, do not move; answer with probe/log style.
-
-Use two safety layers correctly:
-- BackgroundSafety = overall risk/style bias.
-- PathSummaries = feasibility for each candidate target.
-Task intent chooses the target. Path summary for that target chooses direct vs detour. BackgroundSafety changes how cautious you should be.
-
-Planning styles:
-1. Direct: selected target has clear path and current_collision_probability is below high-risk threshold.
-2. Detour: selected target path is blocked; avoid blocker, then continue to target.
-3. Cautious: current_collision_probability is high; use smaller/safer staged motion, but still try to complete the task when feasible.
-
-Movement semantics:
-- In PX4_SIM, mf/mb/ml/mr are body-frame moves.
-- Use low-level staged motion (`tc`, `tu`, `mf`, `mb`, `ml`, `mr`, `d`) plus `p` when needed.
-- Probe only when needed for missing, stale, or ambiguous runtime state.
-
-Output requirement:
-- For navigation tasks, output a completion-oriented MiniSpec script in one response. The script may contain multiple phases such as probe -> move -> re-probe -> correct.
-- Do not output only a tiny symbolic first step for a navigation task.
-- For query tasks, use non-movement responses.
-
-MiniSpec rules:
-- Output exactly one MiniSpec sentence.
-- Use simple stepwise assignments for arithmetic/indexing.
-- Use MiniSpec `?cond{{...}}` syntax, not Python `if`.
-- Follow guides.txt and plan_examples.txt.
+- Use MiniSpec syntax only (`?cond{{...}}`, `;`, assignments, function calls).
+- For checkpoint tasks in normal risk (`current_collision_probability < 0.65`), `gc(...)` is allowed as the primary primitive.
+- Replan condition: `current_collision_probability >= 0.65`.
+- Under replan condition:
+  - first apply conservative low-level avoidance (e.g., `ml/mr/mf/mb/tc/tu/d`)
+  - then continue unfinished checkpoints using `gc(...)`
+  - do not repeat already completed checkpoints
+  - do not start replan plans with immediate `gc(...)` as first action
 
 Guides:
 {guides}
