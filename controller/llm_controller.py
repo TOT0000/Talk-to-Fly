@@ -447,6 +447,11 @@ class LLMController():
             completed_set = set(str(v).upper() for v in list(progress.get("completed") or []))
             completion_state = checkpoint.id in completed_set
             runtime_target = None if progress.get("current_target") is None else str(progress.get("current_target")).upper()
+            safety_context = snapshot.get("safety_context")
+            current_p = 0.0 if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
+            if current_p >= COLLISION_PROBABILITY_REPLAN_THRESHOLD:
+                stop_reason = f"collision_probability_high({current_p:.3f})"
+                break
 
             dx_w = float(checkpoint.x) - float(control_pos[0])
             dy_w = float(checkpoint.y) - float(control_pos[1])
@@ -576,17 +581,22 @@ class LLMController():
         safety_context = snapshot.get("safety_context")
         if safety_context is None:
             return False, ""
-        current_p = float(getattr(safety_context, "current_collision_probability", 0.0))
+        callback_p = float(getattr(safety_context, "current_collision_probability", 0.0))
+        current_p = callback_p
+        ui_p = self.latest_ui_collision_probability
+        ui_is_fresh = bool(ui_p is not None and (time.time() - float(self.latest_ui_collision_timestamp)) <= 1.5)
+        if ui_is_fresh:
+            current_p = max(float(current_p), float(ui_p))
         should_abort = bool(current_p >= COLLISION_PROBABILITY_REPLAN_THRESHOLD)
         if should_abort:
             dominant = str(getattr(safety_context, "dominant_threat_id", "unknown"))
-            ui_p = self.latest_ui_collision_probability
             ui_p_text = "n/a" if ui_p is None else f"{float(ui_p):.6f}"
             print_t(
                 "[REPLAN_DEBUG] "
                 f"source=collision_threshold "
                 f"ui_pc={ui_p_text} "
-                f"callback_pc={current_p:.6f} "
+                f"callback_pc={callback_p:.6f} "
+                f"decision_pc={current_p:.6f} "
                 f"threshold={COLLISION_PROBABILITY_REPLAN_THRESHOLD:.6f} "
                 f"should_abort={should_abort} "
                 f"dominant={dominant}"

@@ -102,6 +102,17 @@ class TypeFly:
             "user_gt": deque(maxlen=100),
             "user_est": deque(maxlen=100),
         }
+        self.worker_collision_history = {
+            "worker_1": deque(maxlen=100),
+            "worker_2": deque(maxlen=100),
+            "worker_3": deque(maxlen=100),
+        }
+        self.worker_collision_active = {
+            "worker_1": False,
+            "worker_2": False,
+            "worker_3": False,
+        }
+        self.mission_collision_count = 0
         self.plot_style = {
             "drone": {"main": "#0B57D0", "light": "#8AB4F8"},
             "user": {"main": "#C5221F", "light": "#F28B82"},
@@ -268,13 +279,12 @@ class TypeFly:
                 with gr.Column(scale=2, min_width=300):
                     self.status_markdown = gr.Markdown(value="### Status\nWaiting for live data...")
                     self.entity_markdown = gr.Markdown(value="### Entity positions\nWaiting for live data...")
-                    self.debug_markdown = gr.Markdown(value="### Debug\nCollapsed", visible=False)
 
             with gr.Row():
                 self.xy_plot = gr.Image(value=self.create_blank_plot("Local XY", "X (m)", "Y (m)", xlim=(0, 12), ylim=(0, 12), figsize=(5, 4)), label="Local XY", height=320)
-                self.x_plot = gr.Image(value=self.create_sequence_plot("X in Sequence", "Index", "X (m)", xlim=(0, 1), ylim=(0, 12)), label="X in Sequence", height=320)
-                self.y_plot = gr.Image(value=self.create_sequence_plot("Y in Sequence", "Index", "Y (m)", xlim=(0, 1), ylim=(0, 12)), label="Y in Sequence", height=320)
-                self.z_plot = gr.Image(value=self.create_sequence_plot("Z in Sequence", "Index", "Z (m)", xlim=(0, 1), ylim=(0, 6)), label="Z in Sequence", height=320)
+                self.x_plot = gr.Image(value=self.create_sequence_plot("worker_1 Collision Probability", "Sample", "P(collision)", xlim=(0, 1), ylim=(0, 1)), label="worker_1 P(collision)", height=320)
+                self.y_plot = gr.Image(value=self.create_sequence_plot("worker_2 Collision Probability", "Sample", "P(collision)", xlim=(0, 1), ylim=(0, 1)), label="worker_2 P(collision)", height=320)
+                self.z_plot = gr.Image(value=self.create_sequence_plot("worker_3 Collision Probability", "Sample", "P(collision)", xlim=(0, 1), ylim=(0, 1)), label="worker_3 P(collision)", height=320)
 
             self.counter = gr.State(0)
             self.timer = Timer(value=0.08)
@@ -291,7 +301,6 @@ class TypeFly:
                     self.counter,
                     self.status_markdown,
                     self.entity_markdown,
-                    self.debug_markdown,
                 ]
             )
 
@@ -503,6 +512,8 @@ class TypeFly:
             self.mission_clock["completed_at"] = None
             self.mission_clock["is_running"] = True
             self.mission_clock["objective_completed"] = False
+            self.worker_collision_active = {k: False for k in self.worker_collision_active.keys()}
+            self.mission_collision_count = 0
             task_thread = Thread(target=self.llm_controller.execute_task_description, args=(message,))
             task_thread.start()
             complete_response = ''
@@ -639,23 +650,24 @@ class TypeFly:
             self.llm_controller.update_ui_collision_probability(ui_pc)
         self._sync_objective_state(snapshot)
         self._append_history(snapshot)
+        self._append_worker_collision_history(snapshot)
+        self._update_mission_collision_count(snapshot)
         self._update_checkpoint_progress(snapshot)
         anchor_plot = self.render_anchor_3d_plot()
         global_xy, xy, x, y, z = self.update_position_plot(snapshot, show_error_ellipse=show_error_ellipse, show_raw_estimate=show_raw_estimate)
         status_md = self.render_status_markdown(snapshot)
         entity_md = self.render_entity_markdown(snapshot)
-        debug_md = self.render_debug_markdown(snapshot)
         counter += 1
         print_debug(
             "[UI-CALLBACK] "
-            "outputs=[anchor_3d,global_xy_plot,xy_plot,x_plot,y_plot,z_plot,counter,status,entity,debug] "
+            "outputs=[anchor_3d,global_xy_plot,xy_plot,x_plot,y_plot,z_plot,counter,status,entity] "
             f"drone_gt={None if not snapshot else snapshot.get('drone_gt')} "
             f"drone_est={None if not snapshot else snapshot.get('drone_est')} "
             f"user_gt={None if not snapshot else snapshot.get('user_gt')} "
             f"user_est={None if not snapshot else snapshot.get('user_est')} "
             f"counter={counter}"
         )
-        return anchor_plot, global_xy, xy, x, y, z, counter, status_md, entity_md, debug_md
+        return anchor_plot, global_xy, xy, x, y, z, counter, status_md, entity_md
 
     def _fmt_vec(self, value):
         if value is None:
@@ -781,6 +793,37 @@ class TypeFly:
                 self.position_history[key].append(tuple(float(v) for v in value))
                 print_debug(f"[UI-HISTORY] key={key} appended={self.position_history[key][-1]}")
 
+    def _append_worker_collision_history(self, snapshot):
+        safety_context = snapshot.get("safety_context") if snapshot else None
+        per_worker = {}
+        if safety_context is not None:
+            per_worker = {
+                str(row.get("id")): float(row.get("collision_probability", 0.0))
+                for row in (getattr(safety_context, "per_worker_collision_probabilities", []) or [])
+            }
+        for worker_id in ("worker_1", "worker_2", "worker_3"):
+            self.worker_collision_history[worker_id].append(float(per_worker.get(worker_id, 0.0)))
+
+    def _update_mission_collision_count(self, snapshot):
+        if not snapshot:
+            return
+        drone_gt = snapshot.get("drone_gt")
+        workers = snapshot.get("workers") or []
+        if drone_gt is None:
+            return
+        collision_radius = float(UAV_RADIUS_M + WORKER_RADIUS_M)
+        worker_map = {str(item.get("id")): item for item in workers}
+        for worker_id in ("worker_1", "worker_2", "worker_3"):
+            worker = worker_map.get(worker_id)
+            worker_gt = None if worker is None else worker.get("gt_xy")
+            currently_colliding = False
+            if worker_gt is not None:
+                distance_xy = math.hypot(float(drone_gt[0]) - float(worker_gt[0]), float(drone_gt[1]) - float(worker_gt[1]))
+                currently_colliding = bool(distance_xy <= collision_radius)
+            if currently_colliding and not self.worker_collision_active.get(worker_id, False):
+                self.mission_collision_count += 1
+            self.worker_collision_active[worker_id] = currently_colliding
+
     def render_status_markdown(self, snapshot):
         safety_context = snapshot.get("safety_context") if snapshot else None
         if safety_context is None:
@@ -820,6 +863,7 @@ class TypeFly:
             f"- current target checkpoint: {target}",
             f"- checkpoint progress: {completed_active}/{total}",
             f"- zone progress: {', '.join(zone_parts) if zone_parts else 'n/a'}",
+            f"- mission collision count: {int(self.mission_collision_count)}",
             f"- mission completed: {self.mission_clock.get('objective_completed', False)}",
             f"- mission elapsed time: {elapsed_text}",
             f"- mission completion time: {completion_text}",
@@ -847,27 +891,6 @@ class TypeFly:
             lines.append(f"- {worker_id} true: {_fmt_xy(None if worker is None else worker.get('gt_xy'))}")
             lines.append(f"- {worker_id} est: {_fmt_xy(None if worker is None else worker.get('est_xy_bias_corrected'))}")
         return "\n".join(lines)
-
-    def render_debug_markdown(self, snapshot):
-        safety_context = snapshot.get("safety_context") if snapshot else None
-        if safety_context is None:
-            return gr.update(value="### Debug\nWaiting for safety state...", visible=True)
-        per_worker = {str(row.get("id")): row for row in (getattr(safety_context, "per_worker_collision_probabilities", []) or [])}
-        w3 = per_worker.get("worker_3", {})
-        dbg = getattr(safety_context, "collision_debug_info", {}) or {}
-        sanity = dbg.get("sanity_case_probabilities", {}) if isinstance(dbg, dict) else {}
-        lines = [
-            "### Debug",
-            f"- DEBUG_FORCE_CLOSE_WORKER: {os.getenv('DEBUG_FORCE_CLOSE_WORKER', 'false')}",
-            f"- r_u={UAV_RADIUS_M:.2f}, r_h={WORKER_RADIUS_M:.2f}, r_c={UAV_RADIUS_M + WORKER_RADIUS_M:.2f}",
-            f"- worker_3 mu: {w3.get('mu_xy', 'n/a')}",
-            f"- worker_3 Sigma_rel: {w3.get('sigma_rel', 'n/a')}",
-            f"- worker_3 exact P_c: {self._fmt_prob(w3.get('exact_series_probability'))}",
-            f"- worker_3 MC P_c: {self._fmt_prob(w3.get('monte_carlo_probability'))}",
-            f"- sanity case1 exact: {self._fmt_prob(sanity.get('case1_exact'))}",
-            f"- sanity case2 exact: {self._fmt_prob(sanity.get('case2_exact'))}",
-        ]
-        return gr.update(value="\n".join(lines), visible=True)
 
     def _estimate_heading_from_history(self, primary_key: str, fallback_key: str = None):
         history = list(self.position_history.get(primary_key, []))
@@ -1051,53 +1074,35 @@ class TypeFly:
             show_raw_estimate=show_raw_estimate,
         )
 
-        series_specs = [
-            ("drone_gt", "Drone GT", self.plot_style["drone"]["main"], "-"),
-            ("drone_est", "Drone EST", self.plot_style["drone"]["main"], "--"),
-            ("user_gt", "User GT", self.plot_style["user"]["main"], "-"),
-            ("user_est", "User EST", self.plot_style["user"]["main"], "--"),
-        ]
         imgs = []
-        axis_map = {"x": 0, "y": 1, "z": 2}
-        for axis in ["x", "y", "z"]:
+        worker_specs = [
+            ("worker_1", "#7B1FA2"),
+            ("worker_2", "#00897B"),
+            ("worker_3", "#EF6C00"),
+        ]
+        for worker_id, color in worker_specs:
             fig, ax = plt.subplots(figsize=(5, 4))
-            values = []
-            axis_idx = axis_map[axis]
-            for spec in series_specs:
-                key = spec[0]
-                label = spec[1]
-                color = spec[2]
-                linestyle = spec[3] if len(spec) > 3 else "-"
-                history = list(self.position_history[key])
-                if not history:
-                    ax.plot([], [], color=color, label=label)
-                    continue
-                x_vals = list(range(len(history)))
-                y_vals = [point[axis_idx] for point in history]
-                values.extend(y_vals)
-                markerfacecolor = color if linestyle == "-" else "none"
+            history = list(self.worker_collision_history[worker_id])
+            if history:
                 ax.plot(
-                    x_vals,
-                    y_vals,
+                    list(range(len(history))),
+                    history,
                     color=color,
-                    linestyle=linestyle,
+                    linestyle="-",
                     marker='o',
                     markersize=3,
-                    markerfacecolor=markerfacecolor,
+                    markerfacecolor=color,
                     markeredgecolor=color,
-                    label=label,
+                    label=f"{worker_id} P(collision)",
                 )
-            max_len = max((len(self.position_history[spec[0]]) for spec in series_specs), default=1)
-            ax.set_xlim(0, max(max_len - 1, 1))
-            if values:
-                ymin = min(values) - 0.5
-                ymax = max(values) + 0.5
             else:
-                ymin, ymax = 0.0, 5.0
-            ax.set_ylim(ymin, ymax)
-            ax.set_title(f"{axis.upper()} History")
+                ax.plot([], [], color=color, label=f"{worker_id} P(collision)")
+            max_len = max(len(history), 1)
+            ax.set_xlim(0, max(max_len - 1, 1))
+            ax.set_ylim(0.0, 1.0)
+            ax.set_title(f"{worker_id} Collision Probability")
             ax.set_xlabel("Sample")
-            ax.set_ylabel(f"{axis.upper()} (m)")
+            ax.set_ylabel("P(collision)")
             ax.grid(True, linestyle='--', linewidth=0.5)
             ax.legend(fontsize=8)
 
