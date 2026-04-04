@@ -32,6 +32,7 @@ from .task_run_logger import TaskRunLogger
 from .baseline_scenes import (
     BASELINE_SCENES,
     BaselineScene,
+    ObstacleEnvelopeState,
     build_all_scene_expectations,
     build_scene_expectations,
     compute_obstacle_envelope_states,
@@ -39,14 +40,20 @@ from .baseline_scenes import (
     get_task_point,
     normalize_baseline_scene_id,
 )
+from .safety_envelope import build_safety_envelope
 from .benchmark_layout import (
     BENCHMARK_CHECKPOINT_ORDER,
+    BENCHMARK_CHECKPOINTS_BY_ID,
     BENCHMARK_CHECKPOINTS,
     BENCHMARK_ZONES,
 )
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = 0.30
+COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.65
+COLLISION_PROBABILITY_REARM_THRESHOLD = 0.45
+AUTO_REPLAN_PROTECTION_STATEMENTS = 2
+COLLISION_RISK_WORKER_IDS = ("worker_1", "worker_2", "worker_3")
 
 class LLMController():
     def __init__(self, robot_type, virtual_queue, use_http=False, message_queue: Optional[queue.Queue]=None, enable_video=False, state_provider: Optional[StateProvider]=None):
@@ -118,6 +125,7 @@ class LLMController():
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_right", self.drone.move_right, "Move right by a distance", args=[SkillArg("distance", float)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_up", self.drone.move_up, "Move up by a distance", args=[SkillArg("distance", float)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_down", self.drone.move_down, "Move down by a distance", args=[SkillArg("distance", float)]))
+        self.low_level_skillset.add_skill(LowLevelSkillItem("go_checkpoint", self.skill_go_checkpoint, "Navigate toward a benchmark checkpoint by ID", args=[SkillArg("checkpoint_id", str)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("takeoff", self.skill_takeoff, "Take off and climb to a safe hover height"))
         self.low_level_skillset.add_skill(LowLevelSkillItem("land", self.skill_land, "Land safely at current location"))
         self.low_level_skillset.add_skill(LowLevelSkillItem("turn_cw", self.drone.turn_cw, "Rotate clockwise/right by certain degrees", args=[SkillArg("degrees", int)]))
@@ -150,15 +158,25 @@ class LLMController():
         self._task_id_counter = 0
         self.latest_scenario_report = None
         self.initial_scenario_state = None
-        self.baseline_scene_id = normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_1_CLEAR_PATH"))
+        self.baseline_scene_id = normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_BENCHMARK_DEMO"))
         self.baseline_scene_state = None
         self.latest_baseline_decision = None
         self.execution_mode = "Waiting"
         self.active_objective_set = self._default_active_objective_set()
+        self.latest_benchmark_progress = {
+            "completed": [],
+            "current_target": None,
+        }
+        self.latest_ui_collision_probability = None
+        self.latest_ui_collision_timestamp = 0.0
         self.planner_mode = str(os.getenv("TYPEFLY_PLANNER_MODE", "llm_baseline")).strip().lower()
         if self.planner_mode not in {"llm_baseline", "rule_baseline"}:
             self.planner_mode = "llm_baseline"
         self.user_heading_yaw_rad = 0.0
+        self.manual_worker_selection_id = "worker_1"
+        self.manual_worker_poses: dict[str, dict] = {}
+        self.auto_replan_armed = True
+        self.auto_replan_protection_remaining = 0
 
         # PX4_SIM optional managed user-position publisher lifecycle
         self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
@@ -383,6 +401,7 @@ class LLMController():
         return None, False
     
     def skill_re_plan(self) -> Tuple[None, bool]:
+        print_t("[REPLAN_DEBUG] source=rp_skill")
         return None, True
 
     def skill_takeoff(self) -> Tuple[None, bool]:
@@ -399,9 +418,194 @@ class LLMController():
         time.sleep(s)
         return None, False
 
+    def skill_go_checkpoint(self, checkpoint_id: str) -> Tuple[str, bool]:
+        checkpoint_key = str(checkpoint_id or "").strip().strip("'\"").upper()
+        checkpoint = BENCHMARK_CHECKPOINTS_BY_ID.get(checkpoint_key)
+        if checkpoint is None:
+            raise ValueError(f"Unknown checkpoint_id `{checkpoint_id}`")
+
+        max_step_m = 1.0
+        min_axis_step_m = 0.12
+        no_progress_limit = 3
+
+        initial_snapshot = self.get_live_ui_snapshot()
+        initial_control = (
+            initial_snapshot.get("drone_est_bias_corrected")
+            or initial_snapshot.get("drone_est")
+            or initial_snapshot.get("drone_gt")
+            or (0.0, 0.0, 0.0)
+        )
+        initial_dist = math.hypot(float(checkpoint.x) - float(initial_control[0]), float(checkpoint.y) - float(initial_control[1]))
+        max_iterations = max(12, min(80, int(math.ceil(initial_dist / 0.35)) + 6))
+
+        reached = False
+        final_dist = None
+        best_dist = float("inf")
+        no_progress_count = 0
+        stop_reason = "max_iterations"
+
+        for idx in range(max_iterations):
+            snapshot = self.get_live_ui_snapshot()
+            true_pos = snapshot.get("drone_gt")
+            est_raw = snapshot.get("drone_est")
+            est_bias = snapshot.get("drone_est_bias_corrected") or est_raw
+            control_pos = est_bias or true_pos or (0.0, 0.0, 0.0)
+            yaw = float(snapshot.get("drone_yaw_rad") or 0.0)
+            progress = dict(snapshot.get("benchmark_progress") or {})
+            completed_set = set(str(v).upper() for v in list(progress.get("completed") or []))
+            completion_state = checkpoint.id in completed_set
+            runtime_target = None if progress.get("current_target") is None else str(progress.get("current_target")).upper()
+            safety_context = snapshot.get("safety_context")
+            current_p = 0.0 if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
+            if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
+                stop_reason = f"collision_probability_high({current_p:.3f})"
+                break
+
+            dx_w = float(checkpoint.x) - float(control_pos[0])
+            dy_w = float(checkpoint.y) - float(control_pos[1])
+            dist_control = math.hypot(dx_w, dy_w)
+            dist_true = None
+            if true_pos is not None:
+                dist_true = math.hypot(float(checkpoint.x) - float(true_pos[0]), float(checkpoint.y) - float(true_pos[1]))
+            final_dist = dist_control
+
+            in_radius_by_control = dist_control <= float(checkpoint.radius_m)
+            in_radius_by_true = (dist_true is not None and dist_true <= float(checkpoint.radius_m))
+            stop_condition = bool(in_radius_by_control or in_radius_by_true or completion_state)
+
+            body_forward = math.cos(yaw) * dx_w + math.sin(yaw) * dy_w
+            body_right = -math.sin(yaw) * dx_w + math.cos(yaw) * dy_w
+
+            chosen_action = "none"
+            dist_trend = "improving" if dist_control + 0.02 < best_dist else "flat_or_worse"
+            if stop_condition:
+                reached = True
+                stop_reason = "completion_state" if completion_state else ("true_radius" if in_radius_by_true else "estimated_radius")
+            else:
+                if dist_control + 0.02 < best_dist:
+                    best_dist = dist_control
+                    no_progress_count = 0
+                else:
+                    no_progress_count += 1
+                if no_progress_count >= no_progress_limit:
+                    stop_reason = "no_progress_fail_safe"
+                    break
+
+                local_step_cap = 0.25 if dist_control < 0.35 else max_step_m
+                if abs(body_forward) < min_axis_step_m and abs(body_right) < min_axis_step_m:
+                    stop_reason = "tiny_residual_vector"
+                    break
+
+                if abs(body_forward) >= abs(body_right):
+                    step = min(local_step_cap, abs(body_forward))
+                    if body_forward > 0:
+                        self.drone.move_forward(step)
+                        chosen_action = f"move_forward({step:.2f})"
+                    else:
+                        self.drone.move_backward(step)
+                        chosen_action = f"move_backward({step:.2f})"
+                else:
+                    step = min(local_step_cap, abs(body_right))
+                    if body_right > 0:
+                        self.drone.move_right(step)
+                        chosen_action = f"move_right({step:.2f})"
+                    else:
+                        self.drone.move_left(step)
+                        chosen_action = f"move_left({step:.2f})"
+
+            print_t(
+                "[GC_DEBUG] "
+                f"cp={checkpoint.id} "
+                f"target=({checkpoint.x:.2f},{checkpoint.y:.2f}) "
+                f"zone={checkpoint.zone_id} "
+                f"iter={idx + 1}/{max_iterations} "
+                f"true_pos={true_pos} est_raw={est_raw} est_bias={est_bias} "
+                f"control_pos={control_pos} "
+                f"dx={dx_w:.3f} dy={dy_w:.3f} "
+                f"dist_control={dist_control:.3f} dist_true={'n/a' if dist_true is None else f'{dist_true:.3f}'} "
+                f"yaw={yaw:.3f} "
+                f"body_forward={body_forward:.3f} body_right={body_right:.3f} "
+                f"runtime_target={runtime_target} "
+                f"action={chosen_action} "
+                f"stop_condition={stop_condition} completion_state={completion_state} "
+                f"dist_trend={dist_trend} "
+                f"reason={stop_reason if stop_condition else 'continue'}"
+            )
+
+            if stop_condition:
+                break
+
+        status = "reached" if reached else "approached"
+        summary = (
+            f"go_checkpoint({checkpoint.id}) {status}: "
+            f"zone={checkpoint.zone_id}, target=({checkpoint.x:.2f},{checkpoint.y:.2f}), "
+            f"remaining_dist={0.0 if final_dist is None else float(final_dist):.2f}m, "
+            f"stop_reason={stop_reason}"
+        )
+        print_t(f"[C] {summary}")
+        # If not arrived, request replan so downstream dwell steps are not executed blindly.
+        return summary, (not reached)
+
     def append_message(self, message: str):
         if self.message_queue is not None:
             self.message_queue.put(message)
+
+    def update_benchmark_progress(self, completed_checkpoint_ids, current_target_checkpoint):
+        completed = [str(v).upper() for v in list(completed_checkpoint_ids or [])]
+        self.latest_benchmark_progress = {
+            "completed": sorted(set(completed)),
+            "current_target": (None if current_target_checkpoint is None else str(current_target_checkpoint).upper()),
+        }
+
+    def update_ui_collision_probability(self, current_collision_probability: Optional[float]):
+        if current_collision_probability is None:
+            return
+        self.latest_ui_collision_probability = float(current_collision_probability)
+        self.latest_ui_collision_timestamp = time.time()
+
+    def _on_statement_executed_for_replan(self):
+        if self.auto_replan_protection_remaining > 0:
+            self.auto_replan_protection_remaining -= 1
+            print_t(
+                "[REPLAN_DEBUG] "
+                f"protection_window_active remaining_statements={self.auto_replan_protection_remaining}"
+            )
+
+    def _should_trigger_auto_replan(self, current_p: float, source: str) -> bool:
+        current_p = float(current_p)
+        if self.auto_replan_protection_remaining > 0:
+            print_t(
+                "[REPLAN_DEBUG] "
+                f"auto_replan_suppressed p={current_p:.6f} reason=protection_window "
+                f"remaining_statements={self.auto_replan_protection_remaining} source={source}"
+            )
+            return False
+
+        if not self.auto_replan_armed:
+            if current_p <= COLLISION_PROBABILITY_REARM_THRESHOLD:
+                self.auto_replan_armed = True
+                print_t(
+                    "[REPLAN_DEBUG] "
+                    f"auto_replan_rearmed p={current_p:.6f} "
+                    f"threshold={COLLISION_PROBABILITY_REARM_THRESHOLD:.2f}"
+                )
+            else:
+                print_t(
+                    "[REPLAN_DEBUG] "
+                    f"auto_replan_suppressed p={current_p:.6f} reason=disarmed source={source}"
+                )
+            return False
+
+        if current_p >= COLLISION_PROBABILITY_REPLAN_THRESHOLD:
+            self.auto_replan_armed = False
+            print_t(
+                "[REPLAN_DEBUG] "
+                f"auto_replan_triggered p={current_p:.6f} armed=True source={source} "
+                f"trigger_threshold={COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}"
+            )
+            print_t("[REPLAN_DEBUG] auto_replan_armed=False")
+            return True
+        return False
 
     def stop_controller(self):
         self.controller_active = False
@@ -414,11 +618,47 @@ class LLMController():
         return image
     
     def execute_minispec(self, minispec: str):
-        interpreter = MiniSpecInterpreter(self.message_queue)
+        interpreter = MiniSpecInterpreter(
+            self.message_queue,
+            should_abort=self._should_abort_current_execution_for_replan,
+            on_statement_executed=self._on_statement_executed_for_replan,
+        )
         interpreter.execute(minispec)
         self.execution_history = interpreter.execution_history
         ret_val = interpreter.ret_queue.get()
+        if hasattr(ret_val, "value") and isinstance(ret_val.value, str) and ret_val.value.startswith("MiniSpec execution error"):
+            raise RuntimeError(ret_val.value)
         return ret_val
+
+    def _should_abort_current_execution_for_replan(self) -> Tuple[bool, str]:
+        snapshot = self.get_live_ui_snapshot()
+        if not isinstance(snapshot, dict):
+            return False, ""
+        safety_context = snapshot.get("safety_context")
+        if safety_context is None:
+            return False, ""
+        callback_p = float(getattr(safety_context, "current_collision_probability", 0.0))
+        current_p = callback_p
+        ui_p = self.latest_ui_collision_probability
+        ui_is_fresh = bool(ui_p is not None and (time.time() - float(self.latest_ui_collision_timestamp)) <= 1.5)
+        if ui_is_fresh:
+            current_p = max(float(current_p), float(ui_p))
+        should_abort = self._should_trigger_auto_replan(current_p, source="interpreter_callback")
+        if should_abort:
+            dominant = str(getattr(safety_context, "dominant_threat_id", "unknown"))
+            ui_p_text = "n/a" if ui_p is None else f"{float(ui_p):.6f}"
+            print_t(
+                "[REPLAN_DEBUG] "
+                f"source=collision_threshold "
+                f"ui_pc={ui_p_text} "
+                f"callback_pc={callback_p:.6f} "
+                f"decision_pc={current_p:.6f} "
+                f"threshold={COLLISION_PROBABILITY_REPLAN_THRESHOLD:.6f} "
+                f"should_abort={should_abort} "
+                f"dominant={dominant}"
+            )
+            return True, f"current_collision_probability={current_p:.6f}>=0.65, dominant={dominant}"
+        return False, ""
 
     def _sanitize_minispec_plan(self, raw_plan: str) -> str:
         if raw_plan is None:
@@ -550,6 +790,10 @@ class LLMController():
         ret_val = None
         monitor_stop = threading.Event()
         monitor_thread = None
+        replan_attempts = 0
+        max_replan_attempts = 3
+        self.auto_replan_armed = True
+        self.auto_replan_protection_remaining = 0
         def _run_monitor():
             while not monitor_stop.is_set():
                 try:
@@ -588,6 +832,7 @@ class LLMController():
                     final_plan_source = "baseline_rule"
                     baseline_shortcut_triggered = True
                 else:
+                    previous_plan = self.current_plan
                     self.execution_mode = "Planning"
                     self.current_plan = self.planner.plan(
                         task_description=task_description,
@@ -595,6 +840,7 @@ class LLMController():
                         location_info=location_info,
                         execution_history=self.execution_history,
                         safety_context=safety_context,
+                        previous_plan=previous_plan,
                     )
                     llm_called = True
                     final_plan_source = "llm"
@@ -623,11 +869,35 @@ class LLMController():
                 self.append_message(f'[Plan]: \\\\')
                 self.execution_time = time.time()
                 self.execution_mode = "Executing"
+                self.auto_replan_protection_remaining = int(AUTO_REPLAN_PROTECTION_STATEMENTS)
+                print_t(
+                    "[REPLAN_DEBUG] "
+                    f"protection_window_active remaining_statements={self.auto_replan_protection_remaining}"
+                )
                 ret_val = self.execute_minispec(self.current_plan)
                 execution_success = True
                 task_completed = True
                 if isinstance(ret_val, tuple) and len(ret_val) >= 2:
                     execution_success = bool(ret_val[0] is not False)
+                if hasattr(ret_val, "replan") and bool(ret_val.replan):
+                    replan_source = "interpreter_return_flag"
+                    replan_value = str(getattr(ret_val, "value", "") or "")
+                    if "interrupted for replan" in replan_value:
+                        replan_source = "collision_threshold_callback"
+                    elif "High-level skill" in replan_value:
+                        replan_source = "high_level_skill_failure"
+                    print_t(f"[REPLAN_DEBUG] source={replan_source} ret_val={replan_value}")
+                    replan_attempts += 1
+                    self.task_run_logger.update_execution_info(
+                        execution_success=False,
+                        failure_reason="replan_requested",
+                        task_completed=False,
+                    )
+                    if replan_attempts > max_replan_attempts:
+                        raise RuntimeError(f"Exceeded max replan attempts ({max_replan_attempts})")
+                    self.append_message(f"[LOG] Replan requested, attempt={replan_attempts}")
+                    self.execution_mode = "Planning"
+                    continue
                 self.task_run_logger.update_execution_info(
                     execution_success=execution_success,
                     task_completed=task_completed,
@@ -699,6 +969,7 @@ class LLMController():
             "captured_at": time.time(),
         }
         self.user_heading_yaw_rad = float(scene.user_initial_yaw_rad)
+        self._reset_manual_worker_poses_from_scene(scene)
         return self.baseline_scene_state
 
     def get_baseline_scene_state(self):
@@ -714,6 +985,63 @@ class LLMController():
     def turn_user_heading(self, delta_deg: float):
         self.user_heading_yaw_rad = float(self.user_heading_yaw_rad + math.radians(float(delta_deg)))
         return self.user_heading_yaw_rad
+
+    def set_manual_worker_selection(self, worker_id: str) -> str:
+        candidate = str(worker_id or "").strip()
+        if candidate not in {"worker_1", "worker_2", "worker_3"}:
+            candidate = "worker_1"
+        self.manual_worker_selection_id = candidate
+        return self.manual_worker_selection_id
+
+    def _reset_manual_worker_poses_from_scene(self, scene: BaselineScene):
+        self.manual_worker_poses = {}
+        for obstacle in scene.obstacles:
+            worker_id = str(obstacle.id)
+            if worker_id not in {"worker_1", "worker_2", "worker_3"}:
+                continue
+            self.manual_worker_poses[worker_id] = {
+                "x": float(obstacle.gt_x),
+                "y": float(obstacle.gt_y),
+                "z": 0.0,
+                "yaw_rad": 0.0,
+            }
+
+    def move_selected_worker_relative(self, local_forward: float, local_right: float, step_m: float):
+        if self.get_baseline_scene().id != "SCENE_MANUAL_WORKER_CONTROL":
+            return None
+        worker_id = str(self.manual_worker_selection_id or "worker_1")
+        pose = self.manual_worker_poses.get(worker_id)
+        if pose is None:
+            return None
+        step = max(0.0, float(step_m))
+        yaw = float(pose.get("yaw_rad", 0.0))
+        forward = float(local_forward) * step
+        right = float(local_right) * step
+        dx = math.cos(yaw) * forward + math.sin(yaw) * right
+        dy = math.sin(yaw) * forward - math.cos(yaw) * right
+        pose["x"] = float(pose["x"] + dx)
+        pose["y"] = float(pose["y"] + dy)
+        return {
+            "worker_id": worker_id,
+            "x": float(pose["x"]),
+            "y": float(pose["y"]),
+            "yaw_deg": float(math.degrees(pose["yaw_rad"])),
+        }
+
+    def turn_selected_worker(self, delta_deg: float):
+        if self.get_baseline_scene().id != "SCENE_MANUAL_WORKER_CONTROL":
+            return None
+        worker_id = str(self.manual_worker_selection_id or "worker_1")
+        pose = self.manual_worker_poses.get(worker_id)
+        if pose is None:
+            return None
+        pose["yaw_rad"] = float(pose.get("yaw_rad", 0.0) + math.radians(float(delta_deg)))
+        return {
+            "worker_id": worker_id,
+            "x": float(pose["x"]),
+            "y": float(pose["y"]),
+            "yaw_deg": float(math.degrees(pose["yaw_rad"])),
+        }
 
     def set_active_scenario(self, scenario_name: str):
         scenario = self.scenario_manager.select(scenario_name)
@@ -810,7 +1138,46 @@ class LLMController():
 
     def _simulate_obstacle_returns(self, obstacle_states, now: float):
         _ = now
-        return list(obstacle_states or [])
+        states = list(obstacle_states or [])
+        if self.get_baseline_scene().id != "SCENE_MANUAL_WORKER_CONTROL":
+            return states
+        updated_states = []
+        for state in states:
+            worker_id = str(state.id)
+            pose = self.manual_worker_poses.get(worker_id)
+            if pose is None:
+                updated_states.append(state)
+                continue
+            packet = state.localization_packet.copy()
+            gt_x = float(pose["x"])
+            gt_y = float(pose["y"])
+            packet.gt_position_3d[0] = gt_x
+            packet.gt_position_3d[1] = gt_y
+            packet.estimated_position_3d[0] = float(gt_x + float(packet.b_xy[0]))
+            packet.estimated_position_3d[1] = float(gt_y + float(packet.b_xy[1]))
+            packet.localization_error_vector_3d[0] = float(packet.estimated_position_3d[0] - gt_x)
+            packet.localization_error_vector_3d[1] = float(packet.estimated_position_3d[1] - gt_y)
+            envelope = build_safety_envelope(packet)
+            updated_states.append(
+                replace(
+                    state,
+                    gt_xy=(gt_x, gt_y),
+                    est_xy=(float(packet.estimated_position_3d[0]), float(packet.estimated_position_3d[1])),
+                    matrix_xy=((float(packet.M_xy[0][0]), float(packet.M_xy[0][1])), (float(packet.M_xy[1][0]), float(packet.M_xy[1][1]))),
+                    localization_packet=packet,
+                    envelope=envelope,
+                )
+            )
+        return updated_states
+
+    def _build_collision_worker_packets_from_obstacles(self, obstacle_states):
+        obstacle_map = {str(obs.id): obs for obs in (obstacle_states or [])}
+        packets = []
+        for worker_id in COLLISION_RISK_WORKER_IDS:
+            obs = obstacle_map.get(worker_id)
+            if obs is not None:
+                packets.append((worker_id, obs.localization_packet))
+        return packets
 
     def _build_dominant_threat_context(
         self,
@@ -824,9 +1191,7 @@ class LLMController():
         if safety_state is None:
             return None
 
-        worker_packets = [("user", safety_state.user_packet)]
-        for obs in obstacle_states or []:
-            worker_packets.append((str(obs.id), obs.localization_packet))
+        worker_packets = self._build_collision_worker_packets_from_obstacles(obstacle_states)
 
         assessed_context = self.safety_assessor.build_from_packets(
             drone_packet=safety_state.drone_packet,
@@ -922,6 +1287,14 @@ class LLMController():
         elapsed_scene_s = max(0.0, now - scene_start_ts)
         obstacle_states_generated = compute_obstacle_envelope_states(self.get_baseline_scene(), now_s=elapsed_scene_s)
         obstacle_states = self._simulate_obstacle_returns(obstacle_states_generated, now=now)
+        if safety_state is not None:
+            worker_packets = self._build_collision_worker_packets_from_obstacles(obstacle_states)
+            safety_context = self.safety_assessor.build_from_packets(
+                drone_packet=safety_state.drone_packet,
+                worker_packets=worker_packets,
+                now=now,
+                safety_state=safety_state,
+            )
         user_heading = float(self.get_user_heading_yaw())
         user_ref = user_est or user_gt
         right_offset_m = 1.0
@@ -987,11 +1360,8 @@ class LLMController():
             safety_context = dominant_safety_context
         elif drone_packet is not None:
             # Fallback: when provider-level safety_state is unavailable, still
-            # compute collision probability with UAV + user/worker localization packets.
-            worker_packets = []
-            if user_packet is not None:
-                worker_packets.append(("user", user_packet))
-            worker_packets.extend((str(obs.id), obs.localization_packet) for obs in obstacle_states)
+            # compute collision probability with UAV + canonical worker localization packets.
+            worker_packets = self._build_collision_worker_packets_from_obstacles(obstacle_states)
             if worker_packets:
                 safety_context = self.safety_assessor.build_from_packets(
                     drone_packet=drone_packet,
@@ -1046,6 +1416,7 @@ class LLMController():
                         float(obs.localization_packet.estimated_position_3d[0] - obs.localization_packet.b_xy[0]),
                         float(obs.localization_packet.estimated_position_3d[1] - obs.localization_packet.b_xy[1]),
                     ),
+                    "heading_yaw_rad": float(self.manual_worker_poses.get(str(obs.id), {}).get("yaw_rad", 0.0)),
                     "P_xy": np.asarray(obs.localization_packet.P_xy, dtype=float).copy(),
                 }
                 for obs in obstacle_states
@@ -1057,6 +1428,7 @@ class LLMController():
             "mode_name": self.get_active_scenario_name(),
             "execution_mode": self.execution_mode,
             "active_objective_set": dict(self.active_objective_set),
+            "benchmark_progress": dict(self.latest_benchmark_progress),
             "checkpoint_order": list(BENCHMARK_CHECKPOINT_ORDER),
             "benchmark_checkpoints": [
                 {"id": cp.id, "zone_id": cp.zone_id, "x": float(cp.x), "y": float(cp.y), "radius_m": float(cp.radius_m)}
@@ -1086,12 +1458,52 @@ class LLMController():
             )
         self._debug_log_obstacle_envelopes(snapshot.get("obstacle_envelope_states"))
         self._debug_log_localization_pipeline_comparison(snapshot)
+        self._debug_log_collision_probability_pipeline(snapshot)
         print_debug(
             "[UI-SNAPSHOT] "
             f"drone_gt={snapshot['drone_gt']} drone_est={snapshot['drone_est']} "
             f"user_gt={snapshot['user_gt']} user_est={snapshot['user_est']}"
         )
         return snapshot
+
+    def _debug_log_collision_probability_pipeline(self, snapshot: dict):
+        if not isinstance(snapshot, dict):
+            return
+        safety_context = snapshot.get("safety_context")
+        workers = snapshot.get("workers") or []
+        if safety_context is None:
+            return
+        per_worker = list(getattr(safety_context, "per_worker_collision_probabilities", []) or [])
+        if not per_worker:
+            return
+        worker_gt_map = {str(w.get("id")): w.get("gt_xy") for w in workers}
+        worker_est_map = {str(w.get("id")): w.get("est_xy_bias_corrected") for w in workers}
+        drone_gt = snapshot.get("drone_gt")
+        drone_est_bias = snapshot.get("drone_est_bias_corrected") or snapshot.get("drone_est")
+        lines = [
+            "[COLLISION_DEBUG] pipeline_snapshot",
+            f"  drone_true_xy={None if drone_gt is None else (float(drone_gt[0]), float(drone_gt[1]))}",
+            f"  drone_bias_corrected_xy={None if drone_est_bias is None else (float(drone_est_bias[0]), float(drone_est_bias[1]))}",
+        ]
+        for item in per_worker:
+            wid = str(item.get("id"))
+            lines.append(
+                "  "
+                + f"worker={wid} "
+                + f"worker_true_xy={worker_gt_map.get(wid)} "
+                + f"worker_bias_corrected_xy={worker_est_map.get(wid)} "
+                + f"mu={item.get('mu_xy')} "
+                + f"sigma_rel={item.get('sigma_rel')} "
+                + f"r_u={item.get('r_u')} r_h={item.get('r_h')} r_c={item.get('r_c')} "
+                + f"p_exact={item.get('exact_series_probability')} "
+                + f"p_mc={item.get('monte_carlo_probability')} "
+                + f"p_worker={item.get('collision_probability')}"
+            )
+        lines.append(
+            "  "
+            + f"scene_current_collision_probability={float(getattr(safety_context, 'current_collision_probability', 0.0)):.6f}"
+        )
+        print_debug("\n".join(lines))
 
     def _get_drone_yaw_rad(self) -> float:
         get_yaw = getattr(self.drone, "get_drone_yaw", None)
