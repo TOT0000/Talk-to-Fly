@@ -1,59 +1,22 @@
-Example 1 (task-point direct)
-Scene: CandidateTargets A=(6.0,2.0,-1.5); BackgroundSafety current_collision_probability=0.020; PathSummaries to A(path_clear=True, blocker=none)
-Task: [A] Fly to A.
-Rationale: A is the target and the path is clear, so use staged target-seeking with simple re-checks.
-Response: _1=p('Is target A ahead of the drone, to the left, or to the right?');?_1=='left'{tu(30)};?_1=='right'{tc(30)};mf(1.0);d(0.2);_2=p('Is the drone close to target A?');?_2=='False'{_3=p('Is target A ahead of the drone, to the left, or to the right?');?_3=='left'{tu(20)};?_3=='right'{tc(20)};mf(1.0);d(0.2)};_4=p('Is the drone close to target A?');?_4=='False'{_5=p('Is target A ahead of the drone, to the left, or to the right?');?_5=='left'{tu(15)};?_5=='right'{tc(15)};mf(0.8)};
+Example 1 (initial checkpoint planning: complete zone_A)
+Scene:
+- active zones: zone_A
+- active checkpoints: A1, A2, A3, A4
+- checkpoint coords: A1=(1.4,10.6), A2=(4.6,10.6), A3=(1.4,7.8), A4=(4.6,7.8)
+- completed checkpoints: none
+- current_collision_probability=0.220
+Task: [A] Complete zone_A search.
+Rationale: Collision risk is below replan threshold (0.65), so checkpoint primitive is allowed. Visit all active checkpoints in zone_A and dwell 2.0s at each.
+Response: lo('initial plan: zone_A checkpoints A1->A2->A3->A4');gc('A1');d(2.0);gc('A2');d(2.0);gc('A3');d(2.0);gc('A4');d(2.0);
 
-Example 2 (task-point direct)
-Scene: CandidateTargets B=(2.0,6.4,-1.5); BackgroundSafety current_collision_probability=0.100; PathSummaries to B(path_clear=True, blocker=none)
-Task: [A] Fly to B and stop there.
-Rationale: B is explicit and clear; use direct staged motion until near B.
-Response: _1=p('Is target B ahead of the drone, to the left, or to the right?');?_1=='left'{tu(30)};?_1=='right'{tc(30)};mf(1.0);d(0.2);_2=p('Is the drone close to target B?');?_2=='False'{_3=p('Is target B ahead of the drone, to the left, or to the right?');?_3=='left'{tu(20)};?_3=='right'{tc(20)};mf(1.0);d(0.2)};_4=p('Is the drone close to target B?');?_4=='False'{_5=p('Is target B ahead of the drone, to the left, or to the right?');?_5=='left'{tu(15)};?_5=='right'{tc(15)};mf(0.8)};
-
-Example 3 (task-point detour)
-Scene: CandidateTargets A=(6.4,2.0,-1.5); BackgroundSafety current_collision_probability=0.100; PathSummaries to A(path_clear=False, blocker=O1)
-Task: [A] Fly to A.
-Rationale: The direct corridor to A is blocked by O1, so bypass first, then continue toward A.
-Response: _1=p('For target A blocked by O1, is the safer bypass side left or right?');?_1=='left'{ml(0.8)};?_1=='right'{mr(0.8)};d(0.2);_2=p('Is target A ahead of the drone, to the left, or to the right?');?_2=='left'{tu(30)};?_2=='right'{tc(30)};mf(1.0);d(0.2);_3=p('Is the drone close to target A?');?_3=='False'{_4=p('Is target A ahead of the drone, to the left, or to the right?');?_4=='left'{tu(20)};?_4=='right'{tc(20)};mf(1.0);d(0.2)};_5=p('Is the drone close to target A?');?_5=='False'{_6=p('Is target A ahead of the drone, to the left, or to the right?');?_6=='left'{tu(15)};?_6=='right'{tc(15)};mf(0.8)};
-
-Example 4 (task-point detour)
-Scene: CandidateTargets B=(2.1,6.6,-1.5); BackgroundSafety current_collision_probability=0.100; PathSummaries to B(path_clear=False, blocker=user)
-Task: [A] Fly to B.
-Rationale: The user blocks the corridor to B, so make a side detour, then continue to B.
-Response: _1=p('For target B blocked by the user, is the safer bypass side left or right?');?_1=='left'{ml(0.9)};?_1=='right'{mr(0.9)};d(0.2);_2=p('Is target B ahead of the drone, to the left, or to the right?');?_2=='left'{tu(30)};?_2=='right'{tc(30)};mf(1.0);d(0.2);_3=p('Is the drone close to target B?');?_3=='False'{_4=p('Is target B ahead of the drone, to the left, or to the right?');?_4=='left'{tu(20)};?_4=='right'{tc(20)};mf(1.0);d(0.2)};_5=p('Is the drone close to target B?');?_5=='False'{_6=p('Is target B ahead of the drone, to the left, or to the right?');?_6=='left'{tu(15)};?_6=='right'{tc(15)};mf(0.8)};
-
-Example 5 (high-risk)
-Scene: CandidateTargets C=(8.7,8.1,-1.5); BackgroundSafety current_collision_probability=0.220; PathSummaries to C(path_clear=True, blocker=none)
-Task: [A] Fly to C.
-Rationale: WARNING requires smaller, safer stages and more re-checks while still progressing to C.
-Response: d(0.3);_1=p('Is target C ahead of the drone, to the left, or to the right?');?_1=='left'{tu(20)};?_1=='right'{tc(20)};mf(0.8);d(0.2);_2=p('Is the drone close to target C?');?_2=='False'{_3=p('Is target C ahead of the drone, to the left, or to the right?');?_3=='left'{tu(15)};?_3=='right'{tc(15)};mf(0.8);d(0.2)};_4=p('Is the drone close to target C?');?_4=='False'{_5=p('Is target C ahead of the drone, to the left, or to the right?');?_5=='left'{tu(10)};?_5=='right'{tc(10)};mf(0.6)};
-
-Example 6 (high-risk detour)
-Scene: CandidateTargets A=(6.0,2.4,-1.5); BackgroundSafety current_collision_probability=0.450; PathSummaries to A(path_clear=False, blocker=O2)
-Task: [A] Fly to A.
-Rationale: DANGER and a blocked path require conservative bypass, then small corrective steps toward A.
-Response: d(0.4);_1=p('For target A in DANGER blocked by O2, is the safer bypass side left or right?');?_1=='left'{ml(0.8)};?_1=='right'{mr(0.8)};d(0.2);_2=p('Is target A ahead of the drone, to the left, or to the right?');?_2=='left'{tu(20)};?_2=='right'{tc(20)};mf(0.8);d(0.2);_3=p('Is the drone close to target A?');?_3=='False'{_4=p('Is target A ahead of the drone, to the left, or to the right?');?_4=='left'{tu(15)};?_4=='right'{tc(15)};mf(0.6)};
-
-Example 7 (user-relative)
-Scene: CandidateTargets user=(5.0,5.2,0.0); BackgroundSafety current_collision_probability=0.020; PathSummaries to user(path_clear=True, blocker=none)
-Task: [A] Fly to the user.
-Rationale: The user is the selected target; use staged motion until near the user.
-Response: _1=p('Is the user ahead of the drone, to the left, or to the right?');?_1=='left'{tu(30)};?_1=='right'{tc(30)};mf(1.0);d(0.2);_2=p('Is the drone close to the user?');?_2=='False'{_3=p('Is the user ahead of the drone, to the left, or to the right?');?_3=='left'{tu(20)};?_3=='right'{tc(20)};mf(1.0);d(0.2)};_4=p('Is the drone close to the user?');?_4=='False'{_5=p('Is the user ahead of the drone, to the left, or to the right?');?_5=='left'{tu(15)};?_5=='right'{tc(15)};mf(0.8)};
-
-Example 8 (user-relative)
-Scene: CandidateTargets user_right_side=(6.0,4.9,0.0), user_left_side=(4.2,5.5,0.0); BackgroundSafety current_collision_probability=0.100; PathSummaries to user_right_side(path_clear=True, blocker=none), to user_left_side(path_clear=True, blocker=none)
-Task: [A] Come back to my right side.
-Rationale: Use the user_right_side target and complete the move with staged re-checks.
-Response: _1=p('Is user_right_side ahead of the drone, to the left, or to the right?');?_1=='left'{tu(30)};?_1=='right'{tc(30)};mf(1.0);d(0.2);_2=p('Is the drone close to user_right_side?');?_2=='False'{_3=p('Is user_right_side ahead of the drone, to the left, or to the right?');?_3=='left'{tu(20)};?_3=='right'{tc(20)};mf(1.0);d(0.2)};_4=p('Is the drone close to user_right_side?');?_4=='False'{_5=p('Is user_right_side ahead of the drone, to the left, or to the right?');?_5=='left'{tu(15)};?_5=='right'{tc(15)};mf(0.8)};
-
-Example 9 (query)
-Scene: CandidateTargets A=(6.0,2.2,-1.5), user=(5.4,5.2,0.0); BackgroundSafety current_collision_probability=0.020
-Task: [Q] Where am I?
-Rationale: Query tasks do not move.
-Response: _1=p('Return current estimated drone position [x,y,z].');lo(_1);
-
-Example 10 (multi-step)
-Scene: CandidateTargets B=(2.0,6.4,-1.5), C=(8.8,8.4,-1.5), user_right_side=(6.2,4.8,0.0); BackgroundSafety current_collision_probability=0.100; PathSummaries to C(path_clear=False, blocker=O2), to B(path_clear=True, blocker=none), to user_right_side(path_clear=True, blocker=none)
-Task: [A] Go to C, then B, then come back to my right side.
-Rationale: Complete C first, then B, then switch to the user_right_side target.
-Response: _1=p('For target C blocked by O2, is the safer bypass side left or right?');?_1=='left'{ml(0.7)};?_1=='right'{mr(0.7)};d(0.2);_2=p('Is target C ahead of the drone, to the left, or to the right?');?_2=='left'{tu(30)};?_2=='right'{tc(30)};mf(1.0);d(0.2);_3=p('Is target B ahead of the drone, to the left, or to the right?');?_3=='left'{tu(30)};?_3=='right'{tc(30)};mf(1.0);d(0.2);_4=p('Is user_right_side ahead of the drone, to the left, or to the right?');?_4=='left'{tu(30)};?_4=='right'{tc(30)};mf(1.0);d(0.2);_5=p('Is the drone close to user_right_side?');?_5=='False'{_6=p('Is user_right_side ahead of the drone, to the left, or to the right?');?_6=='left'{tu(15)};?_6=='right'{tc(15)};mf(0.8)};
+Example 2 (replan: high collision probability, resume unfinished checkpoints)
+Scene:
+- active zones: zone_A
+- active checkpoints: A1, A2, A3, A4
+- completed checkpoints: A1, A2
+- remaining checkpoints: A3, A4
+- dominant risky worker: worker_2
+- current_collision_probability=0.710
+Task: [A] Replan and finish remaining checkpoints in zone_A.
+Rationale: Replan condition is triggered (>=0.65). Start with conservative low-level avoidance, then resume unfinished checkpoints only.
+Response: lo('replan: high risk from worker_2, evade first then resume remaining checkpoints A3/A4');mr(0.8);mb(0.6);tu(20);d(0.4);gc('A3');d(2.0);gc('A4');d(2.0);
