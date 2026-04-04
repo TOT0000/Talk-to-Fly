@@ -83,6 +83,7 @@ Planning styles:
 Movement semantics:
 - In PX4_SIM, mf/mb/ml/mr are body-frame moves.
 - Use low-level staged motion (`tc`, `tu`, `mf`, `mb`, `ml`, `mr`, `d`) plus `p` when needed.
+- If the task explicitly names benchmark checkpoints (e.g., A1/B3/C6), you may directly use `go_checkpoint('A1')` and then optional dwell like `d(2.0)`.
 - Probe only when needed for missing, stale, or ambiguous runtime state.
 
 Output requirement:
