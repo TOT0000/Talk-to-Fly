@@ -183,7 +183,12 @@ class LangGraphOrchestrationRunner:
         if isinstance(progress, dict):
             completed.update(str(v).upper() for v in progress.get("completed", []))
         active_ids = [str(v).upper() for v in state.get("active_checkpoint_ids", [])]
-        remaining = [cid for cid in active_ids if cid not in completed]
+        queue_order = [str(v).upper() for v in state.get("subgoal_queue", [])]
+        if not queue_order:
+            queue_order = [str(v).upper() for v in state.get("remaining_checkpoint_ids", [])]
+        if not queue_order:
+            queue_order = list(active_ids)
+        remaining = [cid for cid in queue_order if cid in active_ids and cid not in completed]
         return {
             "completed_checkpoint_ids": sorted(completed),
             "remaining_checkpoint_ids": remaining,
@@ -211,22 +216,42 @@ class LangGraphOrchestrationRunner:
 
     def _node_plan_step(self, state: AgentState) -> AgentState:
         subgoal = state.get("current_subgoal_id")
+        completed = set(str(v).upper() for v in state.get("completed_checkpoint_ids", []))
+        remaining = [str(v).upper() for v in state.get("remaining_checkpoint_ids", []) if str(v).upper() not in completed]
+        if subgoal in completed:
+            subgoal = None
+        if subgoal is None and remaining:
+            subgoal = remaining[0]
         if subgoal is None:
             return {"last_plan_text": "", "last_action_text": "", "route_decision": "end"}
 
         collision_risk = float(state.get("current_collision_risk", 0.0))
-        plan = self.controller.planner.plan_langgraph_step_action(
-            task_description=str(state.get("user_task", "")),
-            current_subgoal=str(subgoal),
-            remaining_checkpoints=list(state.get("remaining_checkpoint_ids", [])),
-            current_collision_risk=collision_risk,
-            last_action=str(state.get("last_action_text", "")),
-            last_result=str((state.get("last_action_result") or {}).get("message", "")),
-            stall_count=int(state.get("no_progress_steps", 0)),
-            recent_history=list(state.get("execution_history", [])),
-        )
+        no_progress_steps = int(state.get("no_progress_steps", 0))
+        if collision_risk >= 0.80 and no_progress_steps >= 1:
+            plan = "turn_cw(20);"
+            self._emit_agent_message("[ACTION] recovery: conservative yaw adjustment due to high collision risk.")
+        elif collision_risk >= 0.70:
+            plan = "delay(1.5);"
+            self._emit_agent_message("[ACTION] recovery: short wait and re-observe due to high collision risk.")
+        else:
+            plan = self.controller.planner.plan_langgraph_step_action(
+                task_description=str(state.get("user_task", "")),
+                current_subgoal=str(subgoal),
+                remaining_checkpoints=remaining,
+                current_collision_risk=collision_risk,
+                last_action=str(state.get("last_action_text", "")),
+                last_result=str((state.get("last_action_result") or {}).get("message", "")),
+                stall_count=no_progress_steps,
+                recent_history=list(state.get("execution_history", [])),
+            )
         if not plan:
             plan = f'go_checkpoint("{subgoal}");'
+        action_target = self._extract_checkpoint_target(plan)
+        if action_target is not None:
+            if action_target in completed or action_target not in remaining:
+                action_target = str(subgoal).upper()
+                plan = f'go_checkpoint("{action_target}");'
+            subgoal = action_target
         action_text = plan
         self._emit_agent_message(f"[STEP] current subgoal: {subgoal}")
         self._emit_agent_message(f"[ACTION] {plan}")
@@ -234,6 +259,8 @@ class LangGraphOrchestrationRunner:
             "last_plan_text": plan,
             "last_action_text": action_text,
             "route_decision": "continue",
+            "current_subgoal_id": subgoal,
+            "current_subgoal_type": "checkpoint",
         }
 
     def _node_execute_step(self, state: AgentState) -> AgentState:
@@ -311,10 +338,28 @@ class LangGraphOrchestrationRunner:
 
         remaining = list(state.get("remaining_checkpoint_ids", []))
         subgoal = state.get("current_subgoal_id")
-        progress_signature = f"{subgoal}:{','.join(remaining)}"
-        prev_signature = str(state.get("last_progress_signature", ""))
+        latest_snapshot = self.controller.get_live_ui_snapshot()
+        progress = latest_snapshot.get("benchmark_progress") if isinstance(latest_snapshot, dict) else None
+        completed_from_progress = set()
+        if isinstance(progress, dict):
+            completed_from_progress = set(str(v).upper() for v in progress.get("completed", []))
+        completed = set(str(v).upper() for v in state.get("completed_checkpoint_ids", []))
+        completed.update(completed_from_progress)
+        remaining = [cid for cid in remaining if str(cid).upper() not in completed]
         no_progress_steps = int(state.get("no_progress_steps", 0))
         repeated_action_count = int(state.get("repeated_action_count", 0))
+        action_target = self._extract_checkpoint_target(str(state.get("last_plan_text", "")))
+        result_msg = str(result.get("message", "")).lower()
+        reached_area = (" reached:" in result_msg or " reached " in result_msg) and ("approached" not in result_msg)
+        if action_target and reached_area:
+            self._emit_agent_message(f"[RESULT] reached checkpoint area: {action_target} (not yet completed)")
+        if subgoal is not None and str(subgoal).upper() in completed:
+            self._emit_agent_message(f"[RESULT] checkpoint completed: {str(subgoal).upper()}")
+            subgoal = None
+            repeated_action_count = 0
+            no_progress_steps = 0
+        progress_signature = f"{subgoal}:{','.join(remaining)}"
+        prev_signature = str(state.get("last_progress_signature", ""))
         if len(history) >= 2 and str(history[-1].get("plan", "")) == str(history[-2].get("plan", "")):
             repeated_action_count += 1
         else:
@@ -335,20 +380,7 @@ class LangGraphOrchestrationRunner:
                     no_progress_steps += 1
                 else:
                     no_progress_steps = 0
-                if distance_m <= float(checkpoint.radius_m):
-                    completed = set(state.get("completed_checkpoint_ids", []))
-                    completed.add(str(subgoal))
-                    remaining = [cid for cid in remaining if cid != subgoal]
-                    state = {
-                        **state,
-                        "completed_checkpoint_ids": sorted(completed),
-                        "remaining_checkpoint_ids": remaining,
-                        "current_subgoal_id": None,
-                    }
-                    no_progress_steps = 0
-                    repeated_action_count = 0
-                    self._emit_agent_message(f"[RESULT] checkpoint completed: {subgoal}")
-                progress_signature = f"{state.get('current_subgoal_id')}:{','.join(remaining)}"
+                progress_signature = f"{subgoal}:{','.join(remaining)}"
                 if progress_signature == prev_signature:
                     no_progress_steps += 1
                 last_subgoal_distance = float(distance_m)
@@ -373,6 +405,9 @@ class LangGraphOrchestrationRunner:
                 "execution_history": history,
                 "mission_status": "completed",
                 "route_decision": "end",
+                "completed_checkpoint_ids": sorted(completed),
+                "remaining_checkpoint_ids": remaining,
+                "current_subgoal_id": subgoal,
                 "last_progress_signature": progress_signature,
                 "last_subgoal_distance_m": last_subgoal_distance,
                 "no_progress_steps": no_progress_steps,
@@ -385,6 +420,9 @@ class LangGraphOrchestrationRunner:
                 "execution_history": history,
                 "mission_status": "running",
                 "route_decision": "retry_plan" if bool(result.get("recoverable", True)) else "reselect_subgoal",
+                "completed_checkpoint_ids": sorted(completed),
+                "remaining_checkpoint_ids": remaining,
+                "current_subgoal_id": subgoal,
                 "last_progress_signature": progress_signature,
                 "last_subgoal_distance_m": last_subgoal_distance,
                 "no_progress_steps": no_progress_steps,
@@ -396,6 +434,9 @@ class LangGraphOrchestrationRunner:
             "execution_history": history,
             "mission_status": "running",
             "route_decision": "continue",
+            "completed_checkpoint_ids": sorted(completed),
+            "remaining_checkpoint_ids": remaining,
+            "current_subgoal_id": subgoal,
             "last_progress_signature": progress_signature,
             "last_subgoal_distance_m": last_subgoal_distance,
             "no_progress_steps": no_progress_steps,
@@ -408,3 +449,14 @@ class LangGraphOrchestrationRunner:
     def _emit_agent_message(self, message: str):
         if hasattr(self.controller, "append_message"):
             self.controller.append_message(message)
+
+    def _extract_checkpoint_target(self, action_text: str) -> str | None:
+        text = str(action_text or "")
+        marker = 'go_checkpoint("'
+        if marker not in text:
+            return None
+        start = text.find(marker) + len(marker)
+        end = text.find('")', start)
+        if end <= start:
+            return None
+        return text[start:end].strip().upper()
