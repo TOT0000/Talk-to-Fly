@@ -154,6 +154,7 @@ class LLMController():
         self.baseline_scene_state = None
         self.latest_baseline_decision = None
         self.execution_mode = "Waiting"
+        self.active_objective_set = self._default_active_objective_set()
         self.planner_mode = str(os.getenv("TYPEFLY_PLANNER_MODE", "llm_baseline")).strip().lower()
         if self.planner_mode not in {"llm_baseline", "rule_baseline"}:
             self.planner_mode = "llm_baseline"
@@ -162,6 +163,65 @@ class LLMController():
         # PX4_SIM optional managed user-position publisher lifecycle
         self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
         self._owns_sim_user_publisher = False
+
+    def _default_active_objective_set(self) -> dict:
+        return {
+            "active_zone_ids": [zone.id for zone in BENCHMARK_ZONES],
+            "active_checkpoint_ids": list(BENCHMARK_CHECKPOINT_ORDER),
+            "source": "default_all",
+        }
+
+    def _resolve_active_objective_set(self, task_text: str) -> dict:
+        text = str(task_text or "")
+        normalized = text.upper()
+        all_zone_ids = [zone.id for zone in BENCHMARK_ZONES]
+        zone_to_checkpoints = {
+            "zone_A": [cid for cid in BENCHMARK_CHECKPOINT_ORDER if cid.startswith("A")],
+            "zone_B": [cid for cid in BENCHMARK_CHECKPOINT_ORDER if cid.startswith("B")],
+            "zone_C": [cid for cid in BENCHMARK_CHECKPOINT_ORDER if cid.startswith("C")],
+        }
+
+        all_keywords = (
+            "ALL ZONES",
+            "ALL CHECKPOINT",
+            "COMPLETE ALL",
+            "全部區域",
+            "全部检查点",
+            "全部檢查點",
+            "全部巡檢點",
+        )
+        if any(key in normalized for key in all_keywords) or any(key in text for key in all_keywords):
+            return {
+                "active_zone_ids": all_zone_ids,
+                "active_checkpoint_ids": list(BENCHMARK_CHECKPOINT_ORDER),
+                "source": "task_parse_all",
+            }
+
+        zone_tokens = set()
+        context_hits = any(word in normalized for word in ("ZONE", "ZONES", "AREA", "CHECKPOINT", "INSPECT", "SEARCH"))
+        context_hits = context_hits or any(word in text for word in ("區域", "巡檢", "搜尋", "搜索", "檢查點", "检查点"))
+        for token, zone_id in (("A", "zone_A"), ("B", "zone_B"), ("C", "zone_C")):
+            if re.search(rf"\b(?:ZONE|AREA)\s*{token}\b", normalized):
+                zone_tokens.add(zone_id)
+            if re.search(rf"\b{token}\b\s*(?:ZONE|AREA)\b", normalized):
+                zone_tokens.add(zone_id)
+            if f"{token}區域" in text or f"{token} 區域" in text or f"區域{token}" in text:
+                zone_tokens.add(zone_id)
+            if context_hits and re.search(rf"\b{token}\b", normalized):
+                zone_tokens.add(zone_id)
+
+        if not zone_tokens:
+            return self._default_active_objective_set()
+
+        active_zone_ids = sorted(zone_tokens)
+        active_checkpoint_ids = []
+        for zid in active_zone_ids:
+            active_checkpoint_ids.extend(zone_to_checkpoints.get(zid, []))
+        return {
+            "active_zone_ids": active_zone_ids,
+            "active_checkpoint_ids": active_checkpoint_ids,
+            "source": "task_parse_zone",
+        }
         
     def register_position_callback(self, callback):
         self.position_update_callback = callback
@@ -476,6 +536,7 @@ class LLMController():
             self.append_message("[Warning] Controller is waiting for takeoff...")
             return
         self.execution_mode = "Planning"
+        self.active_objective_set = self._resolve_active_objective_set(task_description)
         self._task_id_counter += 1
         task_id = f"task_{self._task_id_counter:05d}"
         initial_snapshot = self.get_live_ui_snapshot()
@@ -995,6 +1056,7 @@ class LLMController():
             "framework_name": "TypeFly baseline",
             "mode_name": self.get_active_scenario_name(),
             "execution_mode": self.execution_mode,
+            "active_objective_set": dict(self.active_objective_set),
             "checkpoint_order": list(BENCHMARK_CHECKPOINT_ORDER),
             "benchmark_checkpoints": [
                 {"id": cp.id, "zone_id": cp.zone_id, "x": float(cp.x), "y": float(cp.y), "radius_m": float(cp.radius_m)}

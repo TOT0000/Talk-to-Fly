@@ -123,6 +123,7 @@ class TypeFly:
             "started_at": None,
             "completed_at": None,
             "is_running": False,
+            "objective_completed": False,
         }
 
         # 浮動提示 internal state
@@ -501,6 +502,7 @@ class TypeFly:
             self.mission_clock["started_at"] = time.time()
             self.mission_clock["completed_at"] = None
             self.mission_clock["is_running"] = True
+            self.mission_clock["objective_completed"] = False
             task_thread = Thread(target=self.llm_controller.execute_task_description, args=(message,))
             task_thread.start()
             complete_response = ''
@@ -631,6 +633,7 @@ class TypeFly:
 
     def update_and_step(self, counter, show_error_ellipse=False, show_raw_estimate=False):
         snapshot = self.llm_controller.get_live_ui_snapshot()
+        self._sync_objective_state(snapshot)
         self._append_history(snapshot)
         self._update_checkpoint_progress(snapshot)
         anchor_plot = self.render_anchor_3d_plot()
@@ -686,6 +689,19 @@ class TypeFly:
         }
         return positions
 
+    def _sync_objective_state(self, snapshot):
+        if not snapshot:
+            return
+        objective = snapshot.get("active_objective_set")
+        if not isinstance(objective, dict):
+            return
+        zone_ids = objective.get("active_zone_ids")
+        cp_ids = objective.get("active_checkpoint_ids")
+        if zone_ids:
+            self.objective_state["active_zone_ids"] = set(str(v) for v in zone_ids)
+        if cp_ids:
+            self.objective_state["active_checkpoint_ids"] = set(str(v) for v in cp_ids)
+
     def _update_checkpoint_progress(self, snapshot):
         positions = self._extract_ui_positions(snapshot)
         drone_gt = positions.get("drone_gt")
@@ -714,6 +730,13 @@ class TypeFly:
         else:
             self.benchmark_progress["active_enter_ts"] = None
             self.benchmark_progress["active_progress"] = 0.0
+
+        active_ids = set(self.objective_state.get("active_checkpoint_ids", set()))
+        mission_completed = bool(active_ids) and all(cid in completed for cid in active_ids)
+        self.mission_clock["objective_completed"] = mission_completed
+        if mission_completed and self.mission_clock.get("started_at") is not None and self.mission_clock.get("completed_at") is None:
+            self.mission_clock["completed_at"] = now
+            self.mission_clock["is_running"] = False
 
     def render_anchor_3d_plot(self):
         fig = plt.figure(figsize=(5.2, 4.2))
@@ -780,12 +803,15 @@ class TypeFly:
             "### Status",
             f"- current framework: {snapshot.get('framework_name', 'n/a')}",
             f"- current mode: {snapshot.get('execution_mode', 'Waiting')}",
+            f"- active zones: {', '.join(sorted(z.replace('zone_', '') for z in self.objective_state.get('active_zone_ids', set())))}",
+            f"- active checkpoints: {len(active_ids)}",
             f"- current_collision_probability: {self._fmt_prob(getattr(safety_context, 'current_collision_probability', 0.0))}",
             f"- historical_max_collision_probability: {self._fmt_prob(getattr(safety_context, 'historical_max_collision_probability', 0.0))}",
             f"- dominant risky worker: {getattr(safety_context, 'dominant_threat_id', 'n/a')}",
             f"- current target checkpoint: {target}",
             f"- checkpoint progress: {completed_active}/{total}",
             f"- zone progress: {', '.join(zone_parts) if zone_parts else 'n/a'}",
+            f"- mission completed: {self.mission_clock.get('objective_completed', False)}",
             f"- mission elapsed time: {elapsed_text}",
             f"- mission completion time: {completion_text}",
         ]
@@ -833,8 +859,6 @@ class TypeFly:
             f"- sanity case2 exact: {self._fmt_prob(sanity.get('case2_exact'))}",
         ]
         return gr.update(value="\n".join(lines), visible=True)
-
-        return "\n".join(lines)
 
     def _estimate_heading_from_history(self, primary_key: str, fallback_key: str = None):
         history = list(self.position_history.get(primary_key, []))
