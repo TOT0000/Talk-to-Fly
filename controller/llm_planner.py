@@ -37,6 +37,37 @@ class LLMPlanner():
 
         with open(self.plan_examples_path, "r") as f:
             self.plan_examples = f.read()
+        self.prompt_langgraph_decomposition = (
+            "You are TypeFly LangGraph Task Decomposer.\n"
+            "Return checkpoint IDs only, as a JSON array, in execution order.\n"
+            "Rules:\n"
+            "1) Only use IDs from allowed checkpoints.\n"
+            "2) Prefer single-zone checkpoints that match the task.\n"
+            "3) Do not output explanation.\n"
+            "Task: {task_description}\n"
+            "Allowed checkpoints: {allowed_checkpoints}\n"
+            "Active zones: {active_zones}\n"
+            "Output JSON array only."
+        )
+        self.prompt_langgraph_step = (
+            "You are TypeFly LangGraph Step Planner.\n"
+            "You are NOT planning a full mission. You are deciding only the NEXT step.\n"
+            "Output exactly one MiniSpec action statement ending with ';'.\n"
+            "Allowed actions: go_checkpoint(\"ID\"); delay(seconds); log(\"text\");\n"
+            "Hard constraints:\n"
+            "- Do not output multi-checkpoint full plans.\n"
+            "- If the same action was already executed and no progress improved, avoid repeating it.\n"
+            "- Prefer a recovery step (short delay or log replanning) if stalled.\n"
+            "Task: {task_description}\n"
+            "Current subgoal: {current_subgoal}\n"
+            "Remaining checkpoints: {remaining_checkpoints}\n"
+            "Current collision risk: {current_collision_risk}\n"
+            "Last action: {last_action}\n"
+            "Last result: {last_result}\n"
+            "Stall count: {stall_count}\n"
+            "Recent execution history: {recent_history}\n"
+            "Output one action only."
+        )
 
     def set_model(self, model_name):
         self.model_name = model_name
@@ -320,3 +351,74 @@ class LLMPlanner():
         prompt = self.prompt_probe.format(scene_description=full_scene, question=question)
         print_t(f"[P] Execution request: {question}")
         return evaluate_value(self.llm.request(prompt, self.model_name)), False
+
+    def decompose_task_for_langgraph(
+        self,
+        task_description: str,
+        active_checkpoint_ids: list[str],
+        active_zone_ids: list[str],
+    ) -> list[str]:
+        prompt = self.prompt_langgraph_decomposition.format(
+            task_description=str(task_description or ""),
+            allowed_checkpoints=[str(v).upper() for v in list(active_checkpoint_ids or [])],
+            active_zones=[str(v) for v in list(active_zone_ids or [])],
+        )
+        raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
+        parsed: list[str] = []
+        try:
+            obj = ast.literal_eval(raw)
+            if isinstance(obj, list):
+                parsed = [str(v).upper() for v in obj]
+        except Exception:
+            tokens = re.findall(r"[A-Za-z]\d+", raw)
+            parsed = [str(v).upper() for v in tokens]
+        allowed = [str(v).upper() for v in list(active_checkpoint_ids or [])]
+        filtered = [cid for cid in parsed if cid in allowed]
+        if filtered:
+            return filtered
+        return allowed
+
+    def plan_langgraph_step_action(
+        self,
+        task_description: str,
+        current_subgoal: str | None,
+        remaining_checkpoints: list[str],
+        current_collision_risk: float,
+        last_action: str,
+        last_result: str,
+        stall_count: int,
+        recent_history: list[dict],
+    ) -> str:
+        prompt = self.prompt_langgraph_step.format(
+            task_description=str(task_description or ""),
+            current_subgoal=str(current_subgoal or "None"),
+            remaining_checkpoints=[str(v) for v in list(remaining_checkpoints or [])],
+            current_collision_risk=f"{float(current_collision_risk):.6f}",
+            last_action=str(last_action or ""),
+            last_result=str(last_result or ""),
+            stall_count=int(stall_count),
+            recent_history=str(list(recent_history or [])[-4:]),
+        )
+        raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
+        action = self._sanitize_langgraph_action(raw)
+        if action:
+            return action
+        if current_subgoal:
+            return f'go_checkpoint("{str(current_subgoal).upper()}");'
+        return "delay(1.0);"
+
+    def _sanitize_langgraph_action(self, raw_text: str) -> str:
+        text = str(raw_text or "").strip().replace("\n", " ")
+        if not text:
+            return ""
+        go_match = re.search(r'go_checkpoint\(\s*[\'"]?([A-Za-z]\d+)[\'"]?\s*\)\s*;?', text)
+        if go_match:
+            return f'go_checkpoint("{go_match.group(1).upper()}");'
+        delay_match = re.search(r'delay\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?', text)
+        if delay_match:
+            return f"delay({float(delay_match.group(1)):.1f});"
+        log_match = re.search(r'log\(\s*[\'"]([^\'"]{1,60})[\'"]\s*\)\s*;?', text)
+        if log_match:
+            safe = re.sub(r"[^a-zA-Z0-9 _-]", "", log_match.group(1))[:60]
+            return f'log("{safe}");'
+        return ""
