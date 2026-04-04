@@ -218,7 +218,10 @@ def _build_localized_packet_from_anchor_pipeline(
 def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float) -> List[ObstacleEnvelopeState]:
     states: List[ObstacleEnvelopeState] = []
     for idx, obstacle in enumerate(scene.obstacles):
-        gt_x, gt_y = _scripted_worker_gt_xy(obstacle.id, now_s, fallback_xy=(obstacle.gt_x, obstacle.gt_y))
+        if scene.id == "SCENE_MANUAL_WORKER_CONTROL":
+            gt_x, gt_y = (float(obstacle.gt_x), float(obstacle.gt_y))
+        else:
+            gt_x, gt_y = _scripted_worker_gt_xy(obstacle.id, now_s, fallback_xy=(obstacle.gt_x, obstacle.gt_y))
         gt = np.asarray([float(gt_x), float(gt_y), 0.0], dtype=float)
         # deterministic seed per worker and 10Hz simulation tick.
         seed = (hash(obstacle.id) & 0xFFFFFFFF) ^ int(max(0.0, now_s) * 10.0)
@@ -461,6 +464,24 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
         ),
         notes="Deterministic benchmark demo scene with fixed workers and fixed checkpoint order.",
     ),
+    "SCENE_MANUAL_WORKER_CONTROL": BaselineScene(
+        id="SCENE_MANUAL_WORKER_CONTROL",
+        drone_initial_pose=(1.0, 1.0, -1.5),
+        drone_initial_yaw_rad=0.0,
+        user_position=(10.8, 10.2, 0.0),
+        user_initial_yaw_rad=-2.0,
+        task_points=(
+            TaskPoint("A", 1.4, 10.6, -1.5),
+            TaskPoint("B", 7.4, 10.6, -1.5),
+            TaskPoint("C", 1.7, 4.2, -1.5),
+        ),
+        obstacles=(
+            StaticObstacle("worker_1", 1.5, 10.5, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("worker_2", 8.5, 7.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("worker_3", 2.0, 3.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+        ),
+        notes="Manual worker-control scene: worker scripted motion is disabled and UI controls drive worker poses.",
+    ),
     "SCENE_1_CLEAR_PATH": BaselineScene(
         id="SCENE_1_CLEAR_PATH",
         drone_initial_pose=(1.0, 1.5, -1.5),
@@ -537,9 +558,9 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
 
 
 def normalize_baseline_scene_id(scene_id: Optional[str]) -> str:
-    candidate = (scene_id or "SCENE_1_CLEAR_PATH").strip().upper()
+    candidate = (scene_id or "SCENE_BENCHMARK_DEMO").strip().upper()
     if candidate not in BASELINE_SCENES:
-        return "SCENE_1_CLEAR_PATH"
+        return "SCENE_BENCHMARK_DEMO"
     return candidate
 
 
