@@ -41,12 +41,14 @@ from .baseline_scenes import (
 )
 from .benchmark_layout import (
     BENCHMARK_CHECKPOINT_ORDER,
+    BENCHMARK_CHECKPOINTS_BY_ID,
     BENCHMARK_CHECKPOINTS,
     BENCHMARK_ZONES,
 )
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = 0.30
+COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.65
 
 class LLMController():
     def __init__(self, robot_type, virtual_queue, use_http=False, message_queue: Optional[queue.Queue]=None, enable_video=False, state_provider: Optional[StateProvider]=None):
@@ -118,6 +120,7 @@ class LLMController():
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_right", self.drone.move_right, "Move right by a distance", args=[SkillArg("distance", float)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_up", self.drone.move_up, "Move up by a distance", args=[SkillArg("distance", float)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("move_down", self.drone.move_down, "Move down by a distance", args=[SkillArg("distance", float)]))
+        self.low_level_skillset.add_skill(LowLevelSkillItem("go_checkpoint", self.skill_go_checkpoint, "Navigate toward a benchmark checkpoint by ID", args=[SkillArg("checkpoint_id", str)]))
         self.low_level_skillset.add_skill(LowLevelSkillItem("takeoff", self.skill_takeoff, "Take off and climb to a safe hover height"))
         self.low_level_skillset.add_skill(LowLevelSkillItem("land", self.skill_land, "Land safely at current location"))
         self.low_level_skillset.add_skill(LowLevelSkillItem("turn_cw", self.drone.turn_cw, "Rotate clockwise/right by certain degrees", args=[SkillArg("degrees", int)]))
@@ -155,6 +158,10 @@ class LLMController():
         self.latest_baseline_decision = None
         self.execution_mode = "Waiting"
         self.active_objective_set = self._default_active_objective_set()
+        self.latest_benchmark_progress = {
+            "completed": [],
+            "current_target": None,
+        }
         self.planner_mode = str(os.getenv("TYPEFLY_PLANNER_MODE", "llm_baseline")).strip().lower()
         if self.planner_mode not in {"llm_baseline", "rule_baseline"}:
             self.planner_mode = "llm_baseline"
@@ -399,9 +406,64 @@ class LLMController():
         time.sleep(s)
         return None, False
 
+    def skill_go_checkpoint(self, checkpoint_id: str) -> Tuple[str, bool]:
+        checkpoint_key = str(checkpoint_id or "").strip().strip("'\"").upper()
+        checkpoint = BENCHMARK_CHECKPOINTS_BY_ID.get(checkpoint_key)
+        if checkpoint is None:
+            raise ValueError(f"Unknown checkpoint_id `{checkpoint_id}`")
+
+        max_step_m = 1.0
+        min_axis_step_m = 0.15
+        max_iterations = 8
+
+        reached = False
+        final_dist = None
+        for _ in range(max_iterations):
+            context = self._get_planner_position_context()
+            drone_x, drone_y, _ = context["drone_pos"]
+            dx = float(checkpoint.x) - float(drone_x)
+            dy = float(checkpoint.y) - float(drone_y)
+            dist = math.hypot(dx, dy)
+            final_dist = dist
+
+            if dist <= float(checkpoint.radius_m):
+                reached = True
+                break
+
+            move_x = max(-max_step_m, min(max_step_m, dx))
+            move_y = max(-max_step_m, min(max_step_m, dy))
+
+            if abs(move_x) >= min_axis_step_m:
+                if move_x > 0:
+                    self.drone.move_right(abs(move_x))
+                else:
+                    self.drone.move_left(abs(move_x))
+
+            if abs(move_y) >= min_axis_step_m:
+                if move_y > 0:
+                    self.drone.move_forward(abs(move_y))
+                else:
+                    self.drone.move_backward(abs(move_y))
+
+        status = "reached" if reached else "approached"
+        summary = (
+            f"go_checkpoint({checkpoint.id}) {status}: "
+            f"zone={checkpoint.zone_id}, target=({checkpoint.x:.2f},{checkpoint.y:.2f}), "
+            f"remaining_dist={0.0 if final_dist is None else float(final_dist):.2f}m"
+        )
+        print_t(f"[C] {summary}")
+        return summary, False
+
     def append_message(self, message: str):
         if self.message_queue is not None:
             self.message_queue.put(message)
+
+    def update_benchmark_progress(self, completed_checkpoint_ids, current_target_checkpoint):
+        completed = [str(v).upper() for v in list(completed_checkpoint_ids or [])]
+        self.latest_benchmark_progress = {
+            "completed": sorted(set(completed)),
+            "current_target": (None if current_target_checkpoint is None else str(current_target_checkpoint).upper()),
+        }
 
     def stop_controller(self):
         self.controller_active = False
@@ -414,11 +476,24 @@ class LLMController():
         return image
     
     def execute_minispec(self, minispec: str):
-        interpreter = MiniSpecInterpreter(self.message_queue)
+        interpreter = MiniSpecInterpreter(self.message_queue, should_abort=self._should_abort_current_execution_for_replan)
         interpreter.execute(minispec)
         self.execution_history = interpreter.execution_history
         ret_val = interpreter.ret_queue.get()
         return ret_val
+
+    def _should_abort_current_execution_for_replan(self) -> Tuple[bool, str]:
+        snapshot = self.get_live_ui_snapshot()
+        if not isinstance(snapshot, dict):
+            return False, ""
+        safety_context = snapshot.get("safety_context")
+        if safety_context is None:
+            return False, ""
+        current_p = float(getattr(safety_context, "current_collision_probability", 0.0))
+        if current_p >= COLLISION_PROBABILITY_REPLAN_THRESHOLD:
+            dominant = str(getattr(safety_context, "dominant_threat_id", "unknown"))
+            return True, f"current_collision_probability={current_p:.6f}>=0.65, dominant={dominant}"
+        return False, ""
 
     def _sanitize_minispec_plan(self, raw_plan: str) -> str:
         if raw_plan is None:
@@ -550,6 +625,8 @@ class LLMController():
         ret_val = None
         monitor_stop = threading.Event()
         monitor_thread = None
+        replan_attempts = 0
+        max_replan_attempts = 3
         def _run_monitor():
             while not monitor_stop.is_set():
                 try:
@@ -588,6 +665,7 @@ class LLMController():
                     final_plan_source = "baseline_rule"
                     baseline_shortcut_triggered = True
                 else:
+                    previous_plan = self.current_plan
                     self.execution_mode = "Planning"
                     self.current_plan = self.planner.plan(
                         task_description=task_description,
@@ -595,6 +673,7 @@ class LLMController():
                         location_info=location_info,
                         execution_history=self.execution_history,
                         safety_context=safety_context,
+                        previous_plan=previous_plan,
                     )
                     llm_called = True
                     final_plan_source = "llm"
@@ -628,6 +707,18 @@ class LLMController():
                 task_completed = True
                 if isinstance(ret_val, tuple) and len(ret_val) >= 2:
                     execution_success = bool(ret_val[0] is not False)
+                if hasattr(ret_val, "replan") and bool(ret_val.replan):
+                    replan_attempts += 1
+                    self.task_run_logger.update_execution_info(
+                        execution_success=False,
+                        failure_reason="replan_requested",
+                        task_completed=False,
+                    )
+                    if replan_attempts > max_replan_attempts:
+                        raise RuntimeError(f"Exceeded max replan attempts ({max_replan_attempts})")
+                    self.append_message(f"[LOG] Replan requested, attempt={replan_attempts}")
+                    self.execution_mode = "Planning"
+                    continue
                 self.task_run_logger.update_execution_info(
                     execution_success=execution_success,
                     task_completed=task_completed,
@@ -1057,6 +1148,7 @@ class LLMController():
             "mode_name": self.get_active_scenario_name(),
             "execution_mode": self.execution_mode,
             "active_objective_set": dict(self.active_objective_set),
+            "benchmark_progress": dict(self.latest_benchmark_progress),
             "checkpoint_order": list(BENCHMARK_CHECKPOINT_ORDER),
             "benchmark_checkpoints": [
                 {"id": cp.id, "zone_id": cp.zone_id, "x": float(cp.x), "y": float(cp.y), "radius_m": float(cp.radius_m)}
