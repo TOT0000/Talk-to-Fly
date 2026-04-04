@@ -1,4 +1,4 @@
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, Callable
 import re, queue
 import ast
 from enum import Enum
@@ -295,8 +295,13 @@ class Statement:
             args = split_args(args)
             print_debug(f'split_args returned: {args}')
             for i in range(0, len(args)):
-                args[i] = args[i].strip().strip('\'"')
-                if args[i].startswith('_') or args[i].startswith('-') or any(op in args[i] for op in '+-*/'):
+                raw_arg = args[i].strip()
+                is_quoted_literal = (
+                    len(raw_arg) >= 2
+                    and ((raw_arg[0] == "'" and raw_arg[-1] == "'") or (raw_arg[0] == '"' and raw_arg[-1] == '"'))
+                )
+                args[i] = raw_arg.strip('\'"')
+                if (not is_quoted_literal) and (args[i].startswith('_') or args[i].startswith('-') or any(op in args[i] for op in '+-*/')):
                     args[i] = self.eval_expr(args[i]).value  # 注意這裡用 eval_expr，並取 .value
 
             if name == 'p':
@@ -575,7 +580,12 @@ class Statement:
         return s
 
 class MiniSpecInterpreter:
-    def __init__(self, message_queue: queue.Queue):
+    def __init__(
+        self,
+        message_queue: queue.Queue,
+        should_abort: Optional[Callable[[], Tuple[bool, str]]] = None,
+        on_statement_executed: Optional[Callable[[], None]] = None,
+    ):
         self.env = {}
         self.ret = False
         self.code_buffer: str = ''
@@ -583,6 +593,8 @@ class MiniSpecInterpreter:
         if Statement.low_level_skillset is None or \
             Statement.high_level_skillset is None:
             raise Exception('Statement: Skillset is not initialized')
+        self.should_abort = should_abort
+        self.on_statement_executed = on_statement_executed
         
         Statement.execution_queue = Queue()
         self.execution_thread = Thread(target=self.executor)
@@ -607,6 +619,20 @@ class MiniSpecInterpreter:
 
     def executor(self):
         while True:
+            if callable(self.should_abort):
+                try:
+                    should_abort, reason = self.should_abort()
+                except Exception:
+                    should_abort, reason = (False, "")
+                if should_abort:
+                    while not Statement.execution_queue.empty():
+                        Statement.execution_queue.get()
+                    self.timestamp_end_execution = time.time()
+                    self.timestamp_start_execution = None
+                    msg = f"MiniSpec execution interrupted for replan: {reason or 'runtime_high_risk'}"
+                    print_t(f"[I] {msg}")
+                    self.ret_queue.put(MiniSpecReturnValue(msg, True))
+                    return
             if not Statement.execution_queue.empty():
                 if self.timestamp_start_execution is None:
                     self.timestamp_start_execution = time.time()
@@ -621,8 +647,8 @@ class MiniSpecInterpreter:
                     self.timestamp_end_execution = time.time()
                     self.timestamp_start_execution = None
                     error_message = f"MiniSpec execution error at statement `{statement}`: {e}"
-                    print_t(f"[I] {error_message}")
-                    self.ret_queue.put(MiniSpecReturnValue(error_message, True))
+                    print_t(f"[EXECUTION_ERROR] {error_message}")
+                    self.ret_queue.put(MiniSpecReturnValue(error_message, False))
                     return
                 print_t(f'Queue statement done: {statement}')
                 if statement.ret:
@@ -631,6 +657,11 @@ class MiniSpecInterpreter:
                     self.ret_queue.put(ret_val)
                     return
                 self.execution_history.append(statement)
+                if callable(self.on_statement_executed):
+                    try:
+                        self.on_statement_executed()
+                    except Exception:
+                        pass
                 # if ret_val.replan:
                 #     print_t(f'Queue statement replan: {statement}')
                 #     self.ret_queue.put(ret_val)

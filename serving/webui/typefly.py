@@ -102,6 +102,17 @@ class TypeFly:
             "user_gt": deque(maxlen=100),
             "user_est": deque(maxlen=100),
         }
+        self.worker_collision_history = {
+            "worker_1": deque(maxlen=100),
+            "worker_2": deque(maxlen=100),
+            "worker_3": deque(maxlen=100),
+        }
+        self.worker_collision_active = {
+            "worker_1": False,
+            "worker_2": False,
+            "worker_3": False,
+        }
+        self.mission_collision_count = 0
         self.plot_style = {
             "drone": {"main": "#0B57D0", "light": "#8AB4F8"},
             "user": {"main": "#C5221F", "light": "#F28B82"},
@@ -147,25 +158,25 @@ class TypeFly:
 
             with gr.Row():
                 with gr.Column(scale=1, min_width=260, elem_classes="scenario-panel"):
-                    self.scenario_selector = gr.Dropdown(
-                        choices=list(SCENARIOS.keys()),
-                        value=self.active_scenario,
-                        label="Scenario Mode",
-                    )
-                    self.scenario_apply_btn = gr.Button("Apply Scenario")
+                    baseline_scene_choices = [sid for sid in ("SCENE_BENCHMARK_DEMO", "SCENE_MANUAL_WORKER_CONTROL") if sid in BASELINE_SCENES]
                     self.baseline_scene_selector = gr.Dropdown(
-                        choices=list(BASELINE_SCENES.keys()),
+                        choices=baseline_scene_choices,
                         value=normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_BENCHMARK_DEMO")),
                         label="Baseline Scene",
                     )
                     self.baseline_scene_apply_btn = gr.Button("Apply Baseline Scene")
                 with gr.Column(scale=1, min_width=320, elem_classes="user-move-panel"):
+                    self.worker_selector = gr.Dropdown(
+                        choices=["worker_1", "worker_2", "worker_3"],
+                        value="worker_1",
+                        label="Controlled Worker",
+                    )
                     self.user_move_step = gr.Slider(
                         minimum=0.1,
                         maximum=1.0,
                         value=0.5,
                         step=0.1,
-                        label="User Move Step (m)",
+                        label="Worker Move Step (m)",
                         elem_classes="user-move-step",
                     )
                     self.user_turn_step = gr.Slider(
@@ -173,7 +184,7 @@ class TypeFly:
                         maximum=90,
                         value=15,
                         step=5,
-                        label="User Turn Step (deg)",
+                        label="Worker Turn Step (deg)",
                         elem_classes="user-move-step",
                     )
                     with gr.Row(elem_classes="user-move-row"):
@@ -193,44 +204,44 @@ class TypeFly:
                         self.user_turn_cw_btn = gr.Button("Turn Clockwise", elem_classes="user-move-btn")
             self.scenario_status = gr.Markdown(value="")
 
-            self.scenario_apply_btn.click(
-                fn=self.apply_scenario,
-                inputs=[self.scenario_selector],
-                outputs=[self.scenario_status],
-            )
             self.baseline_scene_apply_btn.click(
                 fn=self.apply_baseline_scene,
                 inputs=[self.baseline_scene_selector],
                 outputs=[self.scenario_status],
             )
+            self.worker_selector.change(
+                fn=self.select_controlled_worker,
+                inputs=[self.worker_selector],
+                outputs=[self.scenario_status],
+            )
 
             self.user_move_forward_btn.click(
-                fn=self.move_user_forward,
+                fn=self.move_worker_forward,
                 inputs=[self.user_move_step],
                 outputs=[self.scenario_status],
             )
             self.user_move_backward_btn.click(
-                fn=self.move_user_backward,
+                fn=self.move_worker_backward,
                 inputs=[self.user_move_step],
                 outputs=[self.scenario_status],
             )
             self.user_move_left_btn.click(
-                fn=self.move_user_left,
+                fn=self.move_worker_left,
                 inputs=[self.user_move_step],
                 outputs=[self.scenario_status],
             )
             self.user_move_right_btn.click(
-                fn=self.move_user_right,
+                fn=self.move_worker_right,
                 inputs=[self.user_move_step],
                 outputs=[self.scenario_status],
             )
             self.user_turn_cw_btn.click(
-                fn=self.turn_user_cw,
+                fn=self.turn_worker_cw,
                 inputs=[self.user_turn_step],
                 outputs=[self.scenario_status],
             )
             self.user_turn_ccw_btn.click(
-                fn=self.turn_user_ccw,
+                fn=self.turn_worker_ccw,
                 inputs=[self.user_turn_step],
                 outputs=[self.scenario_status],
             )
@@ -268,13 +279,12 @@ class TypeFly:
                 with gr.Column(scale=2, min_width=300):
                     self.status_markdown = gr.Markdown(value="### Status\nWaiting for live data...")
                     self.entity_markdown = gr.Markdown(value="### Entity positions\nWaiting for live data...")
-                    self.debug_markdown = gr.Markdown(value="### Debug\nCollapsed", visible=False)
 
             with gr.Row():
                 self.xy_plot = gr.Image(value=self.create_blank_plot("Local XY", "X (m)", "Y (m)", xlim=(0, 12), ylim=(0, 12), figsize=(5, 4)), label="Local XY", height=320)
-                self.x_plot = gr.Image(value=self.create_sequence_plot("X in Sequence", "Index", "X (m)", xlim=(0, 1), ylim=(0, 12)), label="X in Sequence", height=320)
-                self.y_plot = gr.Image(value=self.create_sequence_plot("Y in Sequence", "Index", "Y (m)", xlim=(0, 1), ylim=(0, 12)), label="Y in Sequence", height=320)
-                self.z_plot = gr.Image(value=self.create_sequence_plot("Z in Sequence", "Index", "Z (m)", xlim=(0, 1), ylim=(0, 6)), label="Z in Sequence", height=320)
+                self.x_plot = gr.Image(value=self.create_sequence_plot("worker_1 Collision Probability", "Sample", "P(collision)", xlim=(0, 1), ylim=(0, 1)), label="worker_1 P(collision)", height=320)
+                self.y_plot = gr.Image(value=self.create_sequence_plot("worker_2 Collision Probability", "Sample", "P(collision)", xlim=(0, 1), ylim=(0, 1)), label="worker_2 P(collision)", height=320)
+                self.z_plot = gr.Image(value=self.create_sequence_plot("worker_3 Collision Probability", "Sample", "P(collision)", xlim=(0, 1), ylim=(0, 1)), label="worker_3 P(collision)", height=320)
 
             self.counter = gr.State(0)
             self.timer = Timer(value=0.08)
@@ -291,7 +301,6 @@ class TypeFly:
                     self.counter,
                     self.status_markdown,
                     self.entity_markdown,
-                    self.debug_markdown,
                 ]
             )
 
@@ -490,6 +499,43 @@ class TypeFly:
         yaw = self.llm_controller.turn_user_heading(float(deg_step))
         return f"User heading turned CCW by {deg_step:.1f}°. new_yaw={math.degrees(yaw):.1f}°"
 
+    def select_controlled_worker(self, worker_id: str):
+        selected = self.llm_controller.set_manual_worker_selection(worker_id)
+        return f"Controlled worker set to {selected}"
+
+    def _move_worker(self, local_forward: float, local_right: float, step_m: float):
+        state = self.llm_controller.move_selected_worker_relative(local_forward=local_forward, local_right=local_right, step_m=step_m)
+        if state is None:
+            return "Manual worker control is only available in SCENE_MANUAL_WORKER_CONTROL."
+        return (
+            f"{state['worker_id']} moved to ({state['x']:.2f}, {state['y']:.2f}), "
+            f"heading={state['yaw_deg']:.1f}°"
+        )
+
+    def move_worker_forward(self, step_m: float):
+        return self._move_worker(local_forward=1.0, local_right=0.0, step_m=step_m)
+
+    def move_worker_backward(self, step_m: float):
+        return self._move_worker(local_forward=-1.0, local_right=0.0, step_m=step_m)
+
+    def move_worker_left(self, step_m: float):
+        return self._move_worker(local_forward=0.0, local_right=-1.0, step_m=step_m)
+
+    def move_worker_right(self, step_m: float):
+        return self._move_worker(local_forward=0.0, local_right=1.0, step_m=step_m)
+
+    def turn_worker_cw(self, deg_step: float):
+        state = self.llm_controller.turn_selected_worker(-float(deg_step))
+        if state is None:
+            return "Manual worker control is only available in SCENE_MANUAL_WORKER_CONTROL."
+        return f"{state['worker_id']} heading={state['yaw_deg']:.1f}°"
+
+    def turn_worker_ccw(self, deg_step: float):
+        state = self.llm_controller.turn_selected_worker(float(deg_step))
+        if state is None:
+            return "Manual worker control is only available in SCENE_MANUAL_WORKER_CONTROL."
+        return f"{state['worker_id']} heading={state['yaw_deg']:.1f}°"
+
     def process_message(self, message, history):
         print_t(f"[S] Receiving task description: {message}")
         if message == "exit":
@@ -503,6 +549,8 @@ class TypeFly:
             self.mission_clock["completed_at"] = None
             self.mission_clock["is_running"] = True
             self.mission_clock["objective_completed"] = False
+            self.worker_collision_active = {k: False for k in self.worker_collision_active.keys()}
+            self.mission_collision_count = 0
             task_thread = Thread(target=self.llm_controller.execute_task_description, args=(message,))
             task_thread.start()
             complete_response = ''
@@ -633,25 +681,30 @@ class TypeFly:
 
     def update_and_step(self, counter, show_error_ellipse=False, show_raw_estimate=False):
         snapshot = self.llm_controller.get_live_ui_snapshot()
+        safety_context = snapshot.get("safety_context") if snapshot else None
+        ui_pc = None if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
+        if hasattr(self.llm_controller, "update_ui_collision_probability"):
+            self.llm_controller.update_ui_collision_probability(ui_pc)
         self._sync_objective_state(snapshot)
         self._append_history(snapshot)
+        self._append_worker_collision_history(snapshot)
+        self._update_mission_collision_count(snapshot)
         self._update_checkpoint_progress(snapshot)
         anchor_plot = self.render_anchor_3d_plot()
         global_xy, xy, x, y, z = self.update_position_plot(snapshot, show_error_ellipse=show_error_ellipse, show_raw_estimate=show_raw_estimate)
         status_md = self.render_status_markdown(snapshot)
         entity_md = self.render_entity_markdown(snapshot)
-        debug_md = self.render_debug_markdown(snapshot)
         counter += 1
         print_debug(
             "[UI-CALLBACK] "
-            "outputs=[anchor_3d,global_xy_plot,xy_plot,x_plot,y_plot,z_plot,counter,status,entity,debug] "
+            "outputs=[anchor_3d,global_xy_plot,xy_plot,x_plot,y_plot,z_plot,counter,status,entity] "
             f"drone_gt={None if not snapshot else snapshot.get('drone_gt')} "
             f"drone_est={None if not snapshot else snapshot.get('drone_est')} "
             f"user_gt={None if not snapshot else snapshot.get('user_gt')} "
             f"user_est={None if not snapshot else snapshot.get('user_est')} "
             f"counter={counter}"
         )
-        return anchor_plot, global_xy, xy, x, y, z, counter, status_md, entity_md, debug_md
+        return anchor_plot, global_xy, xy, x, y, z, counter, status_md, entity_md
 
     def _fmt_vec(self, value):
         if value is None:
@@ -709,7 +762,8 @@ class TypeFly:
             return
         order = self.benchmark_progress["order"]
         completed = self.benchmark_progress["completed"]
-        current_target = next((cid for cid in order if cid not in completed), None)
+        active_ids = set(self.objective_state.get("active_checkpoint_ids", set()))
+        current_target = next((cid for cid in order if cid in active_ids and cid not in completed), None)
         self.benchmark_progress["current_target"] = current_target
         if current_target is None:
             self.benchmark_progress["active_enter_ts"] = None
@@ -731,12 +785,16 @@ class TypeFly:
             self.benchmark_progress["active_enter_ts"] = None
             self.benchmark_progress["active_progress"] = 0.0
 
-        active_ids = set(self.objective_state.get("active_checkpoint_ids", set()))
         mission_completed = bool(active_ids) and all(cid in completed for cid in active_ids)
         self.mission_clock["objective_completed"] = mission_completed
         if mission_completed and self.mission_clock.get("started_at") is not None and self.mission_clock.get("completed_at") is None:
             self.mission_clock["completed_at"] = now
             self.mission_clock["is_running"] = False
+        if hasattr(self.llm_controller, "update_benchmark_progress"):
+            self.llm_controller.update_benchmark_progress(
+                completed_checkpoint_ids=sorted(completed),
+                current_target_checkpoint=current_target,
+            )
 
     def render_anchor_3d_plot(self):
         fig = plt.figure(figsize=(5.2, 4.2))
@@ -771,6 +829,37 @@ class TypeFly:
             if value is not None:
                 self.position_history[key].append(tuple(float(v) for v in value))
                 print_debug(f"[UI-HISTORY] key={key} appended={self.position_history[key][-1]}")
+
+    def _append_worker_collision_history(self, snapshot):
+        safety_context = snapshot.get("safety_context") if snapshot else None
+        per_worker = {}
+        if safety_context is not None:
+            per_worker = {
+                str(row.get("id")): float(row.get("collision_probability", 0.0))
+                for row in (getattr(safety_context, "per_worker_collision_probabilities", []) or [])
+            }
+        for worker_id in ("worker_1", "worker_2", "worker_3"):
+            self.worker_collision_history[worker_id].append(float(per_worker.get(worker_id, 0.0)))
+
+    def _update_mission_collision_count(self, snapshot):
+        if not snapshot:
+            return
+        drone_gt = snapshot.get("drone_gt")
+        workers = snapshot.get("workers") or []
+        if drone_gt is None:
+            return
+        collision_radius = float(UAV_RADIUS_M + WORKER_RADIUS_M)
+        worker_map = {str(item.get("id")): item for item in workers}
+        for worker_id in ("worker_1", "worker_2", "worker_3"):
+            worker = worker_map.get(worker_id)
+            worker_gt = None if worker is None else worker.get("gt_xy")
+            currently_colliding = False
+            if worker_gt is not None:
+                distance_xy = math.hypot(float(drone_gt[0]) - float(worker_gt[0]), float(drone_gt[1]) - float(worker_gt[1]))
+                currently_colliding = bool(distance_xy <= collision_radius)
+            if currently_colliding and not self.worker_collision_active.get(worker_id, False):
+                self.mission_collision_count += 1
+            self.worker_collision_active[worker_id] = currently_colliding
 
     def render_status_markdown(self, snapshot):
         safety_context = snapshot.get("safety_context") if snapshot else None
@@ -811,6 +900,7 @@ class TypeFly:
             f"- current target checkpoint: {target}",
             f"- checkpoint progress: {completed_active}/{total}",
             f"- zone progress: {', '.join(zone_parts) if zone_parts else 'n/a'}",
+            f"- mission collision count: {int(self.mission_collision_count)}",
             f"- mission completed: {self.mission_clock.get('objective_completed', False)}",
             f"- mission elapsed time: {elapsed_text}",
             f"- mission completion time: {completion_text}",
@@ -838,27 +928,6 @@ class TypeFly:
             lines.append(f"- {worker_id} true: {_fmt_xy(None if worker is None else worker.get('gt_xy'))}")
             lines.append(f"- {worker_id} est: {_fmt_xy(None if worker is None else worker.get('est_xy_bias_corrected'))}")
         return "\n".join(lines)
-
-    def render_debug_markdown(self, snapshot):
-        safety_context = snapshot.get("safety_context") if snapshot else None
-        if safety_context is None:
-            return gr.update(value="### Debug\nWaiting for safety state...", visible=True)
-        per_worker = {str(row.get("id")): row for row in (getattr(safety_context, "per_worker_collision_probabilities", []) or [])}
-        w3 = per_worker.get("worker_3", {})
-        dbg = getattr(safety_context, "collision_debug_info", {}) or {}
-        sanity = dbg.get("sanity_case_probabilities", {}) if isinstance(dbg, dict) else {}
-        lines = [
-            "### Debug",
-            f"- DEBUG_FORCE_CLOSE_WORKER: {os.getenv('DEBUG_FORCE_CLOSE_WORKER', 'false')}",
-            f"- r_u={UAV_RADIUS_M:.2f}, r_h={WORKER_RADIUS_M:.2f}, r_c={UAV_RADIUS_M + WORKER_RADIUS_M:.2f}",
-            f"- worker_3 mu: {w3.get('mu_xy', 'n/a')}",
-            f"- worker_3 Sigma_rel: {w3.get('sigma_rel', 'n/a')}",
-            f"- worker_3 exact P_c: {self._fmt_prob(w3.get('exact_series_probability'))}",
-            f"- worker_3 MC P_c: {self._fmt_prob(w3.get('monte_carlo_probability'))}",
-            f"- sanity case1 exact: {self._fmt_prob(sanity.get('case1_exact'))}",
-            f"- sanity case2 exact: {self._fmt_prob(sanity.get('case2_exact'))}",
-        ]
-        return gr.update(value="\n".join(lines), visible=True)
 
     def _estimate_heading_from_history(self, primary_key: str, fallback_key: str = None):
         history = list(self.position_history.get(primary_key, []))
@@ -947,6 +1016,12 @@ class TypeFly:
             if est_xy is not None:
                 ax_xy.add_patch(Circle((est_xy[0], est_xy[1]), WORKER_RADIUS_M, fill=False, edgecolor="#CE93D8", linewidth=1.3, linestyle="--"))
                 ax_xy.text(est_xy[0] + 0.08, est_xy[1] + 0.08, str(wid), fontsize=8, color="#4A148C")
+                heading = float(worker.get("heading_yaw_rad", 0.0))
+                arrow_len = 0.45
+                wx, wy = float(est_xy[0]), float(est_xy[1])
+                wdx = arrow_len * float(math.cos(heading))
+                wdy = arrow_len * float(math.sin(heading))
+                ax_xy.arrow(wx, wy, wdx, wdy, head_width=0.12, head_length=0.14, color="#6A1B9A", linewidth=1.2, length_includes_head=True, zorder=4)
             if gt_xy is not None and est_xy is not None:
                 ax_xy.plot([gt_xy[0], est_xy[0]], [gt_xy[1], est_xy[1]], color="#8E24AA", linewidth=0.7, alpha=0.8)
             if show_raw_estimate and worker.get("est_xy_raw") is not None:
@@ -1042,53 +1117,35 @@ class TypeFly:
             show_raw_estimate=show_raw_estimate,
         )
 
-        series_specs = [
-            ("drone_gt", "Drone GT", self.plot_style["drone"]["main"], "-"),
-            ("drone_est", "Drone EST", self.plot_style["drone"]["main"], "--"),
-            ("user_gt", "User GT", self.plot_style["user"]["main"], "-"),
-            ("user_est", "User EST", self.plot_style["user"]["main"], "--"),
-        ]
         imgs = []
-        axis_map = {"x": 0, "y": 1, "z": 2}
-        for axis in ["x", "y", "z"]:
+        worker_specs = [
+            ("worker_1", "#7B1FA2"),
+            ("worker_2", "#00897B"),
+            ("worker_3", "#EF6C00"),
+        ]
+        for worker_id, color in worker_specs:
             fig, ax = plt.subplots(figsize=(5, 4))
-            values = []
-            axis_idx = axis_map[axis]
-            for spec in series_specs:
-                key = spec[0]
-                label = spec[1]
-                color = spec[2]
-                linestyle = spec[3] if len(spec) > 3 else "-"
-                history = list(self.position_history[key])
-                if not history:
-                    ax.plot([], [], color=color, label=label)
-                    continue
-                x_vals = list(range(len(history)))
-                y_vals = [point[axis_idx] for point in history]
-                values.extend(y_vals)
-                markerfacecolor = color if linestyle == "-" else "none"
+            history = list(self.worker_collision_history[worker_id])
+            if history:
                 ax.plot(
-                    x_vals,
-                    y_vals,
+                    list(range(len(history))),
+                    history,
                     color=color,
-                    linestyle=linestyle,
+                    linestyle="-",
                     marker='o',
                     markersize=3,
-                    markerfacecolor=markerfacecolor,
+                    markerfacecolor=color,
                     markeredgecolor=color,
-                    label=label,
+                    label=f"{worker_id} P(collision)",
                 )
-            max_len = max((len(self.position_history[spec[0]]) for spec in series_specs), default=1)
-            ax.set_xlim(0, max(max_len - 1, 1))
-            if values:
-                ymin = min(values) - 0.5
-                ymax = max(values) + 0.5
             else:
-                ymin, ymax = 0.0, 5.0
-            ax.set_ylim(ymin, ymax)
-            ax.set_title(f"{axis.upper()} History")
+                ax.plot([], [], color=color, label=f"{worker_id} P(collision)")
+            max_len = max(len(history), 1)
+            ax.set_xlim(0, max(max_len - 1, 1))
+            ax.set_ylim(0.0, 1.0)
+            ax.set_title(f"{worker_id} Collision Probability")
             ax.set_xlabel("Sample")
-            ax.set_ylabel(f"{axis.upper()} (m)")
+            ax.set_ylabel("P(collision)")
             ax.grid(True, linestyle='--', linewidth=0.5)
             ax.legend(fontsize=8)
 
