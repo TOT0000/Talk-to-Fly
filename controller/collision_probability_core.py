@@ -31,7 +31,9 @@ class CollisionEntity2D:
 class CollisionProbabilityResult:
     entity_id: str
     probability: float
+    soft_probability: float
     approximate_probability: float
+    hard_approx_probability: float
     mu_xy: np.ndarray
     sigma_rel: np.ndarray
     lambdas: np.ndarray
@@ -184,6 +186,35 @@ def approximate_collision_probability_gauss_hermite(
     r_c: float,
     *,
     quadrature_order: int = 20,
+    tau_v: float = 0.10,
+) -> float:
+    mu_xy = np.asarray(mu_xy, dtype=float).reshape(2)
+    sigma_xy = np.asarray(sigma_xy, dtype=float).reshape(2, 2)
+    r_c = float(max(r_c, 1e-6))
+    L = _stable_cholesky_psd(sigma_xy, eps=1e-10)
+    nodes, weights = np.polynomial.hermite.hermgauss(int(max(2, quadrature_order)))
+    acc = 0.0
+    sqrt2 = math.sqrt(2.0)
+    tau_v = float(max(1e-6, tau_v))
+    for i in range(len(nodes)):
+        for j in range(len(nodes)):
+            xi = np.array([nodes[i], nodes[j]], dtype=float)
+            sample = mu_xy + sqrt2 * (L @ xi)
+            v = float(np.dot(sample, sample) / (r_c * r_c))
+            sigmoid_input = (1.0 - v) / tau_v
+            sigmoid_input = max(min(sigmoid_input, 60.0), -60.0)
+            soft_value = 1.0 / (1.0 + math.exp(-sigmoid_input))
+            acc += float(weights[i] * weights[j]) * float(soft_value)
+    estimate = (1.0 / math.pi) * float(acc)
+    return float(np.clip(estimate, 0.0, 1.0))
+
+
+def hard_collision_probability_gauss_hermite(
+    mu_xy: np.ndarray,
+    sigma_xy: np.ndarray,
+    r_c: float,
+    *,
+    quadrature_order: int = 20,
 ) -> float:
     mu_xy = np.asarray(mu_xy, dtype=float).reshape(2)
     sigma_xy = np.asarray(sigma_xy, dtype=float).reshape(2, 2)
@@ -210,6 +241,7 @@ class CollisionProbabilityCore:
         self._debug_mc_cache: Dict[Tuple[str, Tuple[float, ...], Tuple[float, ...], float], float] = {}
         self._sanity_cache: Optional[Dict[str, float]] = None
         self._gh_order = int(os.getenv("COLLISION_GAUSS_HERMITE_ORDER", "20"))
+        self._soft_tau_v = float(os.getenv("COLLISION_SOFT_TAU_V", "0.10"))
 
     def reset_history(self):
         self._historical_max_probability = 0.0
@@ -245,7 +277,14 @@ class CollisionProbabilityCore:
             r_c = max(1e-6, float(uav.radius_m) + float(worker.radius_m))
             A = (1.0 / (r_c * r_c)) * np.eye(2, dtype=float)
 
-            p_approx = approximate_collision_probability_gauss_hermite(
+            p_soft = approximate_collision_probability_gauss_hermite(
+                mu_xy=mu_k,
+                sigma_xy=sigma_rel,
+                r_c=float(r_c),
+                quadrature_order=self._gh_order,
+                tau_v=self._soft_tau_v,
+            )
+            p_hard_approx = hard_collision_probability_gauss_hermite(
                 mu_xy=mu_k,
                 sigma_xy=sigma_rel,
                 r_c=float(r_c),
@@ -259,7 +298,7 @@ class CollisionProbabilityCore:
                 max_terms=max_terms,
                 tolerance=tolerance,
             )
-            p_ck = float(p_approx)
+            p_ck = float(p_soft)
 
             p_mc = None
             if debug_mc_enabled and worker.entity_id == "worker_3":
@@ -275,7 +314,9 @@ class CollisionProbabilityCore:
                 CollisionProbabilityResult(
                     entity_id=str(worker.entity_id),
                     probability=float(p_ck),
-                    approximate_probability=float(p_approx),
+                    soft_probability=float(p_soft),
+                    approximate_probability=float(p_soft),
+                    hard_approx_probability=float(p_hard_approx),
                     mu_xy=mu_k,
                     sigma_rel=sigma_rel,
                     lambdas=lambdas,
