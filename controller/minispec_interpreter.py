@@ -600,6 +600,7 @@ class MiniSpecInterpreter:
         self.program_count = 0
         self.ret_queue = Queue()
         self.message_queue = message_queue
+        self.should_abort = should_abort
 
     def execute(self, code: Stream[ChatCompletion.ChatCompletionChunk] | List[str]) -> MiniSpecReturnValue:
         print_t(f'>>> Get a stream')
