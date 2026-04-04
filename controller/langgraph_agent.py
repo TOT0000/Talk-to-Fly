@@ -227,23 +227,22 @@ class LangGraphOrchestrationRunner:
 
         collision_risk = float(state.get("current_collision_risk", 0.0))
         no_progress_steps = int(state.get("no_progress_steps", 0))
-        if collision_risk >= 0.80 and no_progress_steps >= 1:
-            plan = "turn_cw(20);"
-            self._emit_agent_message("[ACTION] recovery: conservative yaw adjustment due to high collision risk.")
-        elif collision_risk >= 0.70:
-            plan = "delay(1.5);"
-            self._emit_agent_message("[ACTION] recovery: short wait and re-observe due to high collision risk.")
-        else:
-            plan = self.controller.planner.plan_langgraph_step_action(
-                task_description=str(state.get("user_task", "")),
-                current_subgoal=str(subgoal),
-                remaining_checkpoints=remaining,
-                current_collision_risk=collision_risk,
-                last_action=str(state.get("last_action_text", "")),
-                last_result=str((state.get("last_action_result") or {}).get("message", "")),
-                stall_count=no_progress_steps,
-                recent_history=list(state.get("execution_history", [])),
-            )
+        repeated_action_count = int(state.get("repeated_action_count", 0))
+        plan = self.controller.planner.plan_langgraph_step_action(
+            task_description=str(state.get("user_task", "")),
+            current_subgoal=str(subgoal),
+            remaining_checkpoints=remaining,
+            current_collision_risk=collision_risk,
+            historical_max_collision_risk=float(state.get("historical_max_collision_risk", 0.0)),
+            per_worker_collision_risks=dict(state.get("per_worker_collision_risks", {})),
+            dominant_risky_worker=state.get("dominant_risky_worker"),
+            worker_states_summary=list(state.get("worker_states", [])),
+            last_action=str(state.get("last_action_text", "")),
+            last_result=str((state.get("last_action_result") or {}).get("message", "")),
+            stall_count=no_progress_steps,
+            repeated_action_count=repeated_action_count,
+            recent_history=list(state.get("execution_history", [])),
+        )
         if not plan:
             plan = f'go_checkpoint("{subgoal}");'
         action_target = self._extract_checkpoint_target(plan)

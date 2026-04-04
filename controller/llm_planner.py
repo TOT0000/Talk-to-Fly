@@ -52,21 +52,28 @@ class LLMPlanner():
         self.prompt_langgraph_step = (
             "You are TypeFly LangGraph Step Planner.\n"
             "You are NOT planning a full mission. You are deciding only the NEXT step.\n"
-            "Output exactly one MiniSpec action statement ending with ';'.\n"
-            "Allowed actions: go_checkpoint(\"ID\"); delay(seconds); log(\"text\");\n"
+            "Output one action or a very short action segment (max 2 statements), each ending with ';'.\n"
+            "Allowed actions: move_forward(distance); move_backward(distance); move_left(distance); move_right(distance); "
+            "turn_cw(degrees); turn_ccw(degrees); delay(seconds); go_checkpoint(\"ID\"); log(\"text\");\n"
             "Hard constraints:\n"
             "- Do not output multi-checkpoint full plans.\n"
             "- If the same action was already executed and no progress improved, avoid repeating it.\n"
-            "- Prefer a recovery step (short delay or log replanning) if stalled.\n"
+            "- If risk is high, first choose conservative avoidance/recovery action before aggressively approaching checkpoint.\n"
+            "- If stalled/no-progress, switch to a different conservative strategy.\n"
             "Task: {task_description}\n"
             "Current subgoal: {current_subgoal}\n"
             "Remaining checkpoints: {remaining_checkpoints}\n"
             "Current collision risk: {current_collision_risk}\n"
+            "Historical max collision risk: {historical_max_collision_risk}\n"
+            "Dominant risky worker: {dominant_risky_worker}\n"
+            "Per-worker collision risks: {per_worker_collision_risks}\n"
+            "Worker states summary: {worker_states_summary}\n"
             "Last action: {last_action}\n"
             "Last result: {last_result}\n"
             "Stall count: {stall_count}\n"
+            "Repeated action count: {repeated_action_count}\n"
             "Recent execution history: {recent_history}\n"
-            "Output one action only."
+            "Return action statements only, no explanation."
         )
 
     def set_model(self, model_name):
@@ -384,9 +391,14 @@ class LLMPlanner():
         current_subgoal: str | None,
         remaining_checkpoints: list[str],
         current_collision_risk: float,
+        historical_max_collision_risk: float,
+        per_worker_collision_risks: dict[str, float],
+        dominant_risky_worker: str | None,
+        worker_states_summary: list[dict],
         last_action: str,
         last_result: str,
         stall_count: int,
+        repeated_action_count: int,
         recent_history: list[dict],
     ) -> str:
         prompt = self.prompt_langgraph_step.format(
@@ -394,9 +406,14 @@ class LLMPlanner():
             current_subgoal=str(current_subgoal or "None"),
             remaining_checkpoints=[str(v) for v in list(remaining_checkpoints or [])],
             current_collision_risk=f"{float(current_collision_risk):.6f}",
+            historical_max_collision_risk=f"{float(historical_max_collision_risk):.6f}",
+            per_worker_collision_risks=str(dict(per_worker_collision_risks or {})),
+            dominant_risky_worker=str(dominant_risky_worker or "n/a"),
+            worker_states_summary=str(list(worker_states_summary or [])[:3]),
             last_action=str(last_action or ""),
             last_result=str(last_result or ""),
             stall_count=int(stall_count),
+            repeated_action_count=int(repeated_action_count),
             recent_history=str(list(recent_history or [])[-4:]),
         )
         raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
@@ -411,14 +428,37 @@ class LLMPlanner():
         text = str(raw_text or "").strip().replace("\n", " ")
         if not text:
             return ""
-        go_match = re.search(r'go_checkpoint\(\s*[\'"]?([A-Za-z]\d+)[\'"]?\s*\)\s*;?', text)
-        if go_match:
-            return f'go_checkpoint("{go_match.group(1).upper()}");'
-        delay_match = re.search(r'delay\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?', text)
-        if delay_match:
-            return f"delay({float(delay_match.group(1)):.1f});"
-        log_match = re.search(r'log\(\s*[\'"]([^\'"]{1,60})[\'"]\s*\)\s*;?', text)
-        if log_match:
-            safe = re.sub(r"[^a-zA-Z0-9 _-]", "", log_match.group(1))[:60]
-            return f'log("{safe}");'
-        return ""
+        commands = []
+        patterns = [
+            r'go_checkpoint\(\s*[\'"]?([A-Za-z]\d+)[\'"]?\s*\)\s*;?',
+            r'move_forward\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'move_backward\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'move_left\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'move_right\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'turn_cw\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'turn_ccw\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'delay\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'log\(\s*[\'"]([^\'"]{1,60})[\'"]\s*\)\s*;?',
+        ]
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                token = match.group(0)
+                token = token.strip()
+                if token.startswith("go_checkpoint"):
+                    cid = match.group(1).upper()
+                    commands.append(f'go_checkpoint("{cid}");')
+                elif token.startswith("log("):
+                    safe = re.sub(r"[^a-zA-Z0-9 _-]", "", match.group(1))[:60]
+                    commands.append(f'log("{safe}");')
+                else:
+                    name = token.split("(", 1)[0]
+                    value = float(match.group(1))
+                    if name.startswith("turn_"):
+                        commands.append(f"{name}({int(value)});")
+                    else:
+                        commands.append(f"{name}({value:.1f});")
+                if len(commands) >= 2:
+                    break
+            if len(commands) >= 2:
+                break
+        return "".join(commands)
