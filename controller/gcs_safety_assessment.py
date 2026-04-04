@@ -173,25 +173,18 @@ class GcsSafetyAssessmentService:
                 collision_debug_info=None,
             )
         if worker_packets is None:
-            print("[COLLISION_DEBUG] risk_entities=[] (worker packets unavailable; skipping user legacy path)")
             return SafetyContext(
                 safety_score=0.0,
                 preferred_standoff_m=float(self._uav_radius_m + self._worker_radius_m),
                 reason_tags=["collision_probability_core", "risk_workers_unavailable"],
-                envelope_gap_m=float(safety_state.envelope_gap_m),
-                uncertainty_scale_m=float(
-                    safety_state.drone_radius_along_user_direction
-                    + safety_state.user_radius_along_drone_direction
-                ),
-                drone_to_user_distance_xy=float(safety_state.drone_to_user_distance_xy),
+                envelope_gap_m=0.0,
+                uncertainty_scale_m=0.0,
+                drone_to_user_distance_xy=0.0,
                 envelopes_overlap=False,
                 dominant_threat_type="worker",
                 dominant_threat_id="none",
-                dominant_gap_m=float(safety_state.envelope_gap_m),
-                dominant_uncertainty_scale_m=float(
-                    safety_state.drone_radius_along_user_direction
-                    + safety_state.user_radius_along_drone_direction
-                ),
+                dominant_gap_m=0.0,
+                dominant_uncertainty_scale_m=0.0,
                 current_collision_probability=0.0,
                 historical_max_collision_probability=float(self._core.get_historical_max_probability()),
                 per_worker_collision_probabilities=[],
