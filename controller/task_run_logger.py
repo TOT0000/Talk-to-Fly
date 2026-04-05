@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from zipfile import BadZipFile
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from typing import Dict, Optional
@@ -144,9 +145,26 @@ class TaskRunLogger:
         if not self._enabled:
             self._warn_once_disabled()
             return
-        os.makedirs(os.path.dirname(self.excel_path), exist_ok=True)
+        os.makedirs(os.path.dirname(self.excel_path) or ".", exist_ok=True)
         if os.path.exists(self.excel_path):
-            wb = load_workbook(self.excel_path)
+            try:
+                wb = load_workbook(self.excel_path)
+            except BadZipFile:
+                corrupted_path = f"{self.excel_path}.corrupted_{int(time.time())}"
+                try:
+                    os.replace(self.excel_path, corrupted_path)
+                except Exception:
+                    pass
+                wb = Workbook()
+                ws_runs = wb.active
+                ws_runs.title = RUNS_SHEET
+                ws_runs.append(RUN_COLUMNS)
+                ws_events = wb.create_sheet(EVENTS_SHEET)
+                ws_events.append(EVENT_COLUMNS)
+                ws_debug = wb.create_sheet(DEBUG_SHEET)
+                ws_debug.append(["run_id", "timestamp", "debug_json"])
+                wb.save(self.excel_path)
+                return
             self._ensure_sheet_schema(wb, RUNS_SHEET, RUN_COLUMNS)
             self._ensure_sheet_schema(wb, EVENTS_SHEET, EVENT_COLUMNS)
             self._ensure_sheet_schema(wb, DEBUG_SHEET, ["run_id", "timestamp", "debug_json"])

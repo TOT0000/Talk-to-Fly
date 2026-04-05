@@ -37,6 +37,51 @@ class LLMPlanner():
 
         with open(self.plan_examples_path, "r") as f:
             self.plan_examples = f.read()
+        self.prompt_langgraph_decomposition = (
+            "You are TypeFly LangGraph Task Decomposer.\n"
+            "Return checkpoint IDs only, as a JSON array, in execution order.\n"
+            "Rules:\n"
+            "1) Only use IDs from allowed checkpoints.\n"
+            "2) Prefer single-zone checkpoints that match the task.\n"
+            "3) Do not output explanation.\n"
+            "Task: {task_description}\n"
+            "Allowed checkpoints: {allowed_checkpoints}\n"
+            "Active zones: {active_zones}\n"
+            "Output JSON array only."
+        )
+        self.prompt_langgraph_step = (
+            "You are TypeFly LangGraph Step Planner.\n"
+            "You are NOT planning a full mission. You are deciding only the NEXT step.\n"
+            "Output one action or a very short action segment (max 2 statements), each ending with ';'.\n"
+            "Allowed actions: move_forward(distance); move_backward(distance); move_left(distance); move_right(distance); "
+            "turn_cw(degrees); turn_ccw(degrees); delay(seconds); go_checkpoint(\"ID\"); log(\"text\");\n"
+            "Hard constraints:\n"
+            "- Do not output multi-checkpoint full plans.\n"
+            "- current_subgoal is the primary mission target for this step.\n"
+            "- If the same action was already executed and no progress improved, avoid repeating it.\n"
+            "- If risk is high, you may temporarily choose conservative avoidance/recovery action.\n"
+            "- Avoidance is temporary, not a new mission objective.\n"
+            "- When you judge immediate risk has improved, return to go_checkpoint(current_subgoal).\n"
+            "- If stalled/no-progress, switch to a different conservative strategy.\n"
+            "- Avoid long turn/move loops without objective progress.\n"
+            "- reached checkpoint area is NOT completed checkpoint.\n"
+            "- Completion is determined only by official completion_state/progress.\n"
+            "- If reached but not completed, prioritize finishing current_subgoal (hold/re-approach/micro-adjust), not jumping to next checkpoint.\n"
+            "Task: {task_description}\n"
+            "Current subgoal: {current_subgoal}\n"
+            "Remaining checkpoints: {remaining_checkpoints}\n"
+            "Current collision risk: {current_collision_risk}\n"
+            "Historical max collision risk: {historical_max_collision_risk}\n"
+            "Dominant risky worker: {dominant_risky_worker}\n"
+            "Per-worker collision risks: {per_worker_collision_risks}\n"
+            "Worker states summary: {worker_states_summary}\n"
+            "Last action: {last_action}\n"
+            "Last result: {last_result}\n"
+            "Stall count: {stall_count}\n"
+            "Repeated action count: {repeated_action_count}\n"
+            "Recent execution history: {recent_history}\n"
+            "Return action statements only, no explanation."
+        )
 
     def set_model(self, model_name):
         self.model_name = model_name
@@ -320,3 +365,107 @@ class LLMPlanner():
         prompt = self.prompt_probe.format(scene_description=full_scene, question=question)
         print_t(f"[P] Execution request: {question}")
         return evaluate_value(self.llm.request(prompt, self.model_name)), False
+
+    def decompose_task_for_langgraph(
+        self,
+        task_description: str,
+        active_checkpoint_ids: list[str],
+        active_zone_ids: list[str],
+    ) -> list[str]:
+        prompt = self.prompt_langgraph_decomposition.format(
+            task_description=str(task_description or ""),
+            allowed_checkpoints=[str(v).upper() for v in list(active_checkpoint_ids or [])],
+            active_zones=[str(v) for v in list(active_zone_ids or [])],
+        )
+        raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
+        parsed: list[str] = []
+        try:
+            obj = ast.literal_eval(raw)
+            if isinstance(obj, list):
+                parsed = [str(v).upper() for v in obj]
+        except Exception:
+            tokens = re.findall(r"[A-Za-z]\d+", raw)
+            parsed = [str(v).upper() for v in tokens]
+        allowed = [str(v).upper() for v in list(active_checkpoint_ids or [])]
+        filtered = [cid for cid in parsed if cid in allowed]
+        if filtered:
+            return filtered
+        return allowed
+
+    def plan_langgraph_step_action(
+        self,
+        task_description: str,
+        current_subgoal: str | None,
+        remaining_checkpoints: list[str],
+        current_collision_risk: float,
+        historical_max_collision_risk: float,
+        per_worker_collision_risks: dict[str, float],
+        dominant_risky_worker: str | None,
+        worker_states_summary: list[dict],
+        last_action: str,
+        last_result: str,
+        stall_count: int,
+        repeated_action_count: int,
+        recent_history: list[dict],
+    ) -> str:
+        prompt = self.prompt_langgraph_step.format(
+            task_description=str(task_description or ""),
+            current_subgoal=str(current_subgoal or "None"),
+            remaining_checkpoints=[str(v) for v in list(remaining_checkpoints or [])],
+            current_collision_risk=f"{float(current_collision_risk):.6f}",
+            historical_max_collision_risk=f"{float(historical_max_collision_risk):.6f}",
+            per_worker_collision_risks=str(dict(per_worker_collision_risks or {})),
+            dominant_risky_worker=str(dominant_risky_worker or "n/a"),
+            worker_states_summary=str(list(worker_states_summary or [])[:3]),
+            last_action=str(last_action or ""),
+            last_result=str(last_result or ""),
+            stall_count=int(stall_count),
+            repeated_action_count=int(repeated_action_count),
+            recent_history=str(list(recent_history or [])[-4:]),
+        )
+        raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
+        action = self._sanitize_langgraph_action(raw)
+        if action:
+            return action
+        if current_subgoal:
+            return f'go_checkpoint("{str(current_subgoal).upper()}");'
+        return "delay(1.0);"
+
+    def _sanitize_langgraph_action(self, raw_text: str) -> str:
+        text = str(raw_text or "").strip().replace("\n", " ")
+        if not text:
+            return ""
+        commands = []
+        patterns = [
+            r'go_checkpoint\(\s*[\'"]?([A-Za-z]\d+)[\'"]?\s*\)\s*;?',
+            r'move_forward\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'move_backward\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'move_left\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'move_right\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'turn_cw\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'turn_ccw\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'delay\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'log\(\s*[\'"]([^\'"]{1,60})[\'"]\s*\)\s*;?',
+        ]
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                token = match.group(0)
+                token = token.strip()
+                if token.startswith("go_checkpoint"):
+                    cid = match.group(1).upper()
+                    commands.append(f'go_checkpoint("{cid}");')
+                elif token.startswith("log("):
+                    safe = re.sub(r"[^a-zA-Z0-9 _-]", "", match.group(1))[:60]
+                    commands.append(f'log("{safe}");')
+                else:
+                    name = token.split("(", 1)[0]
+                    value = float(match.group(1))
+                    if name.startswith("turn_"):
+                        commands.append(f"{name}({int(value)});")
+                    else:
+                        commands.append(f"{name}({value:.1f});")
+                if len(commands) >= 2:
+                    break
+            if len(commands) >= 2:
+                break
+        return "".join(commands)
