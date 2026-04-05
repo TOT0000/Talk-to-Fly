@@ -242,9 +242,15 @@ class CollisionProbabilityCore:
         self._sanity_cache: Optional[Dict[str, float]] = None
         self._gh_order = int(os.getenv("COLLISION_GAUSS_HERMITE_ORDER", "20"))
         self._soft_tau_v = float(os.getenv("COLLISION_SOFT_TAU_V", "0.10"))
+        self._beta_u = float(os.getenv("COLLISION_UAV_SMOOTHING_BETA", "0.20"))
+        self._beta_w = float(os.getenv("COLLISION_WORKER_SMOOTHING_BETA", "0.20"))
+        self._uav_smoothed_xy: Optional[np.ndarray] = None
+        self._worker_smoothed_xy: Dict[str, np.ndarray] = {}
 
     def reset_history(self):
         self._historical_max_probability = 0.0
+        self._uav_smoothed_xy = None
+        self._worker_smoothed_xy.clear()
 
     def get_historical_max_probability(self) -> float:
         return float(self._historical_max_probability)
@@ -261,12 +267,25 @@ class CollisionProbabilityCore:
         debug_mc_enabled = _env_flag("DEBUG_COLLISION_MONTE_CARLO", default=False)
 
         # Bias-corrected UAV mean: p_u_hat - b_u
-        uav_mean = np.asarray(uav.mean_xy, dtype=float).reshape(2) - np.asarray(uav.bias_xy, dtype=float).reshape(2)
+        uav_mean_raw = np.asarray(uav.mean_xy, dtype=float).reshape(2) - np.asarray(uav.bias_xy, dtype=float).reshape(2)
+        uav_mean = self._smooth_position(
+            previous=self._uav_smoothed_xy,
+            current=uav_mean_raw,
+            beta=self._beta_u,
+        )
+        self._uav_smoothed_xy = np.asarray(uav_mean, dtype=float).copy()
         uav_cov = np.asarray(uav.cov_xy, dtype=float).reshape(2, 2)
 
         for worker in workers:
             # Bias-corrected worker mean: p_k_hat - b_k
-            worker_mean = np.asarray(worker.mean_xy, dtype=float).reshape(2) - np.asarray(worker.bias_xy, dtype=float).reshape(2)
+            worker_mean_raw = np.asarray(worker.mean_xy, dtype=float).reshape(2) - np.asarray(worker.bias_xy, dtype=float).reshape(2)
+            worker_key = str(worker.entity_id)
+            worker_mean = self._smooth_position(
+                previous=self._worker_smoothed_xy.get(worker_key),
+                current=worker_mean_raw,
+                beta=self._beta_w,
+            )
+            self._worker_smoothed_xy[worker_key] = np.asarray(worker_mean, dtype=float).copy()
             worker_cov = np.asarray(worker.cov_xy, dtype=float).reshape(2, 2)
 
             # Relative Gaussian
@@ -298,7 +317,7 @@ class CollisionProbabilityCore:
                 max_terms=max_terms,
                 tolerance=tolerance,
             )
-            p_ck = float(p_soft)
+            p_ck = float(p_hard_approx)
 
             p_mc = None
             if debug_mc_enabled and worker.entity_id == "worker_3":
@@ -315,7 +334,7 @@ class CollisionProbabilityCore:
                     entity_id=str(worker.entity_id),
                     probability=float(p_ck),
                     soft_probability=float(p_soft),
-                    approximate_probability=float(p_soft),
+                    approximate_probability=float(p_hard_approx),
                     hard_approx_probability=float(p_hard_approx),
                     mu_xy=mu_k,
                     sigma_rel=sigma_rel,
@@ -382,6 +401,15 @@ class CollisionProbabilityCore:
         except Exception:
             self._sanity_cache = {"case1_exact": float("nan"), "case2_exact": float("nan")}
         return dict(self._sanity_cache)
+
+    @staticmethod
+    def _smooth_position(previous: Optional[np.ndarray], current: np.ndarray, beta: float) -> np.ndarray:
+        beta = float(np.clip(beta, 1e-6, 1.0))
+        current = np.asarray(current, dtype=float).reshape(2)
+        if previous is None:
+            return current.copy()
+        prev = np.asarray(previous, dtype=float).reshape(2)
+        return ((1.0 - beta) * prev) + (beta * current)
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
