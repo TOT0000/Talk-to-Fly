@@ -1210,6 +1210,16 @@ class LLMController():
             f"  reasons={safety_context.reason_tags}"
         )
 
+    @staticmethod
+    def _ema_smooth_xy(previous_xy: Optional[Tuple[float, float]], current_xy: Tuple[float, float], beta: float) -> Tuple[float, float]:
+        beta = float(np.clip(float(beta), 1e-6, 1.0))
+        current = np.asarray(current_xy, dtype=float).reshape(2)
+        if previous_xy is None:
+            return float(current[0]), float(current[1])
+        prev = np.asarray(previous_xy, dtype=float).reshape(2)
+        smoothed = ((1.0 - beta) * prev) + (beta * current)
+        return float(smoothed[0]), float(smoothed[1])
+
     def _simulate_obstacle_returns(self, obstacle_states, now: float):
         _ = now
         states = list(obstacle_states or [])
@@ -1241,9 +1251,12 @@ class LLMController():
                 est_x = measured_x
                 est_y = measured_y
             else:
-                alpha = 0.35
-                est_x = float((1.0 - alpha) * float(loc_state["est_x"]) + alpha * measured_x)
-                est_y = float((1.0 - alpha) * float(loc_state["est_y"]) + alpha * measured_y)
+                beta = float(os.getenv("COLLISION_WORKER_SMOOTHING_BETA", "0.20"))
+                est_x, est_y = self._ema_smooth_xy(
+                    previous_xy=(float(loc_state["est_x"]), float(loc_state["est_y"])),
+                    current_xy=(measured_x, measured_y),
+                    beta=beta,
+                )
             self.manual_worker_localization_state[worker_id] = {
                 "est_x": est_x,
                 "est_y": est_y,
