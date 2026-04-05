@@ -553,11 +553,23 @@ class LLMController():
         if self.message_queue is not None:
             self.message_queue.put(message)
 
-    def update_benchmark_progress(self, completed_checkpoint_ids, current_target_checkpoint):
+    def update_benchmark_progress(
+        self,
+        completed_checkpoint_ids,
+        current_target_checkpoint,
+        in_radius: Optional[bool] = None,
+        dwell_seconds: Optional[float] = None,
+        required_dwell_seconds: Optional[float] = None,
+        dwell_satisfied: Optional[bool] = None,
+    ):
         completed = [str(v).upper() for v in list(completed_checkpoint_ids or [])]
         self.latest_benchmark_progress = {
             "completed": sorted(set(completed)),
             "current_target": (None if current_target_checkpoint is None else str(current_target_checkpoint).upper()),
+            "in_radius": (None if in_radius is None else bool(in_radius)),
+            "dwell_seconds": (None if dwell_seconds is None else float(dwell_seconds)),
+            "required_dwell_seconds": (None if required_dwell_seconds is None else float(required_dwell_seconds)),
+            "dwell_satisfied": (None if dwell_satisfied is None else bool(dwell_satisfied)),
         }
 
     def update_ui_collision_probability(self, current_collision_probability: Optional[float]):

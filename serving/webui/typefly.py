@@ -811,10 +811,21 @@ class TypeFly:
         if current_target is None:
             self.benchmark_progress["active_enter_ts"] = None
             self.benchmark_progress["active_progress"] = 1.0
+            if hasattr(self.llm_controller, "update_benchmark_progress"):
+                self.llm_controller.update_benchmark_progress(
+                    completed_checkpoint_ids=sorted(completed),
+                    current_target_checkpoint=current_target,
+                    in_radius=False,
+                    dwell_seconds=0.0,
+                    required_dwell_seconds=float(CHECKPOINT_DWELL_SECONDS),
+                    dwell_satisfied=False,
+                )
             return
         cp = BENCHMARK_CHECKPOINTS_BY_ID[current_target]
         dist = math.hypot(float(drone_gt[0] - cp.x), float(drone_gt[1] - cp.y))
         now = time.time()
+        in_radius = bool(dist <= cp.radius_m)
+        dwell = 0.0
         if dist <= cp.radius_m:
             if self.benchmark_progress["active_enter_ts"] is None:
                 self.benchmark_progress["active_enter_ts"] = now
@@ -837,6 +848,10 @@ class TypeFly:
             self.llm_controller.update_benchmark_progress(
                 completed_checkpoint_ids=sorted(completed),
                 current_target_checkpoint=current_target,
+                in_radius=in_radius,
+                dwell_seconds=float(dwell),
+                required_dwell_seconds=float(CHECKPOINT_DWELL_SECONDS),
+                dwell_satisfied=bool(dwell >= CHECKPOINT_DWELL_SECONDS),
             )
 
     def render_anchor_3d_plot(self):

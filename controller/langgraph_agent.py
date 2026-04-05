@@ -65,6 +65,11 @@ class AgentState(TypedDict, total=False):
     subgoal_reached: bool
     arrived_but_not_completed: bool
     arrived_wait_cycles: int
+    is_current_subgoal_completed: bool
+    is_current_subgoal_in_radius: bool
+    current_subgoal_dwell_seconds: float
+    required_dwell_seconds: float
+    dwell_satisfied: bool
 
 
 class LangGraphOrchestrationRunner:
@@ -123,6 +128,11 @@ class LangGraphOrchestrationRunner:
             "subgoal_reached": False,
             "arrived_but_not_completed": False,
             "arrived_wait_cycles": 0,
+            "is_current_subgoal_completed": False,
+            "is_current_subgoal_in_radius": False,
+            "current_subgoal_dwell_seconds": 0.0,
+            "required_dwell_seconds": 2.0,
+            "dwell_satisfied": False,
         }
         self._emit_agent_message(
             f"[AGENT] subgoal queue: {' -> '.join(list(decomposed)) if decomposed else '(empty)'}"
@@ -250,10 +260,21 @@ class LangGraphOrchestrationRunner:
             return {"last_plan_text": "", "last_action_text": "", "route_decision": "end"}
         subgoal_phase = str(state.get("subgoal_phase", "APPROACH_SUBGOAL"))
         if subgoal_phase in {"COMPLETE_SUBGOAL", "VERIFY_COMPLETE"}:
-            plan = "delay(2.2);"
+            in_radius = bool(state.get("is_current_subgoal_in_radius", False))
+            dwell_satisfied = bool(state.get("dwell_satisfied", False))
+            if in_radius and not dwell_satisfied:
+                plan = "delay(0.4);"
+                self._emit_agent_message(
+                    f"[STEP] phase: waiting dwell confirmation ({float(state.get('current_subgoal_dwell_seconds', 0.0)):.2f}/{float(state.get('required_dwell_seconds', 2.0)):.2f}s)"
+                )
+            elif not in_radius:
+                plan = f'go_checkpoint("{str(subgoal).upper()}");'
+                self._emit_agent_message("[STEP] phase: left checkpoint area, re-approach subgoal")
+            else:
+                plan = "delay(0.2);"
+                self._emit_agent_message("[STEP] phase: dwell satisfied, waiting completion sync")
             action_text = plan
             self._emit_agent_message(f"[STEP] current subgoal: {subgoal}")
-            self._emit_agent_message("[STEP] phase: waiting for completion confirmation")
             self._emit_agent_message(f"[ACTION] {plan}")
             return {
                 "last_plan_text": plan,
@@ -388,6 +409,15 @@ class LangGraphOrchestrationRunner:
         repeated_action_count = int(state.get("repeated_action_count", 0))
         arrived_but_not_completed = bool(state.get("arrived_but_not_completed", False))
         arrived_wait_cycles = int(state.get("arrived_wait_cycles", 0))
+        in_radius = False
+        dwell_seconds = 0.0
+        required_dwell_seconds = float(state.get("required_dwell_seconds", 2.0))
+        dwell_satisfied = False
+        if isinstance(progress, dict):
+            in_radius = bool(progress.get("in_radius", False))
+            dwell_seconds = float(progress.get("dwell_seconds", 0.0) or 0.0)
+            required_dwell_seconds = float(progress.get("required_dwell_seconds", required_dwell_seconds) or required_dwell_seconds)
+            dwell_satisfied = bool(progress.get("dwell_satisfied", False))
         action_target = self._extract_checkpoint_target(str(state.get("last_plan_text", "")))
         result_msg = str(result.get("message", "")).lower()
         reached_area = (" reached:" in result_msg or " reached " in result_msg) and ("approached" not in result_msg)
@@ -412,20 +442,26 @@ class LangGraphOrchestrationRunner:
         elif phase == "COMPLETE_SUBGOAL":
             phase = "VERIFY_COMPLETE"
         elif phase == "VERIFY_COMPLETE" and subgoal is not None and str(subgoal).upper() not in completed:
-            checkpoint = BENCHMARK_CHECKPOINTS_BY_ID.get(str(subgoal))
-            drone_gt = latest_snapshot.get("drone_gt") if isinstance(latest_snapshot, dict) else None
-            still_near = False
-            if checkpoint is not None and drone_gt is not None:
-                dist_now = math.hypot(float(drone_gt[0]) - float(checkpoint.x), float(drone_gt[1]) - float(checkpoint.y))
-                still_near = bool(dist_now <= float(checkpoint.radius_m + 0.25))
-            if arrived_but_not_completed and still_near and arrived_wait_cycles < 3:
-                arrived_wait_cycles += 1
+            if arrived_but_not_completed and in_radius and not dwell_satisfied:
                 phase = "COMPLETE_SUBGOAL"
                 self._emit_agent_message(
-                    f"[RESULT] waiting for completion confirmation: {str(subgoal).upper()} (cycle={arrived_wait_cycles})"
+                    f"[RESULT] dwell in progress: {str(subgoal).upper()} ({dwell_seconds:.2f} / {required_dwell_seconds:.2f} s)"
                 )
                 no_progress_steps = 0
                 repeated_action_count = 0
+            elif arrived_but_not_completed and (not in_radius):
+                phase = "APPROACH_SUBGOAL"
+                reached_flag = False
+                arrived_but_not_completed = False
+                arrived_wait_cycles = 0
+                self._emit_agent_message(
+                    f"[RESULT] left checkpoint area before dwell completion: {str(subgoal).upper()}"
+                )
+            elif arrived_but_not_completed and dwell_satisfied:
+                phase = "VERIFY_COMPLETE"
+                self._emit_agent_message(
+                    f"[RESULT] dwell satisfied for {str(subgoal).upper()}, waiting completion state sync."
+                )
             else:
                 phase = "APPROACH_SUBGOAL"
                 reached_flag = False
@@ -479,6 +515,11 @@ class LangGraphOrchestrationRunner:
                         "subgoal_reached": reached_flag,
                         "arrived_but_not_completed": arrived_but_not_completed,
                         "arrived_wait_cycles": arrived_wait_cycles,
+                        "is_current_subgoal_completed": bool(subgoal is not None and str(subgoal).upper() in completed),
+                        "is_current_subgoal_in_radius": bool(in_radius),
+                        "current_subgoal_dwell_seconds": float(dwell_seconds),
+                        "required_dwell_seconds": float(required_dwell_seconds),
+                        "dwell_satisfied": bool(dwell_satisfied),
                     }
 
         if not remaining:
@@ -495,6 +536,11 @@ class LangGraphOrchestrationRunner:
                 "subgoal_reached": reached_flag,
                 "arrived_but_not_completed": arrived_but_not_completed,
                 "arrived_wait_cycles": arrived_wait_cycles,
+                "is_current_subgoal_completed": bool(subgoal is not None and str(subgoal).upper() in completed),
+                "is_current_subgoal_in_radius": bool(in_radius),
+                "current_subgoal_dwell_seconds": float(dwell_seconds),
+                "required_dwell_seconds": float(required_dwell_seconds),
+                "dwell_satisfied": bool(dwell_satisfied),
                 "last_progress_signature": progress_signature,
                 "last_subgoal_distance_m": last_subgoal_distance,
                 "no_progress_steps": no_progress_steps,
@@ -514,6 +560,11 @@ class LangGraphOrchestrationRunner:
                 "subgoal_reached": reached_flag,
                 "arrived_but_not_completed": arrived_but_not_completed,
                 "arrived_wait_cycles": arrived_wait_cycles,
+                "is_current_subgoal_completed": bool(subgoal is not None and str(subgoal).upper() in completed),
+                "is_current_subgoal_in_radius": bool(in_radius),
+                "current_subgoal_dwell_seconds": float(dwell_seconds),
+                "required_dwell_seconds": float(required_dwell_seconds),
+                "dwell_satisfied": bool(dwell_satisfied),
                 "last_progress_signature": progress_signature,
                 "last_subgoal_distance_m": last_subgoal_distance,
                 "no_progress_steps": no_progress_steps,
@@ -532,6 +583,11 @@ class LangGraphOrchestrationRunner:
             "subgoal_reached": reached_flag,
             "arrived_but_not_completed": arrived_but_not_completed,
             "arrived_wait_cycles": arrived_wait_cycles,
+            "is_current_subgoal_completed": bool(subgoal is not None and str(subgoal).upper() in completed),
+            "is_current_subgoal_in_radius": bool(in_radius),
+            "current_subgoal_dwell_seconds": float(dwell_seconds),
+            "required_dwell_seconds": float(required_dwell_seconds),
+            "dwell_satisfied": bool(dwell_satisfied),
             "last_progress_signature": progress_signature,
             "last_subgoal_distance_m": last_subgoal_distance,
             "no_progress_steps": no_progress_steps,
