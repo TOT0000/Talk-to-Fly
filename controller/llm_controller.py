@@ -177,6 +177,7 @@ class LLMController():
         self.user_heading_yaw_rad = 0.0
         self.manual_worker_selection_id = "worker_1"
         self.manual_worker_poses: dict[str, dict] = {}
+        self.manual_worker_localization_state: dict[str, dict] = {}
         self.auto_replan_armed = True
         self.auto_replan_protection_remaining = 0
         self.langgraph_runner = LangGraphOrchestrationRunner(self)
@@ -1067,6 +1068,7 @@ class LLMController():
 
     def _reset_manual_worker_poses_from_scene(self, scene: BaselineScene):
         self.manual_worker_poses = {}
+        self.manual_worker_localization_state = {}
         for obstacle in scene.obstacles:
             worker_id = str(obstacle.id)
             if worker_id not in {"worker_1", "worker_2", "worker_3"}:
@@ -1225,8 +1227,31 @@ class LLMController():
             gt_y = float(pose["y"])
             packet.gt_position_3d[0] = gt_x
             packet.gt_position_3d[1] = gt_y
-            packet.estimated_position_3d[0] = float(gt_x + float(packet.b_xy[0]))
-            packet.estimated_position_3d[1] = float(gt_y + float(packet.b_xy[1]))
+            # Simulate localization estimate dynamics (instead of snapping est to gt+bias),
+            # so MANUAL_WORKER_CONTROL keeps a realistic est!=gt behavior.
+            loc_state = self.manual_worker_localization_state.get(worker_id)
+            bias_x = float(packet.b_xy[0])
+            bias_y = float(packet.b_xy[1])
+            sigma_x = float(max(np.sqrt(max(float(packet.P_xy[0][0]), 1e-8)), 0.01))
+            sigma_y = float(max(np.sqrt(max(float(packet.P_xy[1][1]), 1e-8)), 0.01))
+            noise_rng = np.random.default_rng((hash(worker_id) ^ int(time.time() * 10.0)) & 0xFFFFFFFF)
+            measured_x = float(gt_x + bias_x + noise_rng.normal(0.0, sigma_x))
+            measured_y = float(gt_y + bias_y + noise_rng.normal(0.0, sigma_y))
+            if loc_state is None:
+                est_x = measured_x
+                est_y = measured_y
+            else:
+                alpha = 0.35
+                est_x = float((1.0 - alpha) * float(loc_state["est_x"]) + alpha * measured_x)
+                est_y = float((1.0 - alpha) * float(loc_state["est_y"]) + alpha * measured_y)
+            self.manual_worker_localization_state[worker_id] = {
+                "est_x": est_x,
+                "est_y": est_y,
+                "measured_x": measured_x,
+                "measured_y": measured_y,
+            }
+            packet.estimated_position_3d[0] = est_x
+            packet.estimated_position_3d[1] = est_y
             packet.localization_error_vector_3d[0] = float(packet.estimated_position_3d[0] - gt_x)
             packet.localization_error_vector_3d[1] = float(packet.estimated_position_3d[1] - gt_y)
             envelope = build_safety_envelope(packet)
