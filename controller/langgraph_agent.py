@@ -63,6 +63,8 @@ class AgentState(TypedDict, total=False):
     repeated_action_count: int
     subgoal_phase: str
     subgoal_reached: bool
+    arrived_but_not_completed: bool
+    arrived_wait_cycles: int
 
 
 class LangGraphOrchestrationRunner:
@@ -119,6 +121,8 @@ class LangGraphOrchestrationRunner:
             "repeated_action_count": 0,
             "subgoal_phase": "APPROACH_SUBGOAL",
             "subgoal_reached": False,
+            "arrived_but_not_completed": False,
+            "arrived_wait_cycles": 0,
         }
         self._emit_agent_message(
             f"[AGENT] subgoal queue: {' -> '.join(list(decomposed)) if decomposed else '(empty)'}"
@@ -205,10 +209,14 @@ class LangGraphOrchestrationRunner:
         completed = set(state.get("completed_checkpoint_ids", []))
         subgoal_phase = str(state.get("subgoal_phase", "APPROACH_SUBGOAL"))
         subgoal_reached = bool(state.get("subgoal_reached", False))
+        arrived_but_not_completed = bool(state.get("arrived_but_not_completed", False))
+        arrived_wait_cycles = int(state.get("arrived_wait_cycles", 0))
         if current_subgoal is None or current_subgoal in completed:
             current_subgoal = remaining[0] if remaining else None
             subgoal_phase = "APPROACH_SUBGOAL"
             subgoal_reached = False
+            arrived_but_not_completed = False
+            arrived_wait_cycles = 0
         if (
             state.get("route_decision") == "reselect_subgoal"
             and current_subgoal in remaining
@@ -219,11 +227,15 @@ class LangGraphOrchestrationRunner:
             current_subgoal = remaining[(idx + 1) % len(remaining)]
             subgoal_phase = "APPROACH_SUBGOAL"
             subgoal_reached = False
+            arrived_but_not_completed = False
+            arrived_wait_cycles = 0
         return {
             "current_subgoal_type": "checkpoint",
             "current_subgoal_id": current_subgoal,
             "subgoal_phase": subgoal_phase,
             "subgoal_reached": subgoal_reached,
+            "arrived_but_not_completed": arrived_but_not_completed,
+            "arrived_wait_cycles": arrived_wait_cycles,
         }
 
     def _node_plan_step(self, state: AgentState) -> AgentState:
@@ -238,9 +250,10 @@ class LangGraphOrchestrationRunner:
             return {"last_plan_text": "", "last_action_text": "", "route_decision": "end"}
         subgoal_phase = str(state.get("subgoal_phase", "APPROACH_SUBGOAL"))
         if subgoal_phase in {"COMPLETE_SUBGOAL", "VERIFY_COMPLETE"}:
-            plan = "delay(2.0);"
+            plan = "delay(2.2);"
             action_text = plan
             self._emit_agent_message(f"[STEP] current subgoal: {subgoal}")
+            self._emit_agent_message("[STEP] phase: waiting for completion confirmation")
             self._emit_agent_message(f"[ACTION] {plan}")
             return {
                 "last_plan_text": plan,
@@ -373,6 +386,8 @@ class LangGraphOrchestrationRunner:
         remaining = [cid for cid in remaining if str(cid).upper() not in completed]
         no_progress_steps = int(state.get("no_progress_steps", 0))
         repeated_action_count = int(state.get("repeated_action_count", 0))
+        arrived_but_not_completed = bool(state.get("arrived_but_not_completed", False))
+        arrived_wait_cycles = int(state.get("arrived_wait_cycles", 0))
         action_target = self._extract_checkpoint_target(str(state.get("last_plan_text", "")))
         result_msg = str(result.get("message", "")).lower()
         reached_area = (" reached:" in result_msg or " reached " in result_msg) and ("approached" not in result_msg)
@@ -383,24 +398,50 @@ class LangGraphOrchestrationRunner:
         if action_target and reached_area and action_target == str(subgoal).upper():
             phase = "COMPLETE_SUBGOAL"
             reached_flag = True
+            arrived_but_not_completed = True
+            arrived_wait_cycles = 0
         if subgoal is not None and str(subgoal).upper() in completed:
             self._emit_agent_message(f"[RESULT] checkpoint completed: {str(subgoal).upper()}")
             phase = "DONE"
             subgoal = None
             reached_flag = False
+            arrived_but_not_completed = False
+            arrived_wait_cycles = 0
             repeated_action_count = 0
             no_progress_steps = 0
         elif phase == "COMPLETE_SUBGOAL":
             phase = "VERIFY_COMPLETE"
         elif phase == "VERIFY_COMPLETE" and subgoal is not None and str(subgoal).upper() not in completed:
-            phase = "APPROACH_SUBGOAL"
-            reached_flag = False
-            self._emit_agent_message(f"[RESULT] verify incomplete for {str(subgoal).upper()}, re-approach subgoal.")
+            checkpoint = BENCHMARK_CHECKPOINTS_BY_ID.get(str(subgoal))
+            drone_gt = latest_snapshot.get("drone_gt") if isinstance(latest_snapshot, dict) else None
+            still_near = False
+            if checkpoint is not None and drone_gt is not None:
+                dist_now = math.hypot(float(drone_gt[0]) - float(checkpoint.x), float(drone_gt[1]) - float(checkpoint.y))
+                still_near = bool(dist_now <= float(checkpoint.radius_m + 0.25))
+            if arrived_but_not_completed and still_near and arrived_wait_cycles < 3:
+                arrived_wait_cycles += 1
+                phase = "COMPLETE_SUBGOAL"
+                self._emit_agent_message(
+                    f"[RESULT] waiting for completion confirmation: {str(subgoal).upper()} (cycle={arrived_wait_cycles})"
+                )
+                no_progress_steps = 0
+                repeated_action_count = 0
+            else:
+                phase = "APPROACH_SUBGOAL"
+                reached_flag = False
+                arrived_but_not_completed = False
+                arrived_wait_cycles = 0
+                self._emit_agent_message(
+                    f"[RESULT] verify incomplete for {str(subgoal).upper()}, re-approach subgoal."
+                )
         progress_signature = f"{subgoal}:{','.join(remaining)}"
         prev_signature = str(state.get("last_progress_signature", ""))
         if len(history) >= 2 and str(history[-1].get("plan", "")) == str(history[-2].get("plan", "")):
             repeated_action_count += 1
         else:
+            repeated_action_count = 0
+        if arrived_but_not_completed:
+            no_progress_steps = 0
             repeated_action_count = 0
         last_subgoal_distance = state.get("last_subgoal_distance_m")
         if subgoal in remaining:
@@ -422,7 +463,7 @@ class LangGraphOrchestrationRunner:
                 if progress_signature == prev_signature:
                     no_progress_steps += 1
                 last_subgoal_distance = float(distance_m)
-                if repeated_action_count >= 2 and no_progress_steps >= 2:
+                if (not arrived_but_not_completed) and repeated_action_count >= 2 and no_progress_steps >= 2:
                     self._emit_agent_message("[AGENT] planning stalled, trigger subgoal reselection.")
                     return {
                         "route_decision": "reselect_subgoal",
@@ -436,6 +477,8 @@ class LangGraphOrchestrationRunner:
                         "last_progress_signature": progress_signature,
                         "subgoal_phase": phase,
                         "subgoal_reached": reached_flag,
+                        "arrived_but_not_completed": arrived_but_not_completed,
+                        "arrived_wait_cycles": arrived_wait_cycles,
                     }
 
         if not remaining:
@@ -450,6 +493,8 @@ class LangGraphOrchestrationRunner:
                 "current_subgoal_id": subgoal,
                 "subgoal_phase": ("APPROACH_SUBGOAL" if subgoal is None else phase),
                 "subgoal_reached": reached_flag,
+                "arrived_but_not_completed": arrived_but_not_completed,
+                "arrived_wait_cycles": arrived_wait_cycles,
                 "last_progress_signature": progress_signature,
                 "last_subgoal_distance_m": last_subgoal_distance,
                 "no_progress_steps": no_progress_steps,
@@ -467,6 +512,8 @@ class LangGraphOrchestrationRunner:
                 "current_subgoal_id": subgoal,
                 "subgoal_phase": ("APPROACH_SUBGOAL" if subgoal is None else phase),
                 "subgoal_reached": reached_flag,
+                "arrived_but_not_completed": arrived_but_not_completed,
+                "arrived_wait_cycles": arrived_wait_cycles,
                 "last_progress_signature": progress_signature,
                 "last_subgoal_distance_m": last_subgoal_distance,
                 "no_progress_steps": no_progress_steps,
@@ -483,6 +530,8 @@ class LangGraphOrchestrationRunner:
             "current_subgoal_id": subgoal,
             "subgoal_phase": ("APPROACH_SUBGOAL" if subgoal is None else phase),
             "subgoal_reached": reached_flag,
+            "arrived_but_not_completed": arrived_but_not_completed,
+            "arrived_wait_cycles": arrived_wait_cycles,
             "last_progress_signature": progress_signature,
             "last_subgoal_distance_m": last_subgoal_distance,
             "no_progress_steps": no_progress_steps,
