@@ -47,6 +47,7 @@ from .benchmark_layout import (
     BENCHMARK_CHECKPOINTS,
     BENCHMARK_ZONES,
 )
+from .langgraph_agent import LangGraphOrchestrationRunner
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = 0.30
@@ -162,6 +163,7 @@ class LLMController():
         self.baseline_scene_state = None
         self.latest_baseline_decision = None
         self.execution_mode = "Waiting"
+        self.framework_mode = "typefly_baseline"
         self.active_objective_set = self._default_active_objective_set()
         self.latest_benchmark_progress = {
             "completed": [],
@@ -175,8 +177,10 @@ class LLMController():
         self.user_heading_yaw_rad = 0.0
         self.manual_worker_selection_id = "worker_1"
         self.manual_worker_poses: dict[str, dict] = {}
+        self.manual_worker_localization_state: dict[str, dict] = {}
         self.auto_replan_armed = True
         self.auto_replan_protection_remaining = 0
+        self.langgraph_runner = LangGraphOrchestrationRunner(self)
 
         # PX4_SIM optional managed user-position publisher lifecycle
         self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
@@ -550,11 +554,23 @@ class LLMController():
         if self.message_queue is not None:
             self.message_queue.put(message)
 
-    def update_benchmark_progress(self, completed_checkpoint_ids, current_target_checkpoint):
+    def update_benchmark_progress(
+        self,
+        completed_checkpoint_ids,
+        current_target_checkpoint,
+        in_radius: Optional[bool] = None,
+        dwell_seconds: Optional[float] = None,
+        required_dwell_seconds: Optional[float] = None,
+        dwell_satisfied: Optional[bool] = None,
+    ):
         completed = [str(v).upper() for v in list(completed_checkpoint_ids or [])]
         self.latest_benchmark_progress = {
             "completed": sorted(set(completed)),
             "current_target": (None if current_target_checkpoint is None else str(current_target_checkpoint).upper()),
+            "in_radius": (None if in_radius is None else bool(in_radius)),
+            "dwell_seconds": (None if dwell_seconds is None else float(dwell_seconds)),
+            "required_dwell_seconds": (None if required_dwell_seconds is None else float(required_dwell_seconds)),
+            "dwell_satisfied": (None if dwell_satisfied is None else bool(dwell_satisfied)),
         }
 
     def update_ui_collision_probability(self, current_collision_probability: Optional[float]):
@@ -617,10 +633,10 @@ class LLMController():
             YoloClient.plot_results_oi(image, self.vision.object_list)
         return image
     
-    def execute_minispec(self, minispec: str):
+    def execute_minispec(self, minispec: str, silent: bool = False, allow_auto_interrupt: bool = True):
         interpreter = MiniSpecInterpreter(
-            self.message_queue,
-            should_abort=self._should_abort_current_execution_for_replan,
+            None if silent else self.message_queue,
+            should_abort=(self._should_abort_current_execution_for_replan if allow_auto_interrupt else None),
             on_statement_executed=self._on_statement_executed_for_replan,
         )
         interpreter.execute(minispec)
@@ -771,10 +787,14 @@ class LLMController():
         self._sim_user_publisher_proc = None
         self._owns_sim_user_publisher = False
 
-    def execute_task_description(self, task_description: str):
+    def execute_task_description(self, task_description: str, framework_mode: str = "typefly_baseline"):
         if self.controller_wait_takeoff:
             self.append_message("[Warning] Controller is waiting for takeoff...")
             return
+        selected_framework = str(framework_mode or "typefly_baseline").strip().lower()
+        if selected_framework not in {"typefly_baseline", "langgraph_agent"}:
+            selected_framework = "typefly_baseline"
+        self.framework_mode = selected_framework
         self.execution_mode = "Planning"
         self.active_objective_set = self._resolve_active_objective_set(task_description)
         self._task_id_counter += 1
@@ -803,6 +823,58 @@ class LLMController():
                 monitor_stop.wait(0.2)
         monitor_thread = threading.Thread(target=_run_monitor, daemon=True)
         monitor_thread.start()
+        if selected_framework == "langgraph_agent":
+            try:
+                self.execution_mode = "LangGraph Running"
+                agent_state = self.langgraph_runner.run_task(
+                    task_description=task_description,
+                    task_id=task_id,
+                    active_objective_set=self.active_objective_set,
+                )
+                self.execution_history = list(agent_state.get("execution_history", []))
+                self.current_plan = str(agent_state.get("last_plan_text", ""))
+                self.task_run_logger.update_plan_info(self.current_plan, generation_success=bool(self.current_plan))
+                mission_status = str(agent_state.get("mission_status", "running"))
+                execution_success = mission_status == "completed"
+                self.task_run_logger.update_execution_info(
+                    execution_success=execution_success,
+                    failure_reason=None if execution_success else str(agent_state.get("last_error", "langgraph_mission_incomplete")),
+                    task_completed=execution_success,
+                )
+                self.execution_mode = "Completed" if execution_success else "Yielding"
+                self.task_run_logger.consume_runtime_snapshot(self.get_live_ui_snapshot())
+                self.task_run_logger.end_run(run_status="completed" if execution_success else "exception")
+                monitor_stop.set()
+                if monitor_thread is not None:
+                    monitor_thread.join(timeout=1.0)
+                self.append_message("\n[Task ended]")
+                self.append_message("end")
+                self.current_plan = None
+                self.execution_history = None
+                self.execution_mode = "Waiting"
+                self.framework_mode = "typefly_baseline"
+                return
+            except Exception as e:
+                self.execution_mode = "Yielding"
+                error_message = f"[C] Error: {e}"
+                print_t(error_message)
+                self.append_message(error_message)
+                self.task_run_logger.update_execution_info(
+                    execution_success=False,
+                    failure_reason=str(e),
+                    task_completed=False,
+                )
+                self.task_run_logger.end_run(run_status="exception", failure_reason=str(e))
+                monitor_stop.set()
+                if monitor_thread is not None:
+                    monitor_thread.join(timeout=1.0)
+                self.append_message("\n[Task ended]")
+                self.append_message("end")
+                self.current_plan = None
+                self.execution_history = None
+                self.execution_mode = "Waiting"
+                self.framework_mode = "typefly_baseline"
+                return
         while True:
             location_info = self._format_planner_location_info()
             runtime_snapshot = self.get_live_ui_snapshot()
@@ -936,6 +1008,7 @@ class LLMController():
         self.current_plan = None
         self.execution_history = None
         self.execution_mode = "Waiting"
+        self.framework_mode = "typefly_baseline"
 
     def get_active_scenario_name(self) -> str:
         return self.scenario_manager.selected_name()
@@ -995,6 +1068,7 @@ class LLMController():
 
     def _reset_manual_worker_poses_from_scene(self, scene: BaselineScene):
         self.manual_worker_poses = {}
+        self.manual_worker_localization_state = {}
         for obstacle in scene.obstacles:
             worker_id = str(obstacle.id)
             if worker_id not in {"worker_1", "worker_2", "worker_3"}:
@@ -1153,8 +1227,31 @@ class LLMController():
             gt_y = float(pose["y"])
             packet.gt_position_3d[0] = gt_x
             packet.gt_position_3d[1] = gt_y
-            packet.estimated_position_3d[0] = float(gt_x + float(packet.b_xy[0]))
-            packet.estimated_position_3d[1] = float(gt_y + float(packet.b_xy[1]))
+            # Simulate localization estimate dynamics (instead of snapping est to gt+bias),
+            # so MANUAL_WORKER_CONTROL keeps a realistic est!=gt behavior.
+            loc_state = self.manual_worker_localization_state.get(worker_id)
+            bias_x = float(packet.b_xy[0])
+            bias_y = float(packet.b_xy[1])
+            sigma_x = float(max(np.sqrt(max(float(packet.P_xy[0][0]), 1e-8)), 0.01))
+            sigma_y = float(max(np.sqrt(max(float(packet.P_xy[1][1]), 1e-8)), 0.01))
+            noise_rng = np.random.default_rng((hash(worker_id) ^ int(time.time() * 10.0)) & 0xFFFFFFFF)
+            measured_x = float(gt_x + bias_x + noise_rng.normal(0.0, sigma_x))
+            measured_y = float(gt_y + bias_y + noise_rng.normal(0.0, sigma_y))
+            if loc_state is None:
+                est_x = measured_x
+                est_y = measured_y
+            else:
+                alpha = 0.35
+                est_x = float((1.0 - alpha) * float(loc_state["est_x"]) + alpha * measured_x)
+                est_y = float((1.0 - alpha) * float(loc_state["est_y"]) + alpha * measured_y)
+            self.manual_worker_localization_state[worker_id] = {
+                "est_x": est_x,
+                "est_y": est_y,
+                "measured_x": measured_x,
+                "measured_y": measured_y,
+            }
+            packet.estimated_position_3d[0] = est_x
+            packet.estimated_position_3d[1] = est_y
             packet.localization_error_vector_3d[0] = float(packet.estimated_position_3d[0] - gt_x)
             packet.localization_error_vector_3d[1] = float(packet.estimated_position_3d[1] - gt_y)
             envelope = build_safety_envelope(packet)
@@ -1424,7 +1521,7 @@ class LLMController():
             "candidate_targets": candidate_targets,
             "candidate_path_summaries": candidate_path_summaries,
             "baseline_decision": self.latest_baseline_decision,
-            "framework_name": "TypeFly baseline",
+            "framework_name": ("TypeFly baseline" if self.framework_mode == "typefly_baseline" else "LangGraph agent"),
             "mode_name": self.get_active_scenario_name(),
             "execution_mode": self.execution_mode,
             "active_objective_set": dict(self.active_objective_set),
