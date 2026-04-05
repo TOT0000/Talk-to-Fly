@@ -8,6 +8,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from .benchmark_layout import BENCHMARK_CHECKPOINTS_BY_ID
+from .utils import print_debug
 
 FrameworkMode = Literal["typefly_baseline", "langgraph_agent"]
 MissionStatus = Literal["running", "completed", "failed"]
@@ -399,8 +400,10 @@ class LangGraphOrchestrationRunner:
         subgoal = state.get("current_subgoal_id")
         latest_snapshot = self.controller.get_live_ui_snapshot()
         progress = latest_snapshot.get("benchmark_progress") if isinstance(latest_snapshot, dict) else None
+        progress_current_target = None
         completed_from_progress = set()
         if isinstance(progress, dict):
+            progress_current_target = progress.get("current_target")
             completed_from_progress = set(str(v).upper() for v in progress.get("completed", []))
         completed = set(str(v).upper() for v in state.get("completed_checkpoint_ids", []))
         completed.update(completed_from_progress)
@@ -418,6 +421,42 @@ class LangGraphOrchestrationRunner:
             dwell_seconds = float(progress.get("dwell_seconds", 0.0) or 0.0)
             required_dwell_seconds = float(progress.get("required_dwell_seconds", required_dwell_seconds) or required_dwell_seconds)
             dwell_satisfied = bool(progress.get("dwell_satisfied", False))
+        subgoal_center = None
+        subgoal_dist = None
+        subgoal_in_radius_geom = False
+        if subgoal is not None:
+            cp = BENCHMARK_CHECKPOINTS_BY_ID.get(str(subgoal))
+            drone_gt = latest_snapshot.get("drone_gt") if isinstance(latest_snapshot, dict) else None
+            if cp is not None and drone_gt is not None:
+                subgoal_center = (float(cp.x), float(cp.y), float(cp.radius_m))
+                subgoal_dist = math.hypot(float(drone_gt[0]) - float(cp.x), float(drone_gt[1]) - float(cp.y))
+                subgoal_in_radius_geom = bool(subgoal_dist <= float(cp.radius_m))
+        target_aligned = (
+            subgoal is not None
+            and progress_current_target is not None
+            and str(progress_current_target).upper() == str(subgoal).upper()
+        )
+        effective_in_radius = bool(in_radius if target_aligned else subgoal_in_radius_geom)
+        if not target_aligned:
+            dwell_seconds = 0.0
+            dwell_satisfied = False
+        if subgoal is not None:
+            print_debug(
+                "[AGENT-CHECKPOINT-ALIGN] "
+                f"subgoal={str(subgoal).upper()} "
+                f"action_target={self._extract_checkpoint_target(str(state.get('last_plan_text', '')))} "
+                f"progress_target={None if progress_current_target is None else str(progress_current_target).upper()} "
+                f"in_radius_progress={in_radius} "
+                f"in_radius_geom={subgoal_in_radius_geom} "
+                f"effective_in_radius={effective_in_radius} "
+                f"dwell_seconds={dwell_seconds:.3f} "
+                f"required_dwell={required_dwell_seconds:.3f} "
+                f"dwell_satisfied={dwell_satisfied} "
+                f"completed={sorted(completed)} "
+                f"drone_gt={latest_snapshot.get('drone_gt') if isinstance(latest_snapshot, dict) else None} "
+                f"cp_center={subgoal_center} "
+                f"dist_to_subgoal={subgoal_dist}"
+            )
         action_target = self._extract_checkpoint_target(str(state.get("last_plan_text", "")))
         result_msg = str(result.get("message", "")).lower()
         reached_area = (" reached:" in result_msg or " reached " in result_msg) and ("approached" not in result_msg)
@@ -442,14 +481,14 @@ class LangGraphOrchestrationRunner:
         elif phase == "COMPLETE_SUBGOAL":
             phase = "VERIFY_COMPLETE"
         elif phase == "VERIFY_COMPLETE" and subgoal is not None and str(subgoal).upper() not in completed:
-            if arrived_but_not_completed and in_radius and not dwell_satisfied:
+            if arrived_but_not_completed and effective_in_radius and not dwell_satisfied:
                 phase = "COMPLETE_SUBGOAL"
                 self._emit_agent_message(
                     f"[RESULT] dwell in progress: {str(subgoal).upper()} ({dwell_seconds:.2f} / {required_dwell_seconds:.2f} s)"
                 )
                 no_progress_steps = 0
                 repeated_action_count = 0
-            elif arrived_but_not_completed and (not in_radius):
+            elif arrived_but_not_completed and (not effective_in_radius):
                 phase = "APPROACH_SUBGOAL"
                 reached_flag = False
                 arrived_but_not_completed = False
@@ -516,7 +555,7 @@ class LangGraphOrchestrationRunner:
                         "arrived_but_not_completed": arrived_but_not_completed,
                         "arrived_wait_cycles": arrived_wait_cycles,
                         "is_current_subgoal_completed": bool(subgoal is not None and str(subgoal).upper() in completed),
-                        "is_current_subgoal_in_radius": bool(in_radius),
+                        "is_current_subgoal_in_radius": bool(effective_in_radius),
                         "current_subgoal_dwell_seconds": float(dwell_seconds),
                         "required_dwell_seconds": float(required_dwell_seconds),
                         "dwell_satisfied": bool(dwell_satisfied),
@@ -537,7 +576,7 @@ class LangGraphOrchestrationRunner:
                 "arrived_but_not_completed": arrived_but_not_completed,
                 "arrived_wait_cycles": arrived_wait_cycles,
                 "is_current_subgoal_completed": bool(subgoal is not None and str(subgoal).upper() in completed),
-                "is_current_subgoal_in_radius": bool(in_radius),
+                "is_current_subgoal_in_radius": bool(effective_in_radius),
                 "current_subgoal_dwell_seconds": float(dwell_seconds),
                 "required_dwell_seconds": float(required_dwell_seconds),
                 "dwell_satisfied": bool(dwell_satisfied),
@@ -561,7 +600,7 @@ class LangGraphOrchestrationRunner:
                 "arrived_but_not_completed": arrived_but_not_completed,
                 "arrived_wait_cycles": arrived_wait_cycles,
                 "is_current_subgoal_completed": bool(subgoal is not None and str(subgoal).upper() in completed),
-                "is_current_subgoal_in_radius": bool(in_radius),
+                "is_current_subgoal_in_radius": bool(effective_in_radius),
                 "current_subgoal_dwell_seconds": float(dwell_seconds),
                 "required_dwell_seconds": float(required_dwell_seconds),
                 "dwell_satisfied": bool(dwell_satisfied),
@@ -584,7 +623,7 @@ class LangGraphOrchestrationRunner:
             "arrived_but_not_completed": arrived_but_not_completed,
             "arrived_wait_cycles": arrived_wait_cycles,
             "is_current_subgoal_completed": bool(subgoal is not None and str(subgoal).upper() in completed),
-            "is_current_subgoal_in_radius": bool(in_radius),
+            "is_current_subgoal_in_radius": bool(effective_in_radius),
             "current_subgoal_dwell_seconds": float(dwell_seconds),
             "required_dwell_seconds": float(required_dwell_seconds),
             "dwell_satisfied": bool(dwell_satisfied),

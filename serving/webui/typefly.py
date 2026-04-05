@@ -588,6 +588,14 @@ class TypeFly:
             self.mission_clock["completed_at"] = None
             self.mission_clock["is_running"] = True
             self.mission_clock["objective_completed"] = False
+            self.benchmark_progress["completed"] = set()
+            self.benchmark_progress["active_enter_ts"] = None
+            self.benchmark_progress["active_progress"] = 0.0
+            active_ids = set(self.objective_state.get("active_checkpoint_ids", set()))
+            self.benchmark_progress["current_target"] = next(
+                (cid for cid in self.benchmark_progress["order"] if cid in active_ids),
+                None,
+            )
             self.worker_collision_active = {k: False for k in self.worker_collision_active.keys()}
             self.mission_collision_count = 0
             framework_mode = str(getattr(self, "selected_framework_mode", "typefly_baseline"))
