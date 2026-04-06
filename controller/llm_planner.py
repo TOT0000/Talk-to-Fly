@@ -64,6 +64,8 @@ class LLMPlanner():
             "- Avoidance is temporary, not a new mission objective.\n"
             "- If current_subgoal risk is high, do not blindly rush go_checkpoint(current_subgoal).\n"
             "- Recovery should be step-by-step: after each recovery step, re-observe latest risk/state before deciding the next step.\n"
+            "- During each re-observation, explicitly check current collision risk.\n"
+            "- If current collision risk drops below 0.2, prioritize returning to go_checkpoint(current_subgoal).\n"
             "- When you judge immediate risk has improved to a safe level, return to go_checkpoint(current_subgoal).\n"
             "- If risk is still high after re-observation, choose another conservative recovery step and re-observe again.\n"
             "- Recovery goal is to leave danger and then resume current_subgoal, not endless wandering.\n"
