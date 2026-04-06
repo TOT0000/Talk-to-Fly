@@ -71,6 +71,10 @@ class AgentState(TypedDict, total=False):
     current_subgoal_dwell_seconds: float
     required_dwell_seconds: float
     dwell_satisfied: bool
+    waiting_on_checkpoint_completion: bool
+    waiting_checkpoint_id: str | None
+    last_progress_event: dict[str, Any] | None
+    completion_monitor_status: str
 
 
 class LangGraphOrchestrationRunner:
@@ -134,6 +138,10 @@ class LangGraphOrchestrationRunner:
             "current_subgoal_dwell_seconds": 0.0,
             "required_dwell_seconds": 2.0,
             "dwell_satisfied": False,
+            "waiting_on_checkpoint_completion": False,
+            "waiting_checkpoint_id": None,
+            "last_progress_event": None,
+            "completion_monitor_status": "idle",
         }
         self._emit_agent_message(
             f"[AGENT] subgoal queue: {' -> '.join(list(decomposed)) if decomposed else '(empty)'}"
@@ -222,12 +230,18 @@ class LangGraphOrchestrationRunner:
         subgoal_reached = bool(state.get("subgoal_reached", False))
         arrived_but_not_completed = bool(state.get("arrived_but_not_completed", False))
         arrived_wait_cycles = int(state.get("arrived_wait_cycles", 0))
+        waiting_on_completion = bool(state.get("waiting_on_checkpoint_completion", False))
+        waiting_checkpoint_id = state.get("waiting_checkpoint_id")
+        monitor_status = str(state.get("completion_monitor_status", "idle"))
         if current_subgoal is None or current_subgoal in completed:
             current_subgoal = remaining[0] if remaining else None
             subgoal_phase = "APPROACH_SUBGOAL"
             subgoal_reached = False
             arrived_but_not_completed = False
             arrived_wait_cycles = 0
+            waiting_on_completion = False
+            waiting_checkpoint_id = None
+            monitor_status = "idle"
         if (
             state.get("route_decision") == "reselect_subgoal"
             and current_subgoal in remaining
@@ -240,6 +254,9 @@ class LangGraphOrchestrationRunner:
             subgoal_reached = False
             arrived_but_not_completed = False
             arrived_wait_cycles = 0
+            waiting_on_completion = False
+            waiting_checkpoint_id = None
+            monitor_status = "idle"
         return {
             "current_subgoal_type": "checkpoint",
             "current_subgoal_id": current_subgoal,
@@ -247,6 +264,9 @@ class LangGraphOrchestrationRunner:
             "subgoal_reached": subgoal_reached,
             "arrived_but_not_completed": arrived_but_not_completed,
             "arrived_wait_cycles": arrived_wait_cycles,
+            "waiting_on_checkpoint_completion": waiting_on_completion,
+            "waiting_checkpoint_id": waiting_checkpoint_id,
+            "completion_monitor_status": monitor_status,
         }
 
     def _node_plan_step(self, state: AgentState) -> AgentState:
@@ -263,26 +283,35 @@ class LangGraphOrchestrationRunner:
         if subgoal_phase in {"COMPLETE_SUBGOAL", "VERIFY_COMPLETE"}:
             in_radius = bool(state.get("is_current_subgoal_in_radius", False))
             dwell_satisfied = bool(state.get("dwell_satisfied", False))
+            waiting_checkpoint = state.get("waiting_checkpoint_id")
+            waiting_active = bool(state.get("waiting_on_checkpoint_completion", False)) and waiting_checkpoint == subgoal
             if in_radius and not dwell_satisfied:
-                plan = "delay(0.4);"
-                self._emit_agent_message(
-                    f"[STEP] phase: waiting dwell confirmation ({float(state.get('current_subgoal_dwell_seconds', 0.0)):.2f}/{float(state.get('required_dwell_seconds', 2.0)):.2f}s)"
-                )
+                plan = "wait_checkpoint_event();"
+                if not waiting_active:
+                    self._emit_agent_message(
+                        f"[WAIT] waiting for checkpoint completion event: {str(subgoal).upper()} "
+                        f"({float(state.get('current_subgoal_dwell_seconds', 0.0)):.2f}/{float(state.get('required_dwell_seconds', 2.0)):.2f}s)"
+                    )
             elif not in_radius:
                 plan = f'go_checkpoint("{str(subgoal).upper()}");'
                 self._emit_agent_message("[STEP] phase: left checkpoint area, re-approach subgoal")
             else:
-                plan = "delay(0.2);"
-                self._emit_agent_message("[STEP] phase: dwell satisfied, waiting completion sync")
+                plan = "wait_checkpoint_event();"
+                if not waiting_active:
+                    self._emit_agent_message(f"[WAIT] waiting for checkpoint completion event: {str(subgoal).upper()} (dwell satisfied)")
             action_text = plan
             self._emit_agent_message(f"[STEP] current subgoal: {subgoal}")
-            self._emit_agent_message(f"[ACTION] {plan}")
+            if plan != "wait_checkpoint_event();":
+                self._emit_agent_message(f"[ACTION] {plan}")
             return {
                 "last_plan_text": plan,
                 "last_action_text": action_text,
                 "route_decision": "continue",
                 "current_subgoal_id": subgoal,
                 "current_subgoal_type": "checkpoint",
+                "waiting_on_checkpoint_completion": bool(plan == "wait_checkpoint_event();"),
+                "waiting_checkpoint_id": (str(subgoal).upper() if plan == "wait_checkpoint_event();" else None),
+                "completion_monitor_status": ("waiting_event" if plan == "wait_checkpoint_event();" else "active"),
             }
 
         collision_risk = float(state.get("current_collision_risk", 0.0))
@@ -330,6 +359,24 @@ class LangGraphOrchestrationRunner:
                 "last_action_result": {"ok": False, "recoverable": False, "message": "empty_plan"},
                 "last_error": "empty_plan",
             }
+        if plan == "wait_checkpoint_event();":
+            checkpoint_id = state.get("waiting_checkpoint_id") or state.get("current_subgoal_id")
+            event = self.controller.wait_for_checkpoint_progress_event(
+                str(checkpoint_id),
+                timeout_seconds=8.0,
+                risk_abort_threshold=0.75,
+            )
+            event_type = str(event.get("event_type", "unknown"))
+            ok = event_type not in {"waiting_timeout", "risk_abort"}
+            return {
+                "last_action_result": {
+                    "ok": ok,
+                    "recoverable": True,
+                    "message": f"checkpoint_event:{event_type}",
+                    "event": event,
+                },
+                "last_error": None if ok else str(event.get("reason", event_type)),
+            }
         try:
             ret = self.controller.execute_minispec(plan, silent=True, allow_auto_interrupt=False)
             ok = True
@@ -357,6 +404,7 @@ class LangGraphOrchestrationRunner:
         step_count = int(state.get("agent_step_count", 0)) + 1
         replan_count = int(state.get("replan_count", 0))
         result = dict(state.get("last_action_result") or {})
+        progress_event = result.get("event") if isinstance(result.get("event"), dict) else None
         history = list(state.get("execution_history", []))
         history.append(
             {
@@ -371,9 +419,29 @@ class LangGraphOrchestrationRunner:
         )
         if not bool(result.get("ok", False)):
             replan_count += 1
-        self._emit_agent_message(
-            f"[RESULT] {'ok' if bool(result.get('ok', False)) else 'failed'}: {str(result.get('message', ''))[:120]}"
-        )
+        if progress_event is not None:
+            event_type = str(progress_event.get("event_type", "unknown"))
+            checkpoint = str(progress_event.get("checkpoint_id") or state.get("current_subgoal_id") or "n/a").upper()
+            dwell = float(progress_event.get("dwell_seconds", 0.0) or 0.0)
+            required = float(progress_event.get("required_dwell_seconds", 0.0) or 0.0)
+            if event_type in {"dwell_progress", "dwell_started", "entered_checkpoint_area"}:
+                self._emit_agent_message(f"[EVENT] dwell in progress: {checkpoint} ({dwell:.1f} / {required:.1f} s)")
+            elif event_type == "dwell_satisfied":
+                self._emit_agent_message(f"[EVENT] dwell satisfied: {checkpoint}")
+            elif event_type == "checkpoint_completed":
+                self._emit_agent_message(f"[EVENT] checkpoint completed: {checkpoint}")
+            elif event_type == "left_checkpoint_area":
+                self._emit_agent_message(f"[EVENT] left checkpoint area before completion: {checkpoint}")
+            elif event_type == "risk_abort":
+                self._emit_agent_message(f"[EVENT] risk too high while waiting: {checkpoint} ({progress_event.get('reason')})")
+            elif event_type == "waiting_timeout":
+                self._emit_agent_message(f"[EVENT] waiting timeout: {checkpoint} ({progress_event.get('reason')})")
+            else:
+                self._emit_agent_message(f"[EVENT] {event_type}: {checkpoint}")
+        else:
+            self._emit_agent_message(
+                f"[RESULT] {'ok' if bool(result.get('ok', False)) else 'failed'}: {str(result.get('message', ''))[:120]}"
+            )
 
         max_steps = int(state.get("max_agent_steps", 64))
         max_replans = int(state.get("max_replan_attempts", 8))
@@ -401,9 +469,15 @@ class LangGraphOrchestrationRunner:
         latest_snapshot = self.controller.get_live_ui_snapshot()
         progress = latest_snapshot.get("benchmark_progress") if isinstance(latest_snapshot, dict) else None
         progress_current_target = None
+        progress_active_enter_ts = None
+        progress_distance_m = None
+        progress_tick_ts = None
         completed_from_progress = set()
         if isinstance(progress, dict):
             progress_current_target = progress.get("current_target")
+            progress_active_enter_ts = progress.get("active_enter_ts")
+            progress_distance_m = progress.get("distance_to_target_m")
+            progress_tick_ts = progress.get("tick_ts")
             completed_from_progress = set(str(v).upper() for v in progress.get("completed", []))
         completed = set(str(v).upper() for v in state.get("completed_checkpoint_ids", []))
         completed.update(completed_from_progress)
@@ -453,6 +527,9 @@ class LangGraphOrchestrationRunner:
                 f"required_dwell={required_dwell_seconds:.3f} "
                 f"dwell_satisfied={dwell_satisfied} "
                 f"completed={sorted(completed)} "
+                f"progress_active_enter_ts={progress_active_enter_ts} "
+                f"progress_distance_m={progress_distance_m} "
+                f"progress_tick_ts={progress_tick_ts} "
                 f"drone_gt={latest_snapshot.get('drone_gt') if isinstance(latest_snapshot, dict) else None} "
                 f"cp_center={subgoal_center} "
                 f"dist_to_subgoal={subgoal_dist}"
@@ -464,11 +541,70 @@ class LangGraphOrchestrationRunner:
             self._emit_agent_message(f"[RESULT] reached checkpoint area: {action_target} (not yet completed)")
         phase = str(state.get("subgoal_phase", "APPROACH_SUBGOAL"))
         reached_flag = bool(state.get("subgoal_reached", False))
+        waiting_on_completion = bool(state.get("waiting_on_checkpoint_completion", False))
+        waiting_checkpoint_id = state.get("waiting_checkpoint_id")
+        completion_monitor_status = str(state.get("completion_monitor_status", "idle"))
         if action_target and reached_area and action_target == str(subgoal).upper():
             phase = "COMPLETE_SUBGOAL"
             reached_flag = True
             arrived_but_not_completed = True
             arrived_wait_cycles = 0
+            waiting_on_completion = True
+            waiting_checkpoint_id = str(subgoal).upper()
+            completion_monitor_status = "waiting_event"
+        if progress_event is not None:
+            event_type = str(progress_event.get("event_type", ""))
+            event_cp = str(progress_event.get("checkpoint_id") or (subgoal or "")).upper()
+            event_in_radius = bool(progress_event.get("in_radius", False))
+            event_dwell_satisfied = bool(progress_event.get("dwell_satisfied", False))
+            if event_type in {"entered_checkpoint_area", "dwell_started", "dwell_progress"}:
+                phase = "COMPLETE_SUBGOAL"
+                reached_flag = True
+                arrived_but_not_completed = True
+                waiting_on_completion = True
+                waiting_checkpoint_id = event_cp
+                completion_monitor_status = "event_progress"
+            elif event_type == "dwell_satisfied":
+                phase = "VERIFY_COMPLETE"
+                reached_flag = True
+                arrived_but_not_completed = True
+                waiting_on_completion = True
+                waiting_checkpoint_id = event_cp
+                completion_monitor_status = "event_dwell_satisfied"
+            elif event_type == "checkpoint_completed":
+                completed.add(event_cp)
+                phase = "DONE"
+                waiting_on_completion = False
+                waiting_checkpoint_id = None
+                completion_monitor_status = "event_completed"
+            elif event_type == "left_checkpoint_area":
+                phase = "APPROACH_SUBGOAL"
+                reached_flag = False
+                arrived_but_not_completed = False
+                waiting_on_completion = False
+                waiting_checkpoint_id = None
+                completion_monitor_status = "event_left_area"
+            elif event_type in {"risk_abort", "waiting_timeout"}:
+                waiting_on_completion = False
+                waiting_checkpoint_id = None
+                completion_monitor_status = f"event_{event_type}"
+                return {
+                    "agent_step_count": step_count,
+                    "replan_count": replan_count + (1 if event_type == "risk_abort" else 0),
+                    "execution_history": history,
+                    "mission_status": "running",
+                    "route_decision": "retry_plan" if event_type == "waiting_timeout" else "reselect_subgoal",
+                    "last_error": str(progress_event.get("reason", event_type)),
+                    "last_progress_event": dict(progress_event),
+                    "completion_monitor_status": completion_monitor_status,
+                    "waiting_on_checkpoint_completion": waiting_on_completion,
+                    "waiting_checkpoint_id": waiting_checkpoint_id,
+                }
+            if event_type in {"entered_checkpoint_area", "dwell_started", "dwell_progress", "dwell_satisfied"}:
+                in_radius = event_in_radius
+                dwell_satisfied = event_dwell_satisfied
+                dwell_seconds = float(progress_event.get("dwell_seconds", dwell_seconds) or dwell_seconds)
+                required_dwell_seconds = float(progress_event.get("required_dwell_seconds", required_dwell_seconds) or required_dwell_seconds)
         if subgoal is not None and str(subgoal).upper() in completed:
             self._emit_agent_message(f"[RESULT] checkpoint completed: {str(subgoal).upper()}")
             phase = "DONE"
@@ -476,6 +612,9 @@ class LangGraphOrchestrationRunner:
             reached_flag = False
             arrived_but_not_completed = False
             arrived_wait_cycles = 0
+            waiting_on_completion = False
+            waiting_checkpoint_id = None
+            completion_monitor_status = "completed"
             repeated_action_count = 0
             no_progress_steps = 0
         elif phase == "COMPLETE_SUBGOAL":
@@ -483,6 +622,9 @@ class LangGraphOrchestrationRunner:
         elif phase == "VERIFY_COMPLETE" and subgoal is not None and str(subgoal).upper() not in completed:
             if arrived_but_not_completed and effective_in_radius and not dwell_satisfied:
                 phase = "COMPLETE_SUBGOAL"
+                waiting_on_completion = True
+                waiting_checkpoint_id = str(subgoal).upper()
+                completion_monitor_status = "waiting_event"
                 self._emit_agent_message(
                     f"[RESULT] dwell in progress: {str(subgoal).upper()} ({dwell_seconds:.2f} / {required_dwell_seconds:.2f} s)"
                 )
@@ -493,11 +635,17 @@ class LangGraphOrchestrationRunner:
                 reached_flag = False
                 arrived_but_not_completed = False
                 arrived_wait_cycles = 0
+                waiting_on_completion = False
+                waiting_checkpoint_id = None
+                completion_monitor_status = "left_area"
                 self._emit_agent_message(
                     f"[RESULT] left checkpoint area before dwell completion: {str(subgoal).upper()}"
                 )
             elif arrived_but_not_completed and dwell_satisfied:
                 phase = "VERIFY_COMPLETE"
+                waiting_on_completion = True
+                waiting_checkpoint_id = str(subgoal).upper()
+                completion_monitor_status = "waiting_completion_sync"
                 self._emit_agent_message(
                     f"[RESULT] dwell satisfied for {str(subgoal).upper()}, waiting completion state sync."
                 )
@@ -506,6 +654,9 @@ class LangGraphOrchestrationRunner:
                 reached_flag = False
                 arrived_but_not_completed = False
                 arrived_wait_cycles = 0
+                waiting_on_completion = False
+                waiting_checkpoint_id = None
+                completion_monitor_status = "approach_reset"
                 self._emit_agent_message(
                     f"[RESULT] verify incomplete for {str(subgoal).upper()}, re-approach subgoal."
                 )
@@ -559,6 +710,10 @@ class LangGraphOrchestrationRunner:
                         "current_subgoal_dwell_seconds": float(dwell_seconds),
                         "required_dwell_seconds": float(required_dwell_seconds),
                         "dwell_satisfied": bool(dwell_satisfied),
+                        "waiting_on_checkpoint_completion": bool(waiting_on_completion),
+                        "waiting_checkpoint_id": waiting_checkpoint_id,
+                        "last_progress_event": (None if progress_event is None else dict(progress_event)),
+                        "completion_monitor_status": completion_monitor_status,
                     }
 
         if not remaining:
@@ -580,6 +735,10 @@ class LangGraphOrchestrationRunner:
                 "current_subgoal_dwell_seconds": float(dwell_seconds),
                 "required_dwell_seconds": float(required_dwell_seconds),
                 "dwell_satisfied": bool(dwell_satisfied),
+                "waiting_on_checkpoint_completion": bool(waiting_on_completion),
+                "waiting_checkpoint_id": waiting_checkpoint_id,
+                "last_progress_event": (None if progress_event is None else dict(progress_event)),
+                "completion_monitor_status": completion_monitor_status,
                 "last_progress_signature": progress_signature,
                 "last_subgoal_distance_m": last_subgoal_distance,
                 "no_progress_steps": no_progress_steps,
@@ -604,6 +763,10 @@ class LangGraphOrchestrationRunner:
                 "current_subgoal_dwell_seconds": float(dwell_seconds),
                 "required_dwell_seconds": float(required_dwell_seconds),
                 "dwell_satisfied": bool(dwell_satisfied),
+                "waiting_on_checkpoint_completion": bool(waiting_on_completion),
+                "waiting_checkpoint_id": waiting_checkpoint_id,
+                "last_progress_event": (None if progress_event is None else dict(progress_event)),
+                "completion_monitor_status": completion_monitor_status,
                 "last_progress_signature": progress_signature,
                 "last_subgoal_distance_m": last_subgoal_distance,
                 "no_progress_steps": no_progress_steps,
@@ -627,6 +790,10 @@ class LangGraphOrchestrationRunner:
             "current_subgoal_dwell_seconds": float(dwell_seconds),
             "required_dwell_seconds": float(required_dwell_seconds),
             "dwell_satisfied": bool(dwell_satisfied),
+            "waiting_on_checkpoint_completion": bool(waiting_on_completion),
+            "waiting_checkpoint_id": waiting_checkpoint_id,
+            "last_progress_event": (None if progress_event is None else dict(progress_event)),
+            "completion_monitor_status": completion_monitor_status,
             "last_progress_signature": progress_signature,
             "last_subgoal_distance_m": last_subgoal_distance,
             "no_progress_steps": no_progress_steps,
