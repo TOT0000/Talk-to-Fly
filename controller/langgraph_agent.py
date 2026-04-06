@@ -169,8 +169,8 @@ class LangGraphOrchestrationRunner:
             self._route_from_evaluation,
             {
                 "continue": "load_runtime_state",
-                "retry_plan": "plan_step",
-                "reselect_subgoal": "select_subgoal",
+                "retry_plan": "load_runtime_state",
+                "reselect_subgoal": "load_runtime_state",
                 "end": END,
                 "abort": END,
             },
@@ -192,14 +192,25 @@ class LangGraphOrchestrationRunner:
             uav_pos = snapshot.get("drone_est_bias_corrected") or snapshot.get("drone_est")
             if uav_pos is not None:
                 uav_est = (float(uav_pos[0]), float(uav_pos[1]))
+        current_collision_risk = 0.0 if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
+        historical_max_collision_risk = 0.0 if safety_context is None else float(getattr(safety_context, "historical_max_collision_probability", 0.0))
+        dominant_risky_worker = None if safety_context is None else str(getattr(safety_context, "dominant_threat_id", "unknown"))
+        print_debug(
+            "[AGENT-LOAD-RUNTIME] "
+            f"step={int(state.get('agent_step_count', 0))} "
+            f"route_decision={state.get('route_decision')} "
+            f"current_collision_risk={current_collision_risk:.6f} "
+            f"dominant_risky_worker={dominant_risky_worker} "
+            f"per_worker={per_worker}"
+        )
         return {
             "latest_snapshot": snapshot,
             "uav_est_xy": uav_est,
             "worker_states": workers,
-            "current_collision_risk": 0.0 if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0)),
-            "historical_max_collision_risk": 0.0 if safety_context is None else float(getattr(safety_context, "historical_max_collision_probability", 0.0)),
+            "current_collision_risk": current_collision_risk,
+            "historical_max_collision_risk": historical_max_collision_risk,
             "per_worker_collision_risks": per_worker,
-            "dominant_risky_worker": None if safety_context is None else str(getattr(safety_context, "dominant_threat_id", "unknown")),
+            "dominant_risky_worker": dominant_risky_worker,
             "mission_collision_count": int(state.get("mission_collision_count", 0)),
         }
 
@@ -270,6 +281,15 @@ class LangGraphOrchestrationRunner:
         }
 
     def _node_plan_step(self, state: AgentState) -> AgentState:
+        print_debug(
+            "[AGENT-PLAN-INPUT] "
+            f"step={int(state.get('agent_step_count', 0))} "
+            f"route_decision={state.get('route_decision')} "
+            f"subgoal={state.get('current_subgoal_id')} "
+            f"current_collision_risk={float(state.get('current_collision_risk', 0.0)):.6f} "
+            f"dominant_risky_worker={state.get('dominant_risky_worker')} "
+            f"per_worker={state.get('per_worker_collision_risks')}"
+        )
         subgoal = state.get("current_subgoal_id")
         completed = set(str(v).upper() for v in state.get("completed_checkpoint_ids", []))
         remaining = [str(v).upper() for v in state.get("remaining_checkpoint_ids", []) if str(v).upper() not in completed]
@@ -364,7 +384,7 @@ class LangGraphOrchestrationRunner:
             event = self.controller.wait_for_checkpoint_progress_event(
                 str(checkpoint_id),
                 timeout_seconds=8.0,
-                risk_abort_threshold=0.75,
+                risk_abort_threshold=0.50,
             )
             event_type = str(event.get("event_type", "unknown"))
             ok = event_type not in {"waiting_timeout", "risk_abort"}
@@ -801,7 +821,14 @@ class LangGraphOrchestrationRunner:
         }
 
     def _route_from_evaluation(self, state: AgentState) -> RouteDecision:
-        return str(state.get("route_decision", "continue"))  # type: ignore[return-value]
+        route = str(state.get("route_decision", "continue"))
+        print_debug(
+            "[AGENT-ROUTE] "
+            f"step={int(state.get('agent_step_count', 0))} "
+            f"route_decision={route} "
+            f"current_collision_risk={float(state.get('current_collision_risk', 0.0)):.6f}"
+        )
+        return route  # type: ignore[return-value]
 
     def _emit_agent_message(self, message: str):
         if hasattr(self.controller, "append_message"):
