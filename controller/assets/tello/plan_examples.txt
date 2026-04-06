@@ -6,7 +6,7 @@ Scene:
 - completed checkpoints: none
 - current_collision_probability=0.220
 Task: [A] Complete zone_A search.
-Rationale: Collision risk is below replan threshold (0.65), so checkpoint primitive is allowed. Visit all active checkpoints in zone_A and dwell 2.0s at each.
+Rationale: Collision risk is below replan threshold (0.5), so checkpoint primitive is allowed. Visit all active checkpoints in zone_A and dwell 2.0s at each.
 Response: lo('initial plan for zone_A checkpoints: A1, A2, A3, A4');gc('A1');d(2.0);gc('A2');d(2.0);gc('A3');d(2.0);gc('A4');d(2.0);
 
 Example 2 (replan: high collision probability, resume unfinished checkpoints)
@@ -18,5 +18,5 @@ Scene:
 - dominant risky worker: worker_2
 - current_collision_probability=0.710
 Task: [A] Replan and finish remaining checkpoints in zone_A.
-Rationale: Replan condition is triggered (>=0.65). Start with conservative low-level avoidance, then resume unfinished checkpoints only.
+Rationale: Replan condition is triggered (>=0.5). Start with conservative low-level avoidance, then resume unfinished checkpoints only.
 Response: lo('replan: high risk from worker_2, evade first then resume remaining checkpoints A3/A4');mr(0.8);mb(0.6);tu(20);d(0.4);gc('A3');d(2.0);gc('A4');d(2.0);
