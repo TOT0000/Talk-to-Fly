@@ -184,6 +184,7 @@ class LLMController():
         self._progress_event_cv = threading.Condition()
         self._progress_event_seq = 0
         self._progress_event_queue = deque(maxlen=256)
+        self._progress_event_cursor_by_checkpoint: dict[str, int] = {}
         self.latest_ui_collision_probability = None
         self.latest_ui_collision_timestamp = 0.0
         self.planner_mode = str(os.getenv("TYPEFLY_PLANNER_MODE", "llm_baseline")).strip().lower()
@@ -222,6 +223,7 @@ class LLMController():
         with self._progress_event_cv:
             self._progress_event_queue.clear()
             self._progress_event_seq = 0
+            self._progress_event_cursor_by_checkpoint.clear()
         self.update_benchmark_progress(
             completed_checkpoint_ids=[],
             current_target_checkpoint=None,
@@ -287,7 +289,13 @@ class LLMController():
     ) -> dict:
         checkpoint_key = str(checkpoint_id or "").upper()
         deadline = time.time() + max(0.2, float(timeout_seconds))
-        last_seen_event_id = 0
+        with self._progress_event_cv:
+            last_seen_event_id = int(self._progress_event_cursor_by_checkpoint.get(checkpoint_key, 0))
+        print_debug(
+            "[BENCHMARK-WAIT-START] "
+            f"checkpoint={checkpoint_key} cursor={last_seen_event_id} "
+            f"queue_len={len(self._progress_event_queue)}"
+        )
         self.set_benchmark_progress_focus_checkpoint(checkpoint_key)
         try:
             while True:
@@ -332,6 +340,11 @@ class LLMController():
 
                 with self._progress_event_cv:
                     queue_list = list(self._progress_event_queue)
+                    skipped_old = [
+                        e for e in queue_list
+                        if str(e.get("checkpoint_id", "")).upper() == checkpoint_key
+                        and int(e.get("event_id", 0)) <= last_seen_event_id
+                    ]
                     matching_events = [
                         e for e in queue_list
                         if str(e.get("checkpoint_id", "")).upper() == checkpoint_key
@@ -340,16 +353,19 @@ class LLMController():
                     if matching_events:
                         event = dict(matching_events[-1])
                         last_seen_event_id = int(event.get("event_id", 0))
+                        self._progress_event_cursor_by_checkpoint[checkpoint_key] = last_seen_event_id
                         print_debug(
                             "[BENCHMARK-WAIT-MATCH] "
                             f"checkpoint={checkpoint_key} event_id={event.get('event_id')} "
-                            f"type={event.get('event_type')} queue_len={len(queue_list)}"
+                            f"type={event.get('event_type')} queue_len={len(queue_list)} "
+                            f"cursor={last_seen_event_id} skipped_old={len(skipped_old)}"
                         )
                         return event
 
                     print_debug(
                         "[BENCHMARK-WAIT-POLL] "
                         f"checkpoint={checkpoint_key} waiting_for={checkpoint_key} "
+                        f"cursor={last_seen_event_id} "
                         f"progress_target={progress.get('current_target')} "
                         f"in_radius={progress.get('in_radius')} "
                         f"active_enter_ts={progress.get('active_enter_ts')} "
@@ -562,19 +578,29 @@ class LLMController():
             "全部巡檢點",
         )
         if any(key in normalized for key in all_keywords) or any(key in text for key in all_keywords):
-            return {
+            resolved = {
                 "active_zone_ids": all_zone_ids,
                 "active_checkpoint_ids": list(BENCHMARK_CHECKPOINT_ORDER),
                 "source": "task_parse_all",
             }
+            print_debug(
+                "[OBJECTIVE-RESOLVE] "
+                f"task={text!r} zones={resolved.get('active_zone_ids')} "
+                f"checkpoints={resolved.get('active_checkpoint_ids')} source={resolved.get('source')}"
+            )
+            return resolved
 
         zone_tokens = set()
         context_hits = any(word in normalized for word in ("ZONE", "ZONES", "AREA", "CHECKPOINT", "INSPECT", "SEARCH"))
         context_hits = context_hits or any(word in text for word in ("區域", "巡檢", "搜尋", "搜索", "檢查點", "检查点"))
         for token, zone_id in (("A", "zone_A"), ("B", "zone_B"), ("C", "zone_C")):
-            if re.search(rf"\b(?:ZONE|AREA)\s*{token}\b", normalized):
+            if re.search(rf"\b(?:ZONE|AREA)[\s_-]*{token}\b", normalized):
                 zone_tokens.add(zone_id)
-            if re.search(rf"\b{token}\b\s*(?:ZONE|AREA)\b", normalized):
+            if re.search(rf"\b{token}[\s_-]*(?:ZONE|AREA)\b", normalized):
+                zone_tokens.add(zone_id)
+            if re.search(rf"\b(?:ZONE|AREA){token}\b", normalized):
+                zone_tokens.add(zone_id)
+            if re.search(rf"\b{token}(?:ZONE|AREA)\b", normalized):
                 zone_tokens.add(zone_id)
             if f"{token}區域" in text or f"{token} 區域" in text or f"區域{token}" in text:
                 zone_tokens.add(zone_id)
@@ -582,17 +608,29 @@ class LLMController():
                 zone_tokens.add(zone_id)
 
         if not zone_tokens:
-            return self._default_active_objective_set()
+            resolved = self._default_active_objective_set()
+            print_debug(
+                "[OBJECTIVE-RESOLVE] "
+                f"task={text!r} zones={resolved.get('active_zone_ids')} "
+                f"checkpoints={resolved.get('active_checkpoint_ids')} source={resolved.get('source')}"
+            )
+            return resolved
 
         active_zone_ids = sorted(zone_tokens)
         active_checkpoint_ids = []
         for zid in active_zone_ids:
             active_checkpoint_ids.extend(zone_to_checkpoints.get(zid, []))
-        return {
+        resolved = {
             "active_zone_ids": active_zone_ids,
             "active_checkpoint_ids": active_checkpoint_ids,
             "source": "task_parse_zone",
         }
+        print_debug(
+            "[OBJECTIVE-RESOLVE] "
+            f"task={text!r} zones={resolved.get('active_zone_ids')} "
+            f"checkpoints={resolved.get('active_checkpoint_ids')} source={resolved.get('source')}"
+        )
+        return resolved
         
     def register_position_callback(self, callback):
         self.position_update_callback = callback
