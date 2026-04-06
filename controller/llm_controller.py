@@ -3,6 +3,7 @@ from dataclasses import replace
 import math
 import queue, time, os, sys, subprocess
 import re
+from collections import deque
 from typing import Optional, Tuple
 import asyncio
 import uuid
@@ -169,6 +170,18 @@ class LLMController():
             "completed": [],
             "current_target": None,
         }
+        self._benchmark_completed: set[str] = set()
+        self._benchmark_active_enter_ts: Optional[float] = None
+        self._benchmark_last_update_ts: Optional[float] = None
+        self._benchmark_last_distance_m: Optional[float] = None
+        self._benchmark_prev_target: Optional[str] = None
+        self._benchmark_prev_in_radius: bool = False
+        self._benchmark_prev_dwell_satisfied: bool = False
+        self._benchmark_prev_dwell_bucket: int = 0
+        self._benchmark_prev_completed_ids: set[str] = set()
+        self._progress_event_cv = threading.Condition()
+        self._progress_event_seq = 0
+        self._progress_event_queue = deque(maxlen=256)
         self.latest_ui_collision_probability = None
         self.latest_ui_collision_timestamp = 0.0
         self.planner_mode = str(os.getenv("TYPEFLY_PLANNER_MODE", "llm_baseline")).strip().lower()
@@ -192,6 +205,302 @@ class LLMController():
             "active_checkpoint_ids": list(BENCHMARK_CHECKPOINT_ORDER),
             "source": "default_all",
         }
+
+    def _reset_benchmark_progress_tracking(self):
+        self._benchmark_completed = set()
+        self._benchmark_active_enter_ts = None
+        self._benchmark_last_update_ts = None
+        self._benchmark_last_distance_m = None
+        self._benchmark_prev_target = None
+        self._benchmark_prev_in_radius = False
+        self._benchmark_prev_dwell_satisfied = False
+        self._benchmark_prev_dwell_bucket = 0
+        self._benchmark_prev_completed_ids = set()
+        with self._progress_event_cv:
+            self._progress_event_queue.clear()
+            self._progress_event_seq = 0
+        self.update_benchmark_progress(
+            completed_checkpoint_ids=[],
+            current_target_checkpoint=None,
+            in_radius=False,
+            dwell_seconds=0.0,
+            required_dwell_seconds=float(CHECKPOINT_DWELL_SECONDS),
+            dwell_satisfied=False,
+            active_enter_ts=None,
+            completed=False,
+            distance_to_target_m=None,
+            drone_true_position=None,
+            checkpoint_center=None,
+            tick_ts=None,
+        )
+
+    def _emit_progress_event(
+        self,
+        *,
+        event_type: str,
+        checkpoint_id: Optional[str],
+        in_radius: bool,
+        dwell_seconds: float,
+        required_dwell_seconds: float,
+        dwell_satisfied: bool,
+        completed: bool,
+        timestamp: float,
+        reason: Optional[str] = None,
+        risk: Optional[float] = None,
+    ):
+        event = {
+            "event_type": str(event_type),
+            "checkpoint_id": (None if checkpoint_id is None else str(checkpoint_id).upper()),
+            "in_radius": bool(in_radius),
+            "dwell_seconds": float(dwell_seconds),
+            "required_dwell_seconds": float(required_dwell_seconds),
+            "dwell_satisfied": bool(dwell_satisfied),
+            "completed": bool(completed),
+            "timestamp": float(timestamp),
+            "reason": reason,
+            "risk": (None if risk is None else float(risk)),
+        }
+        with self._progress_event_cv:
+            self._progress_event_seq += 1
+            event["event_id"] = int(self._progress_event_seq)
+            self._progress_event_queue.append(event)
+            self._progress_event_cv.notify_all()
+        print_debug(
+            "[BENCHMARK-PROGRESS-EVENT] "
+            f"id={event['event_id']} type={event_type} checkpoint={event.get('checkpoint_id')} "
+            f"in_radius={in_radius} dwell={dwell_seconds:.3f}/{required_dwell_seconds:.3f} "
+            f"dwell_satisfied={dwell_satisfied} completed={completed} reason={reason} risk={risk}"
+        )
+
+    def wait_for_checkpoint_progress_event(
+        self,
+        checkpoint_id: str,
+        *,
+        timeout_seconds: float = 8.0,
+        risk_abort_threshold: float = COLLISION_PROBABILITY_REPLAN_THRESHOLD,
+    ) -> dict:
+        checkpoint_key = str(checkpoint_id or "").upper()
+        deadline = time.time() + max(0.2, float(timeout_seconds))
+        last_seen_event_id = 0
+        with self._progress_event_cv:
+            if self._progress_event_queue:
+                last_seen_event_id = int(self._progress_event_queue[-1].get("event_id", 0))
+        while True:
+            now = time.time()
+            if now >= deadline:
+                return {
+                    "event_type": "waiting_timeout",
+                    "checkpoint_id": checkpoint_key,
+                    "in_radius": False,
+                    "dwell_seconds": 0.0,
+                    "required_dwell_seconds": 0.0,
+                    "dwell_satisfied": False,
+                    "completed": False,
+                    "timestamp": now,
+                    "reason": f"timeout_{timeout_seconds:.1f}s",
+                    "risk": None,
+                }
+
+            snapshot = self.get_live_ui_snapshot()
+            progress = snapshot.get("benchmark_progress") if isinstance(snapshot, dict) else {}
+            safety = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
+            risk = None if safety is None else float(getattr(safety, "current_collision_probability", 0.0))
+            if risk is not None and risk >= float(risk_abort_threshold):
+                return {
+                    "event_type": "risk_abort",
+                    "checkpoint_id": checkpoint_key,
+                    "in_radius": bool(progress.get("in_radius", False)),
+                    "dwell_seconds": float(progress.get("dwell_seconds", 0.0) or 0.0),
+                    "required_dwell_seconds": float(progress.get("required_dwell_seconds", 0.0) or 0.0),
+                    "dwell_satisfied": bool(progress.get("dwell_satisfied", False)),
+                    "completed": checkpoint_key in set(str(v).upper() for v in progress.get("completed", [])),
+                    "timestamp": time.time(),
+                    "reason": f"risk={risk:.3f}>=threshold({risk_abort_threshold:.3f})",
+                    "risk": float(risk),
+                }
+
+            with self._progress_event_cv:
+                for event in list(self._progress_event_queue):
+                    event_id = int(event.get("event_id", 0))
+                    if event_id <= last_seen_event_id:
+                        continue
+                    if str(event.get("checkpoint_id", "")).upper() != checkpoint_key:
+                        continue
+                    last_seen_event_id = event_id
+                    return dict(event)
+                wait_s = min(0.25, max(0.01, deadline - time.time()))
+                self._progress_event_cv.wait(timeout=wait_s)
+
+    def _update_benchmark_progress_from_snapshot(self, snapshot: dict):
+        if not isinstance(snapshot, dict):
+            return
+        drone_gt = snapshot.get("drone_gt")
+        if drone_gt is None:
+            return
+
+        active_ids = set(str(v).upper() for v in self.active_objective_set.get("active_checkpoint_ids", []))
+        order = [str(v).upper() for v in BENCHMARK_CHECKPOINT_ORDER]
+        self._benchmark_completed = set(cid for cid in self._benchmark_completed if cid in active_ids)
+        current_target = next((cid for cid in order if cid in active_ids and cid not in self._benchmark_completed), None)
+        now = time.time()
+        self._benchmark_last_update_ts = now
+
+        if current_target is None:
+            self._benchmark_active_enter_ts = None
+            self._benchmark_last_distance_m = None
+            self._benchmark_prev_target = None
+            self._benchmark_prev_in_radius = False
+            self._benchmark_prev_dwell_satisfied = False
+            self._benchmark_prev_dwell_bucket = 0
+            self._benchmark_prev_completed_ids = set(str(v).upper() for v in self._benchmark_completed)
+            self.update_benchmark_progress(
+                completed_checkpoint_ids=sorted(self._benchmark_completed),
+                current_target_checkpoint=None,
+                in_radius=False,
+                dwell_seconds=0.0,
+                required_dwell_seconds=float(CHECKPOINT_DWELL_SECONDS),
+                dwell_satisfied=False,
+                active_enter_ts=None,
+                completed=bool(active_ids) and len(self._benchmark_completed) == len(active_ids),
+                distance_to_target_m=None,
+                drone_true_position=drone_gt,
+                checkpoint_center=None,
+                tick_ts=now,
+            )
+            return
+
+        cp = BENCHMARK_CHECKPOINTS_BY_ID[current_target]
+        distance_m = math.hypot(float(drone_gt[0]) - float(cp.x), float(drone_gt[1]) - float(cp.y))
+        self._benchmark_last_distance_m = float(distance_m)
+        in_radius = bool(distance_m <= float(cp.radius_m))
+        dwell_seconds = 0.0
+        if in_radius:
+            if self._benchmark_active_enter_ts is None:
+                self._benchmark_active_enter_ts = now
+            dwell_seconds = max(0.0, now - float(self._benchmark_active_enter_ts))
+            if dwell_seconds >= float(CHECKPOINT_DWELL_SECONDS):
+                self._benchmark_completed.add(str(current_target).upper())
+                self._benchmark_active_enter_ts = None
+        else:
+            self._benchmark_active_enter_ts = None
+
+        dwell_satisfied = bool(dwell_seconds >= float(CHECKPOINT_DWELL_SECONDS))
+        completed = bool(active_ids) and all(cid in self._benchmark_completed for cid in active_ids)
+        checkpoint_center = (float(cp.x), float(cp.y), float(cp.radius_m))
+        self.update_benchmark_progress(
+            completed_checkpoint_ids=sorted(self._benchmark_completed),
+            current_target_checkpoint=current_target,
+            in_radius=in_radius,
+            dwell_seconds=float(dwell_seconds),
+            required_dwell_seconds=float(CHECKPOINT_DWELL_SECONDS),
+            dwell_satisfied=dwell_satisfied,
+            active_enter_ts=self._benchmark_active_enter_ts,
+            completed=completed,
+            distance_to_target_m=float(distance_m),
+            drone_true_position=drone_gt,
+            checkpoint_center=checkpoint_center,
+            tick_ts=now,
+        )
+        current_completed_ids = set(str(v).upper() for v in self.latest_benchmark_progress.get("completed", []))
+        required_dwell = float(CHECKPOINT_DWELL_SECONDS)
+        dwell_bucket = int(dwell_seconds / 0.5)
+        if self._benchmark_prev_target != current_target:
+            self._benchmark_prev_in_radius = False
+            self._benchmark_prev_dwell_satisfied = False
+            self._benchmark_prev_dwell_bucket = 0
+            self._benchmark_prev_completed_ids = set()
+        if in_radius and (not self._benchmark_prev_in_radius):
+            self._emit_progress_event(
+                event_type="entered_checkpoint_area",
+                checkpoint_id=current_target,
+                in_radius=in_radius,
+                dwell_seconds=dwell_seconds,
+                required_dwell_seconds=required_dwell,
+                dwell_satisfied=dwell_satisfied,
+                completed=(str(current_target).upper() in current_completed_ids),
+                timestamp=now,
+                reason="entered_radius",
+            )
+        if in_radius and self._benchmark_active_enter_ts is not None and dwell_seconds <= 0.05:
+            self._emit_progress_event(
+                event_type="dwell_started",
+                checkpoint_id=current_target,
+                in_radius=in_radius,
+                dwell_seconds=dwell_seconds,
+                required_dwell_seconds=required_dwell,
+                dwell_satisfied=dwell_satisfied,
+                completed=(str(current_target).upper() in current_completed_ids),
+                timestamp=now,
+                reason="active_enter_ts_set",
+            )
+        if in_radius and dwell_bucket > self._benchmark_prev_dwell_bucket and (not dwell_satisfied):
+            self._emit_progress_event(
+                event_type="dwell_progress",
+                checkpoint_id=current_target,
+                in_radius=in_radius,
+                dwell_seconds=dwell_seconds,
+                required_dwell_seconds=required_dwell,
+                dwell_satisfied=dwell_satisfied,
+                completed=(str(current_target).upper() in current_completed_ids),
+                timestamp=now,
+                reason="dwell_bucket_advanced",
+            )
+        if dwell_satisfied and (not self._benchmark_prev_dwell_satisfied):
+            self._emit_progress_event(
+                event_type="dwell_satisfied",
+                checkpoint_id=current_target,
+                in_radius=in_radius,
+                dwell_seconds=dwell_seconds,
+                required_dwell_seconds=required_dwell,
+                dwell_satisfied=dwell_satisfied,
+                completed=(str(current_target).upper() in current_completed_ids),
+                timestamp=now,
+                reason="dwell_threshold_met",
+            )
+        if (not in_radius) and self._benchmark_prev_in_radius and (str(current_target).upper() not in current_completed_ids):
+            self._emit_progress_event(
+                event_type="left_checkpoint_area",
+                checkpoint_id=current_target,
+                in_radius=in_radius,
+                dwell_seconds=dwell_seconds,
+                required_dwell_seconds=required_dwell,
+                dwell_satisfied=dwell_satisfied,
+                completed=False,
+                timestamp=now,
+                reason="left_before_completion",
+            )
+        newly_completed = sorted(current_completed_ids - self._benchmark_prev_completed_ids)
+        for cid in newly_completed:
+            self._emit_progress_event(
+                event_type="checkpoint_completed",
+                checkpoint_id=cid,
+                in_radius=in_radius if cid == str(current_target).upper() else False,
+                dwell_seconds=dwell_seconds if cid == str(current_target).upper() else 0.0,
+                required_dwell_seconds=required_dwell,
+                dwell_satisfied=(dwell_satisfied if cid == str(current_target).upper() else True),
+                completed=True,
+                timestamp=now,
+                reason="added_to_completed_set",
+            )
+        self._benchmark_prev_target = str(current_target).upper()
+        self._benchmark_prev_in_radius = bool(in_radius)
+        self._benchmark_prev_dwell_satisfied = bool(dwell_satisfied)
+        self._benchmark_prev_dwell_bucket = int(dwell_bucket)
+        self._benchmark_prev_completed_ids = set(current_completed_ids)
+        print_debug(
+            "[BENCHMARK-PROGRESS-TICK] "
+            f"current_target={current_target} "
+            f"in_radius={in_radius} "
+            f"active_enter_ts={self._benchmark_active_enter_ts} "
+            f"dwell_seconds={dwell_seconds:.3f} "
+            f"required_dwell_seconds={float(CHECKPOINT_DWELL_SECONDS):.3f} "
+            f"dwell_satisfied={dwell_satisfied} "
+            f"completed={completed} "
+            f"checkpoint_center={checkpoint_center} "
+            f"uav_true_position={tuple(float(v) for v in drone_gt)} "
+            f"distance_m={distance_m:.3f} "
+            f"tick_ts={now:.6f}"
+        )
 
     def _resolve_active_objective_set(self, task_text: str) -> dict:
         text = str(task_text or "")
@@ -562,15 +871,35 @@ class LLMController():
         dwell_seconds: Optional[float] = None,
         required_dwell_seconds: Optional[float] = None,
         dwell_satisfied: Optional[bool] = None,
+        active_enter_ts: Optional[float] = None,
+        completed: Optional[bool] = None,
+        distance_to_target_m: Optional[float] = None,
+        drone_true_position: Optional[tuple] = None,
+        checkpoint_center: Optional[tuple] = None,
+        tick_ts: Optional[float] = None,
     ):
-        completed = [str(v).upper() for v in list(completed_checkpoint_ids or [])]
+        completed_ids = [str(v).upper() for v in list(completed_checkpoint_ids or [])]
         self.latest_benchmark_progress = {
-            "completed": sorted(set(completed)),
+            "completed": sorted(set(completed_ids)),
             "current_target": (None if current_target_checkpoint is None else str(current_target_checkpoint).upper()),
             "in_radius": (None if in_radius is None else bool(in_radius)),
             "dwell_seconds": (None if dwell_seconds is None else float(dwell_seconds)),
             "required_dwell_seconds": (None if required_dwell_seconds is None else float(required_dwell_seconds)),
             "dwell_satisfied": (None if dwell_satisfied is None else bool(dwell_satisfied)),
+            "active_enter_ts": (None if active_enter_ts is None else float(active_enter_ts)),
+            "completed_flag": (None if completed is None else bool(completed)),
+            "distance_to_target_m": (None if distance_to_target_m is None else float(distance_to_target_m)),
+            "drone_true_position": (
+                None
+                if drone_true_position is None
+                else tuple(float(v) for v in drone_true_position)
+            ),
+            "checkpoint_center": (
+                None
+                if checkpoint_center is None
+                else tuple(float(v) for v in checkpoint_center)
+            ),
+            "tick_ts": (None if tick_ts is None else float(tick_ts)),
         }
 
     def update_ui_collision_probability(self, current_collision_probability: Optional[float]):
@@ -797,6 +1126,7 @@ class LLMController():
         self.framework_mode = selected_framework
         self.execution_mode = "Planning"
         self.active_objective_set = self._resolve_active_objective_set(task_description)
+        self._reset_benchmark_progress_tracking()
         self._task_id_counter += 1
         task_id = f"task_{self._task_id_counter:05d}"
         initial_snapshot = self.get_live_ui_snapshot()
@@ -1491,6 +1821,7 @@ class LLMController():
             float(user_est[1] - (0.0 if user_bias_xy is None else user_bias_xy[1])),
             float(user_est[2]),
         )
+        self._update_benchmark_progress_from_snapshot({"drone_gt": drone_gt})
 
         snapshot = {
             "drone_gt": drone_gt,
