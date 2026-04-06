@@ -180,6 +180,7 @@ class LLMController():
         self._benchmark_prev_dwell_satisfied: bool = False
         self._benchmark_prev_dwell_bucket: int = 0
         self._benchmark_prev_completed_ids: set[str] = set()
+        self._benchmark_focus_checkpoint_id: Optional[str] = None
         self._progress_event_cv = threading.Condition()
         self._progress_event_seq = 0
         self._progress_event_queue = deque(maxlen=256)
@@ -217,6 +218,7 @@ class LLMController():
         self._benchmark_prev_dwell_satisfied = False
         self._benchmark_prev_dwell_bucket = 0
         self._benchmark_prev_completed_ids = set()
+        self._benchmark_focus_checkpoint_id = None
         with self._progress_event_cv:
             self._progress_event_queue.clear()
             self._progress_event_seq = 0
@@ -234,6 +236,9 @@ class LLMController():
             checkpoint_center=None,
             tick_ts=None,
         )
+
+    def set_benchmark_progress_focus_checkpoint(self, checkpoint_id: Optional[str]):
+        self._benchmark_focus_checkpoint_id = (None if checkpoint_id is None else str(checkpoint_id).upper())
 
     def _emit_progress_event(
         self,
@@ -283,54 +288,83 @@ class LLMController():
         checkpoint_key = str(checkpoint_id or "").upper()
         deadline = time.time() + max(0.2, float(timeout_seconds))
         last_seen_event_id = 0
-        with self._progress_event_cv:
-            if self._progress_event_queue:
-                last_seen_event_id = int(self._progress_event_queue[-1].get("event_id", 0))
-        while True:
-            now = time.time()
-            if now >= deadline:
-                return {
-                    "event_type": "waiting_timeout",
-                    "checkpoint_id": checkpoint_key,
-                    "in_radius": False,
-                    "dwell_seconds": 0.0,
-                    "required_dwell_seconds": 0.0,
-                    "dwell_satisfied": False,
-                    "completed": False,
-                    "timestamp": now,
-                    "reason": f"timeout_{timeout_seconds:.1f}s",
-                    "risk": None,
-                }
+        self.set_benchmark_progress_focus_checkpoint(checkpoint_key)
+        try:
+            while True:
+                now = time.time()
+                if now >= deadline:
+                    print_debug(
+                        "[BENCHMARK-WAIT-TIMEOUT] "
+                        f"checkpoint={checkpoint_key} "
+                        f"queue_len={len(self._progress_event_queue)} "
+                        f"last_seen_event_id={last_seen_event_id}"
+                    )
+                    return {
+                        "event_type": "waiting_timeout",
+                        "checkpoint_id": checkpoint_key,
+                        "in_radius": False,
+                        "dwell_seconds": 0.0,
+                        "required_dwell_seconds": 0.0,
+                        "dwell_satisfied": False,
+                        "completed": False,
+                        "timestamp": now,
+                        "reason": f"timeout_{timeout_seconds:.1f}s",
+                        "risk": None,
+                    }
 
-            snapshot = self.get_live_ui_snapshot()
-            progress = snapshot.get("benchmark_progress") if isinstance(snapshot, dict) else {}
-            safety = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
-            risk = None if safety is None else float(getattr(safety, "current_collision_probability", 0.0))
-            if risk is not None and risk >= float(risk_abort_threshold):
-                return {
-                    "event_type": "risk_abort",
-                    "checkpoint_id": checkpoint_key,
-                    "in_radius": bool(progress.get("in_radius", False)),
-                    "dwell_seconds": float(progress.get("dwell_seconds", 0.0) or 0.0),
-                    "required_dwell_seconds": float(progress.get("required_dwell_seconds", 0.0) or 0.0),
-                    "dwell_satisfied": bool(progress.get("dwell_satisfied", False)),
-                    "completed": checkpoint_key in set(str(v).upper() for v in progress.get("completed", [])),
-                    "timestamp": time.time(),
-                    "reason": f"risk={risk:.3f}>=threshold({risk_abort_threshold:.3f})",
-                    "risk": float(risk),
-                }
+                snapshot = self.get_live_ui_snapshot()
+                progress = snapshot.get("benchmark_progress") if isinstance(snapshot, dict) else {}
+                safety = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
+                risk = None if safety is None else float(getattr(safety, "current_collision_probability", 0.0))
+                if risk is not None and risk >= float(risk_abort_threshold):
+                    return {
+                        "event_type": "risk_abort",
+                        "checkpoint_id": checkpoint_key,
+                        "in_radius": bool(progress.get("in_radius", False)),
+                        "dwell_seconds": float(progress.get("dwell_seconds", 0.0) or 0.0),
+                        "required_dwell_seconds": float(progress.get("required_dwell_seconds", 0.0) or 0.0),
+                        "dwell_satisfied": bool(progress.get("dwell_satisfied", False)),
+                        "completed": checkpoint_key in set(str(v).upper() for v in progress.get("completed", [])),
+                        "timestamp": time.time(),
+                        "reason": f"risk={risk:.3f}>=threshold({risk_abort_threshold:.3f})",
+                        "risk": float(risk),
+                    }
 
-            with self._progress_event_cv:
-                for event in list(self._progress_event_queue):
-                    event_id = int(event.get("event_id", 0))
-                    if event_id <= last_seen_event_id:
-                        continue
-                    if str(event.get("checkpoint_id", "")).upper() != checkpoint_key:
-                        continue
-                    last_seen_event_id = event_id
-                    return dict(event)
-                wait_s = min(0.25, max(0.01, deadline - time.time()))
-                self._progress_event_cv.wait(timeout=wait_s)
+                with self._progress_event_cv:
+                    queue_list = list(self._progress_event_queue)
+                    matching_events = [
+                        e for e in queue_list
+                        if str(e.get("checkpoint_id", "")).upper() == checkpoint_key
+                        and int(e.get("event_id", 0)) > last_seen_event_id
+                    ]
+                    if matching_events:
+                        event = dict(matching_events[-1])
+                        last_seen_event_id = int(event.get("event_id", 0))
+                        print_debug(
+                            "[BENCHMARK-WAIT-MATCH] "
+                            f"checkpoint={checkpoint_key} event_id={event.get('event_id')} "
+                            f"type={event.get('event_type')} queue_len={len(queue_list)}"
+                        )
+                        return event
+
+                    print_debug(
+                        "[BENCHMARK-WAIT-POLL] "
+                        f"checkpoint={checkpoint_key} waiting_for={checkpoint_key} "
+                        f"progress_target={progress.get('current_target')} "
+                        f"in_radius={progress.get('in_radius')} "
+                        f"active_enter_ts={progress.get('active_enter_ts')} "
+                        f"dwell_seconds={progress.get('dwell_seconds')} "
+                        f"dwell_satisfied={progress.get('dwell_satisfied')} "
+                        f"completed={progress.get('completed')} "
+                        f"distance_m={progress.get('distance_to_target_m')} "
+                        f"drone_pos={progress.get('drone_true_position')} "
+                        f"cp_center={progress.get('checkpoint_center')} "
+                        f"queue_len={len(queue_list)}"
+                    )
+                    wait_s = min(0.25, max(0.01, deadline - time.time()))
+                    self._progress_event_cv.wait(timeout=wait_s)
+        finally:
+            self.set_benchmark_progress_focus_checkpoint(None)
 
     def _update_benchmark_progress_from_snapshot(self, snapshot: dict):
         if not isinstance(snapshot, dict):
@@ -342,7 +376,11 @@ class LLMController():
         active_ids = set(str(v).upper() for v in self.active_objective_set.get("active_checkpoint_ids", []))
         order = [str(v).upper() for v in BENCHMARK_CHECKPOINT_ORDER]
         self._benchmark_completed = set(cid for cid in self._benchmark_completed if cid in active_ids)
-        current_target = next((cid for cid in order if cid in active_ids and cid not in self._benchmark_completed), None)
+        focus_checkpoint = (None if self._benchmark_focus_checkpoint_id is None else str(self._benchmark_focus_checkpoint_id).upper())
+        if focus_checkpoint is not None and focus_checkpoint not in self._benchmark_completed:
+            current_target = focus_checkpoint
+        else:
+            current_target = next((cid for cid in order if cid in active_ids and cid not in self._benchmark_completed), None)
         now = time.time()
         self._benchmark_last_update_ts = now
 
@@ -410,6 +448,7 @@ class LLMController():
             self._benchmark_prev_dwell_satisfied = False
             self._benchmark_prev_dwell_bucket = 0
             self._benchmark_prev_completed_ids = set()
+        entered_transition = bool(in_radius and (not self._benchmark_prev_in_radius))
         if in_radius and (not self._benchmark_prev_in_radius):
             self._emit_progress_event(
                 event_type="entered_checkpoint_area",
@@ -422,7 +461,7 @@ class LLMController():
                 timestamp=now,
                 reason="entered_radius",
             )
-        if in_radius and self._benchmark_active_enter_ts is not None and dwell_seconds <= 0.05:
+        if entered_transition:
             self._emit_progress_event(
                 event_type="dwell_started",
                 checkpoint_id=current_target,
