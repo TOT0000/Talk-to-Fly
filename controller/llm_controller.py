@@ -43,6 +43,7 @@ from .baseline_scenes import (
 )
 from .safety_envelope import build_safety_envelope
 from .benchmark_layout import (
+    CHECKPOINT_DWELL_SECONDS,
     BENCHMARK_CHECKPOINT_ORDER,
     BENCHMARK_CHECKPOINTS_BY_ID,
     BENCHMARK_CHECKPOINTS,
