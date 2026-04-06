@@ -401,9 +401,15 @@ class LangGraphOrchestrationRunner:
         latest_snapshot = self.controller.get_live_ui_snapshot()
         progress = latest_snapshot.get("benchmark_progress") if isinstance(latest_snapshot, dict) else None
         progress_current_target = None
+        progress_active_enter_ts = None
+        progress_distance_m = None
+        progress_tick_ts = None
         completed_from_progress = set()
         if isinstance(progress, dict):
             progress_current_target = progress.get("current_target")
+            progress_active_enter_ts = progress.get("active_enter_ts")
+            progress_distance_m = progress.get("distance_to_target_m")
+            progress_tick_ts = progress.get("tick_ts")
             completed_from_progress = set(str(v).upper() for v in progress.get("completed", []))
         completed = set(str(v).upper() for v in state.get("completed_checkpoint_ids", []))
         completed.update(completed_from_progress)
@@ -453,6 +459,9 @@ class LangGraphOrchestrationRunner:
                 f"required_dwell={required_dwell_seconds:.3f} "
                 f"dwell_satisfied={dwell_satisfied} "
                 f"completed={sorted(completed)} "
+                f"progress_active_enter_ts={progress_active_enter_ts} "
+                f"progress_distance_m={progress_distance_m} "
+                f"progress_tick_ts={progress_tick_ts} "
                 f"drone_gt={latest_snapshot.get('drone_gt') if isinstance(latest_snapshot, dict) else None} "
                 f"cp_center={subgoal_center} "
                 f"dist_to_subgoal={subgoal_dist}"
