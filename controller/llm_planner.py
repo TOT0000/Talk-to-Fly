@@ -62,6 +62,9 @@ class LLMPlanner():
             "- If the same action was already executed and no progress improved, avoid repeating it.\n"
             "- If risk is high, you may temporarily choose conservative avoidance/recovery action.\n"
             "- Avoidance is temporary, not a new mission objective.\n"
+            "- Recovery mode is controlled by system state; follow it explicitly.\n"
+            "- If recovery_mode is true, prioritize conservative recovery movement and re-observation over direct checkpoint approach.\n"
+            "- If recovery_mode is false (or recovery just exited because risk <= 0.2), prioritize go_checkpoint(current_subgoal).\n"
             "- If current_subgoal risk is high, do not blindly rush go_checkpoint(current_subgoal).\n"
             "- Recovery should be step-by-step: after each recovery step, re-observe latest risk/state before deciding the next step.\n"
             "- During each re-observation, explicitly check current collision risk.\n"
@@ -81,6 +84,8 @@ class LLMPlanner():
             "Historical max collision risk: {historical_max_collision_risk}\n"
             "Dominant risky worker: {dominant_risky_worker}\n"
             "Per-worker collision risks: {per_worker_collision_risks}\n"
+            "Recovery mode: {recovery_mode}\n"
+            "Recovery reason: {recovery_reason}\n"
             "Worker states summary: {worker_states_summary}\n"
             "Last action: {last_action}\n"
             "Last result: {last_result}\n"
@@ -415,6 +420,8 @@ class LLMPlanner():
         stall_count: int,
         repeated_action_count: int,
         recent_history: list[dict],
+        recovery_mode: bool = False,
+        recovery_reason: str | None = None,
     ) -> str:
         prompt = self.prompt_langgraph_step.format(
             task_description=str(task_description or ""),
@@ -424,6 +431,8 @@ class LLMPlanner():
             historical_max_collision_risk=f"{float(historical_max_collision_risk):.6f}",
             per_worker_collision_risks=str(dict(per_worker_collision_risks or {})),
             dominant_risky_worker=str(dominant_risky_worker or "n/a"),
+            recovery_mode=str(bool(recovery_mode)),
+            recovery_reason=str(recovery_reason or "none"),
             worker_states_summary=str(list(worker_states_summary or [])[:3]),
             last_action=str(last_action or ""),
             last_result=str(last_result or ""),

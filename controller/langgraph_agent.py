@@ -75,6 +75,11 @@ class AgentState(TypedDict, total=False):
     waiting_checkpoint_id: str | None
     last_progress_event: dict[str, Any] | None
     completion_monitor_status: str
+    recovery_mode: bool
+    recovery_reason: str | None
+    recovery_entry_risk: float | None
+    recovery_last_risk: float | None
+    recovery_just_exited: bool
 
 
 class LangGraphOrchestrationRunner:
@@ -142,6 +147,11 @@ class LangGraphOrchestrationRunner:
             "waiting_checkpoint_id": None,
             "last_progress_event": None,
             "completion_monitor_status": "idle",
+            "recovery_mode": False,
+            "recovery_reason": None,
+            "recovery_entry_risk": None,
+            "recovery_last_risk": None,
+            "recovery_just_exited": False,
         }
         self._emit_agent_message(
             f"[AGENT] subgoal queue: {' -> '.join(list(decomposed)) if decomposed else '(empty)'}"
@@ -291,6 +301,8 @@ class LangGraphOrchestrationRunner:
             f"per_worker={state.get('per_worker_collision_risks')}"
         )
         subgoal = state.get("current_subgoal_id")
+        recovery_mode = bool(state.get("recovery_mode", False))
+        recovery_just_exited = bool(state.get("recovery_just_exited", False))
         completed = set(str(v).upper() for v in state.get("completed_checkpoint_ids", []))
         remaining = [str(v).upper() for v in state.get("remaining_checkpoint_ids", []) if str(v).upper() not in completed]
         if subgoal in completed:
@@ -299,6 +311,21 @@ class LangGraphOrchestrationRunner:
             subgoal = remaining[0]
         if subgoal is None:
             return {"last_plan_text": "", "last_action_text": "", "route_decision": "end"}
+        if recovery_just_exited and not recovery_mode:
+            plan = f'go_checkpoint("{str(subgoal).upper()}");'
+            self._emit_agent_message(
+                f"[RECOVERY] exited recovery mode, resume checkpoint approach: {str(subgoal).upper()}"
+            )
+            self._emit_agent_message(f"[STEP] current subgoal: {subgoal}")
+            self._emit_agent_message(f"[ACTION] {plan}")
+            return {
+                "last_plan_text": plan,
+                "last_action_text": plan,
+                "route_decision": "continue",
+                "current_subgoal_id": subgoal,
+                "current_subgoal_type": "checkpoint",
+                "recovery_just_exited": False,
+            }
         subgoal_phase = str(state.get("subgoal_phase", "APPROACH_SUBGOAL"))
         if subgoal_phase in {"COMPLETE_SUBGOAL", "VERIFY_COMPLETE"}:
             in_radius = bool(state.get("is_current_subgoal_in_radius", False))
@@ -352,6 +379,8 @@ class LangGraphOrchestrationRunner:
             stall_count=no_progress_steps,
             repeated_action_count=repeated_action_count,
             recent_history=list(state.get("execution_history", [])),
+            recovery_mode=recovery_mode,
+            recovery_reason=(None if state.get("recovery_reason") is None else str(state.get("recovery_reason"))),
         )
         if not plan:
             plan = f'go_checkpoint("{subgoal}");'
@@ -370,6 +399,7 @@ class LangGraphOrchestrationRunner:
             "route_decision": "continue",
             "current_subgoal_id": subgoal,
             "current_subgoal_type": "checkpoint",
+            "recovery_just_exited": False,
         }
 
     def _node_execute_step(self, state: AgentState) -> AgentState:
@@ -486,7 +516,31 @@ class LangGraphOrchestrationRunner:
 
         remaining = list(state.get("remaining_checkpoint_ids", []))
         subgoal = state.get("current_subgoal_id")
+        recovery_mode = bool(state.get("recovery_mode", False))
+        recovery_reason = state.get("recovery_reason")
+        recovery_entry_risk = state.get("recovery_entry_risk")
+        recovery_last_risk = state.get("recovery_last_risk")
+        recovery_just_exited = bool(state.get("recovery_just_exited", False))
         latest_snapshot = self.controller.get_live_ui_snapshot()
+        latest_safety = latest_snapshot.get("safety_context") if isinstance(latest_snapshot, dict) else None
+        latest_collision_risk = 0.0 if latest_safety is None else float(getattr(latest_safety, "current_collision_probability", 0.0))
+        recovery_last_risk = float(latest_collision_risk)
+        if (not recovery_mode) and latest_collision_risk >= 0.5:
+            recovery_mode = True
+            recovery_reason = "risk>=0.5"
+            recovery_entry_risk = float(latest_collision_risk)
+            recovery_just_exited = False
+            self._emit_agent_message(
+                f"[RECOVERY] enter mode: risk={latest_collision_risk:.3f} reason={recovery_reason}"
+            )
+        elif recovery_mode and latest_collision_risk <= 0.2:
+            recovery_mode = False
+            recovery_reason = None
+            recovery_entry_risk = None
+            recovery_just_exited = True
+            self._emit_agent_message(
+                f"[RECOVERY] exit mode: risk={latest_collision_risk:.3f} (<=0.2), resume checkpoint approach."
+            )
         progress = latest_snapshot.get("benchmark_progress") if isinstance(latest_snapshot, dict) else None
         progress_current_target = None
         progress_active_enter_ts = None
@@ -608,6 +662,16 @@ class LangGraphOrchestrationRunner:
                 waiting_on_completion = False
                 waiting_checkpoint_id = None
                 completion_monitor_status = f"event_{event_type}"
+                if event_type == "risk_abort":
+                    event_risk = progress_event.get("risk")
+                    risk_value = latest_collision_risk if event_risk is None else float(event_risk)
+                    recovery_mode = True
+                    recovery_reason = "risk_abort_event"
+                    recovery_entry_risk = float(risk_value)
+                    recovery_just_exited = False
+                    self._emit_agent_message(
+                        f"[RECOVERY] enter mode: risk={risk_value:.3f} reason=risk_abort_event"
+                    )
                 return {
                     "agent_step_count": step_count,
                     "replan_count": replan_count + (1 if event_type == "risk_abort" else 0),
@@ -619,6 +683,11 @@ class LangGraphOrchestrationRunner:
                     "completion_monitor_status": completion_monitor_status,
                     "waiting_on_checkpoint_completion": waiting_on_completion,
                     "waiting_checkpoint_id": waiting_checkpoint_id,
+                    "recovery_mode": bool(recovery_mode),
+                    "recovery_reason": (None if recovery_reason is None else str(recovery_reason)),
+                    "recovery_entry_risk": (None if recovery_entry_risk is None else float(recovery_entry_risk)),
+                    "recovery_last_risk": float(recovery_last_risk),
+                    "recovery_just_exited": bool(recovery_just_exited),
                 }
             if event_type in {"entered_checkpoint_area", "dwell_started", "dwell_progress", "dwell_satisfied"}:
                 in_radius = event_in_radius
@@ -734,6 +803,11 @@ class LangGraphOrchestrationRunner:
                         "waiting_checkpoint_id": waiting_checkpoint_id,
                         "last_progress_event": (None if progress_event is None else dict(progress_event)),
                         "completion_monitor_status": completion_monitor_status,
+                        "recovery_mode": bool(recovery_mode),
+                        "recovery_reason": (None if recovery_reason is None else str(recovery_reason)),
+                        "recovery_entry_risk": (None if recovery_entry_risk is None else float(recovery_entry_risk)),
+                        "recovery_last_risk": float(recovery_last_risk),
+                        "recovery_just_exited": bool(recovery_just_exited),
                     }
 
         if not remaining:
@@ -763,8 +837,22 @@ class LangGraphOrchestrationRunner:
                 "last_subgoal_distance_m": last_subgoal_distance,
                 "no_progress_steps": no_progress_steps,
                 "repeated_action_count": repeated_action_count,
+                "recovery_mode": bool(recovery_mode),
+                "recovery_reason": (None if recovery_reason is None else str(recovery_reason)),
+                "recovery_entry_risk": (None if recovery_entry_risk is None else float(recovery_entry_risk)),
+                "recovery_last_risk": float(recovery_last_risk),
+                "recovery_just_exited": bool(recovery_just_exited),
             }
         if not bool(result.get("ok", False)):
+            result_message = str(result.get("message", "")).lower()
+            if ("collision_probability_high" in result_message) and (not recovery_mode):
+                recovery_mode = True
+                recovery_reason = "go_checkpoint_high_risk_stop"
+                recovery_entry_risk = float(latest_collision_risk)
+                recovery_just_exited = False
+                self._emit_agent_message(
+                    f"[RECOVERY] enter mode: risk={latest_collision_risk:.3f} reason=go_checkpoint_high_risk_stop"
+                )
             return {
                 "agent_step_count": step_count,
                 "replan_count": replan_count,
@@ -791,6 +879,11 @@ class LangGraphOrchestrationRunner:
                 "last_subgoal_distance_m": last_subgoal_distance,
                 "no_progress_steps": no_progress_steps,
                 "repeated_action_count": repeated_action_count,
+                "recovery_mode": bool(recovery_mode),
+                "recovery_reason": (None if recovery_reason is None else str(recovery_reason)),
+                "recovery_entry_risk": (None if recovery_entry_risk is None else float(recovery_entry_risk)),
+                "recovery_last_risk": float(recovery_last_risk),
+                "recovery_just_exited": bool(recovery_just_exited),
             }
         return {
             "agent_step_count": step_count,
@@ -818,6 +911,11 @@ class LangGraphOrchestrationRunner:
             "last_subgoal_distance_m": last_subgoal_distance,
             "no_progress_steps": no_progress_steps,
             "repeated_action_count": repeated_action_count,
+            "recovery_mode": bool(recovery_mode),
+            "recovery_reason": (None if recovery_reason is None else str(recovery_reason)),
+            "recovery_entry_risk": (None if recovery_entry_risk is None else float(recovery_entry_risk)),
+            "recovery_last_risk": float(recovery_last_risk),
+            "recovery_just_exited": bool(recovery_just_exited),
         }
 
     def _route_from_evaluation(self, state: AgentState) -> RouteDecision:
