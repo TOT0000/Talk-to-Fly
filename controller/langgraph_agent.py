@@ -364,7 +364,7 @@ class LangGraphOrchestrationRunner:
             event = self.controller.wait_for_checkpoint_progress_event(
                 str(checkpoint_id),
                 timeout_seconds=8.0,
-                risk_abort_threshold=0.75,
+                risk_abort_threshold=0.50,
             )
             event_type = str(event.get("event_type", "unknown"))
             ok = event_type not in {"waiting_timeout", "risk_abort"}

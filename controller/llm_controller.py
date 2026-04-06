@@ -52,9 +52,9 @@ from .benchmark_layout import (
 from .langgraph_agent import LangGraphOrchestrationRunner
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = 0.30
-COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.65
-COLLISION_PROBABILITY_REARM_THRESHOLD = 0.45
+COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = 0.50
+COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.50
+COLLISION_PROBABILITY_REARM_THRESHOLD = 0.50
 AUTO_REPLAN_PROTECTION_STATEMENTS = 2
 COLLISION_RISK_WORKER_IDS = ("worker_1", "worker_2", "worker_3")
 
@@ -1080,7 +1080,10 @@ class LLMController():
                 f"should_abort={should_abort} "
                 f"dominant={dominant}"
             )
-            return True, f"current_collision_probability={current_p:.6f}>=0.65, dominant={dominant}"
+            return True, (
+                f"current_collision_probability={current_p:.6f}>="
+                f"{COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}, dominant={dominant}"
+            )
         return False, ""
 
     def _sanitize_minispec_plan(self, raw_plan: str) -> str:
