@@ -135,6 +135,13 @@ class LLMPlanner():
             "  - strategy_summary: one short concrete sentence.\n"
             "  - action: exactly one short MiniSpec statement ending with ';'.\n"
             "  - why_action_matches_mode: one short sentence explicitly proving action and mode are consistent.\n"
+            "Executable action grammar (must match exactly one statement):\n"
+            "- move_forward(0.1~2.0); move_backward(0.1~2.0); move_left(0.1~2.0); move_right(0.1~2.0);\n"
+            "- turn_cw(5~90); turn_ccw(5~90); delay(0.1~2.0); go_checkpoint(\"A1\"); log(\"short_text\");\n"
+            "Alias normalization allowed by system: move_back->move_backward, hold/wait/reobserve->delay.\n"
+            "Output examples (format + semantics):\n"
+            "{\"mode\":\"approach\",\"reason\":\"Risk is moderate and path is usable.\",\"strategy_summary\":\"Resume mission progress toward current checkpoint.\",\"action\":\"go_checkpoint(\\\"A2\\\");\",\"next_subgoal\":null,\"why_action_matches_mode\":\"Approach mode should prioritize direct progress to the current subgoal.\"}\n"
+            "{\"mode\":\"recovery\",\"reason\":\"Immediate collision risk near A2 is high.\",\"strategy_summary\":\"Create lateral spacing before re-observing risk.\",\"action\":\"move_left(0.8);\",\"next_subgoal\":null,\"why_action_matches_mode\":\"Recovery mode uses one short de-risking reposition step instead of direct checkpoint approach.\"}\n"
             "Task: {task_description}\n"
             "Current mode: {current_mode}\n"
             "Current subgoal: {current_subgoal}\n"
@@ -709,9 +716,19 @@ class LLMPlanner():
                 raw = retry_raw
                 raw_action = retry_action_raw
             else:
-                action = "log(\"invalid_action_unresolved\");"
+                if mode == "recovery":
+                    action = "turn_cw(15);"
+                    if int(repeated_action_count) % 2 == 1:
+                        action = "turn_ccw(15);"
+                    events.append("fallback_proxy_recovery_action")
+                else:
+                    action = "delay(0.4);"
+                    events.append("fallback_proxy_safe_delay")
                 sanitized_payload["action"] = action
-                events.append("fallback_invalid_action_unresolved")
+                sanitized_payload["why_action_matches_mode"] = (
+                    sanitized_payload.get("why_action_matches_mode")
+                    or "Fallback action preserves safety while awaiting cleaner structured decision output."
+                )
         next_subgoal = parsed.get("next_subgoal")
         return {
             "mode": mode,
@@ -771,16 +788,23 @@ class LLMPlanner():
         text = str(raw_text or "").strip().replace("\n", " ")
         if not text:
             return ""
+        text = re.sub(r"\s+", " ", text)
         commands = []
         patterns = [
             r'go_checkpoint\(\s*[\'"]?([A-Za-z]\d+)[\'"]?\s*\)\s*;?',
             r'move_forward\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
             r'move_backward\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'move_back\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
             r'move_left\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
             r'move_right\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
             r'turn_cw\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
             r'turn_ccw\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'turn_right\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'turn_left\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
             r'delay\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'hold\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'wait\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'reobserve\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
             r'log\(\s*[\'"]([^\'"]{1,60})[\'"]\s*\)\s*;?',
         ]
         for pattern in patterns:
@@ -795,6 +819,15 @@ class LLMPlanner():
                     commands.append(f'log("{safe}");')
                 else:
                     name = token.split("(", 1)[0]
+                    alias = {
+                        "move_back": "move_backward",
+                        "turn_right": "turn_cw",
+                        "turn_left": "turn_ccw",
+                        "hold": "delay",
+                        "wait": "delay",
+                        "reobserve": "delay",
+                    }
+                    name = alias.get(name, name)
                     value = float(match.group(1))
                     if name.startswith("turn_"):
                         commands.append(f"{name}({int(value)});")
@@ -804,4 +837,22 @@ class LLMPlanner():
                     break
             if len(commands) >= 2:
                 break
+        if not commands:
+            lower = text.lower()
+            number_match = re.search(r"([0-9]+(?:\.[0-9]+)?)", lower)
+            value = 0.6 if number_match is None else float(number_match.group(1))
+            if "move left" in lower:
+                commands.append(f"move_left({value:.1f});")
+            elif "move right" in lower:
+                commands.append(f"move_right({value:.1f});")
+            elif "move back" in lower or "backward" in lower:
+                commands.append(f"move_backward({value:.1f});")
+            elif "move forward" in lower:
+                commands.append(f"move_forward({value:.1f});")
+            elif "turn left" in lower or "ccw" in lower:
+                commands.append(f"turn_ccw({int(max(5.0, value))});")
+            elif "turn right" in lower or "cw" in lower:
+                commands.append(f"turn_cw({int(max(5.0, value))});")
+            elif "hold" in lower or "wait" in lower or "reobserve" in lower:
+                commands.append("delay(0.5);")
         return "".join(commands)

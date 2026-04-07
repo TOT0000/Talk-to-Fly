@@ -17,9 +17,7 @@ LEVEL_RANK = {"SAFE": 3, "CAUTION": 2, "WARNING": 1, "DANGER": 0}
 class ScenarioApplyReport:
     selected_mode: str
     target_drone_position_3d: tuple[float, float, float]
-    target_user_position_3d: tuple[float, float, float]
     actual_drone_gt_position_3d: tuple[float, float, float]
-    actual_user_gt_position_3d: tuple[float, float, float]
     measured_initial_safety_score: Optional[float]
     measured_initial_collision_probability: Optional[float]
     measured_initial_envelope_gap_m: Optional[float]
@@ -97,14 +95,10 @@ class ScenarioManager:
         snapshot = controller.get_live_ui_snapshot()
         safety_context = snapshot.get("safety_context") if snapshot else None
         actual_drone = tuple(float(v) for v in (snapshot.get("drone_gt") or scenario.drone_position_3d))
-        actual_user = tuple(float(v) for v in (snapshot.get("user_gt") or scenario.user_position_3d))
-
         report = ScenarioApplyReport(
             selected_mode=scenario.name,
             target_drone_position_3d=tuple(float(v) for v in scenario.drone_position_3d),
-            target_user_position_3d=tuple(float(v) for v in scenario.user_position_3d),
             actual_drone_gt_position_3d=actual_drone,
-            actual_user_gt_position_3d=actual_user,
             measured_initial_safety_score=None if safety_context is None else float(safety_context.safety_score),
             measured_initial_collision_probability=(
                 None if safety_context is None else float(safety_context.current_collision_probability)
@@ -118,8 +112,8 @@ class ScenarioManager:
         print_t(
             "[SCENARIO-VALIDATION] "
             f"selected={report.selected_mode} "
-            f"target_drone={report.target_drone_position_3d} target_user={report.target_user_position_3d} "
-            f"actual_drone={report.actual_drone_gt_position_3d} actual_user={report.actual_user_gt_position_3d} "
+            f"target_drone={report.target_drone_position_3d} "
+            f"actual_drone={report.actual_drone_gt_position_3d} "
             f"score={report.measured_initial_safety_score} p_collision={report.measured_initial_collision_probability} "
             f"gap={report.measured_initial_envelope_gap_m} uncertainty={report.measured_initial_uncertainty_scale_m} "
             f"repositioned={report.repositioned} iterations={report.calibration_iterations}"
