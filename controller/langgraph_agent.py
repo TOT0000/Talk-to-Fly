@@ -352,7 +352,8 @@ class LangGraphOrchestrationRunner:
         if subgoal is None:
             return {"last_plan_text": "", "last_action_text": "", "route_decision": "end"}
         subgoal_phase = str(state.get("subgoal_phase", "APPROACH_SUBGOAL"))
-        if subgoal_phase in {"COMPLETE_SUBGOAL", "VERIFY_COMPLETE"}:
+        # In agent mode, completion/verify handling is observation-driven and delegated to LLM.
+        if False and subgoal_phase in {"COMPLETE_SUBGOAL", "VERIFY_COMPLETE"}:
             in_radius = bool(state.get("is_current_subgoal_in_radius", False))
             dwell_satisfied = bool(state.get("dwell_satisfied", False))
             waiting_checkpoint = state.get("waiting_checkpoint_id")
@@ -431,6 +432,12 @@ class LangGraphOrchestrationRunner:
             current_mode=current_mode,
             last_wait_event=dict(state.get("last_wait_event") or {}),
             last_risk_event=dict(state.get("last_risk_event") or {}),
+            current_subgoal_phase=subgoal_phase,
+            reached_not_completed=bool(state.get("arrived_but_not_completed", False)),
+            in_checkpoint_radius=bool(state.get("is_current_subgoal_in_radius", False)),
+            dwell_seconds=float(state.get("current_subgoal_dwell_seconds", 0.0) or 0.0),
+            dwell_required_seconds=float(state.get("required_dwell_seconds", 2.0) or 2.0),
+            dwell_satisfied=bool(state.get("dwell_satisfied", False)),
         )
         plan = str(decision.get("action", "")).strip()
         mode = str(decision.get("mode", "approach")).strip().lower()
@@ -626,23 +633,13 @@ class LangGraphOrchestrationRunner:
         max_steps = int(state.get("max_agent_steps", 64))
         max_replans = int(state.get("max_replan_attempts", 8))
         if step_count >= max_steps:
-            return {
-                "agent_step_count": step_count,
-                "replan_count": replan_count,
-                "execution_history": history,
-                "mission_status": "failed",
-                "route_decision": "abort",
-                "last_error": f"max_agent_steps_exceeded({max_steps})",
-            }
+            self._emit_agent_message(
+                f"[EVENT] soft_limit_reached:max_agent_steps({max_steps}) -> continue_with_agent_control"
+            )
         if replan_count > max_replans:
-            return {
-                "agent_step_count": step_count,
-                "replan_count": replan_count,
-                "execution_history": history,
-                "mission_status": "failed",
-                "route_decision": "abort",
-                "last_error": f"max_replan_attempts_exceeded({max_replans})",
-            }
+            self._emit_agent_message(
+                f"[EVENT] soft_limit_reached:max_replan_attempts({max_replans}) -> continue_with_agent_control"
+            )
 
         remaining = list(state.get("remaining_checkpoint_ids", []))
         subgoal = state.get("current_subgoal_id")
@@ -811,8 +808,6 @@ class LangGraphOrchestrationRunner:
             completion_monitor_status = "completed"
             repeated_action_count = 0
             no_progress_steps = 0
-        elif phase == "COMPLETE_SUBGOAL":
-            phase = "VERIFY_COMPLETE"
         elif phase == "VERIFY_COMPLETE" and subgoal is not None and str(subgoal).upper() not in completed:
             if arrived_but_not_completed and effective_in_radius and not dwell_satisfied:
                 phase = "COMPLETE_SUBGOAL"
@@ -884,9 +879,9 @@ class LangGraphOrchestrationRunner:
                     no_progress_steps += 1
                 last_subgoal_distance = float(distance_m)
                 if (not arrived_but_not_completed) and repeated_action_count >= 2 and no_progress_steps >= 2:
-                    self._emit_agent_message("[AGENT] planning stalled, trigger subgoal reselection.")
+                    self._emit_agent_message("[EVENT] planning_stalled_observation")
                     return {
-                        "route_decision": "reselect_subgoal",
+                        "route_decision": "continue",
                         "mission_status": "running",
                         "agent_step_count": step_count,
                         "replan_count": replan_count,
@@ -922,6 +917,9 @@ class LangGraphOrchestrationRunner:
                 and (arrived_but_not_completed or waiting_on_completion or (not dwell_satisfied))
             )
             if current_incomplete:
+                self._emit_agent_message(
+                    f"[EVENT] final_subgoal_incomplete:{str(subgoal).upper()} -> continue_until_completion_event"
+                )
                 return {
                     "agent_step_count": step_count,
                     "replan_count": replan_count,
@@ -934,7 +932,7 @@ class LangGraphOrchestrationRunner:
                     "waiting_checkpoint_id": waiting_checkpoint_id,
                     "completion_monitor_status": completion_monitor_status,
                     "arrived_but_not_completed": True,
-                    "subgoal_phase": "COMPLETE_SUBGOAL",
+                    "subgoal_phase": ("APPROACH_SUBGOAL" if subgoal is None else phase),
                 }
             return {
                 "agent_step_count": step_count,
@@ -979,7 +977,7 @@ class LangGraphOrchestrationRunner:
                 "replan_count": replan_count,
                 "execution_history": history,
                 "mission_status": "running",
-                "route_decision": "retry_plan" if bool(result.get("recoverable", True)) else "reselect_subgoal",
+                "route_decision": "continue",
                 "completed_checkpoint_ids": sorted(completed),
                 "remaining_checkpoint_ids": remaining,
                 "current_subgoal_id": subgoal,
