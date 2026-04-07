@@ -446,6 +446,13 @@ class LangGraphOrchestrationRunner:
                 plan = f'go_checkpoint("{subgoal}");'
         action_target = self._extract_checkpoint_target(plan)
         if action_target is not None:
+            allow_switch = bool(
+                mode in {"skip_current_subgoal", "replan"}
+                or (isinstance(suggested_subgoal, str) and str(suggested_subgoal).strip())
+            )
+            if (subgoal is not None) and action_target != str(subgoal).upper() and (not allow_switch):
+                action_target = str(subgoal).upper()
+                plan = f'go_checkpoint("{action_target}");'
             if action_target in completed or action_target not in remaining:
                 action_target = str(subgoal).upper()
                 plan = f'go_checkpoint("{action_target}");'
@@ -663,6 +670,11 @@ class LangGraphOrchestrationRunner:
             dwell_seconds = float(progress.get("dwell_seconds", 0.0) or 0.0)
             required_dwell_seconds = float(progress.get("required_dwell_seconds", required_dwell_seconds) or required_dwell_seconds)
             dwell_satisfied = bool(progress.get("dwell_satisfied", False))
+        waiting_hint = (
+            bool(state.get("waiting_on_checkpoint_completion", False))
+            and state.get("waiting_checkpoint_id") is not None
+            and str(state.get("waiting_checkpoint_id")).upper() == str(subgoal).upper()
+        )
         subgoal_center = None
         subgoal_dist = None
         subgoal_in_radius_geom = False
@@ -678,8 +690,10 @@ class LangGraphOrchestrationRunner:
             and progress_current_target is not None
             and str(progress_current_target).upper() == str(subgoal).upper()
         )
+        if waiting_hint and subgoal is not None:
+            target_aligned = True
         effective_in_radius = bool(in_radius if target_aligned else subgoal_in_radius_geom)
-        if not target_aligned:
+        if (not target_aligned) and (not waiting_hint):
             dwell_seconds = 0.0
             dwell_satisfied = False
         if subgoal is not None:
