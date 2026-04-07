@@ -104,7 +104,6 @@ class LLMPlanner():
         self.prompt_langgraph_mode_action = (
             "You are TypeFly LangGraph Mode+Action Decision Agent.\n"
             "Decide BOTH the mode and the next action for this single step.\n"
-            "You are responsible for deciding next mode, action, subgoal, and when a checkpoint is truly finished.\n"
             "Output JSON only with keys: mode, reason, strategy_summary, action, next_subgoal, why_action_matches_mode.\n"
             "mode must be one of: approach, recovery, replan, skip_current_subgoal.\n"
             "next_subgoal default is null.\n"
@@ -131,15 +130,6 @@ class LLMPlanner():
             "  - Use null by default.\n"
             "  - Fill next_subgoal only when actually switching checkpoint target (especially skip_current_subgoal).\n"
             "  - Do NOT set next_subgoal equal to current_subgoal unless there is an explicit target-switch reason.\n"
-            "- Completion semantics:\n"
-            "  - Entering checkpoint area means reached, NOT completed.\n"
-            "  - Completion requires dwell/verify success and checkpoint_completed signal.\n"
-            "  - Do not switch subgoal only because checkpoint was reached.\n"
-            "  - If reached but not completed, you must decide wait/hold/re-approach/recover/replan/skip.\n"
-            "  - Task completion requires all required checkpoints completed, not merely reached.\n"
-            "- Parser/sanitizer/fallback policy:\n"
-            "  - System will not choose proxy action for invalid output.\n"
-            "  - If previous output was invalid, correct it yourself based on returned event.\n"
             "- Consistency rules:\n"
             "  - reason must directly explain the chosen mode+action and must be consistent with referenced checkpoint IDs.\n"
             "  - Do not mention checkpoint A in reason while action targets checkpoint B.\n"
@@ -696,10 +686,12 @@ class LLMPlanner():
         parsed = self._safe_json_object(raw)
         events: list[str] = []
         if not parsed:
-            events.append("parse_error")
-        mode = str(parsed.get("mode", "")).strip().lower()
+            events.append("parser_empty_object")
+        elif str(parsed.get("mode", "")).strip().lower() not in {"approach", "recovery", "replan", "skip_current_subgoal"}:
+            events.append("parser_normalized_mode_to_approach")
+        mode = str(parsed.get("mode", "approach")).strip().lower()
         if mode not in {"approach", "recovery", "replan", "skip_current_subgoal"}:
-            events.append("invalid_mode")
+            mode = "approach"
         raw_action = str(parsed.get("action", ""))
         action = self._sanitize_langgraph_action(raw_action)
         sanitized_payload = {
@@ -713,9 +705,47 @@ class LLMPlanner():
         if raw_action.strip() and (action != raw_action.strip()):
             events.append("sanitize_changed_action_format")
         if not action:
-            events.append("invalid_action")
-            if not parsed:
-                events.append("unresolved_decision")
+            events.append("sanitize_invalid_action")
+            retry_prompt = (
+                prompt
+                + "\n\nYour previous action was invalid/unparseable for MiniSpec."
+                + " Return JSON only. Keep same intent, but rewrite action as exactly one valid MiniSpec statement."
+            )
+            retry_raw = str(self.llm.request(retry_prompt, self.model_name, stream=False) or "").strip()
+            retry_parsed = self._safe_json_object(retry_raw)
+            retry_action_raw = str(retry_parsed.get("action", ""))
+            retry_action = self._sanitize_langgraph_action(retry_action_raw)
+            events.append("fallback_reprompt")
+            if retry_action:
+                action = retry_action
+                if retry_action_raw.strip() and retry_action != retry_action_raw.strip():
+                    events.append("sanitize_changed_action_format_on_reprompt")
+                sanitized_payload["action"] = action
+                sanitized_payload["reason"] = str(retry_parsed.get("reason", sanitized_payload["reason"])).strip()[:180]
+                sanitized_payload["strategy_summary"] = str(
+                    retry_parsed.get("strategy_summary", sanitized_payload["strategy_summary"])
+                ).strip()[:240]
+                sanitized_payload["next_subgoal"] = retry_parsed.get("next_subgoal", sanitized_payload["next_subgoal"])
+                sanitized_payload["why_action_matches_mode"] = str(
+                    retry_parsed.get("why_action_matches_mode", sanitized_payload["why_action_matches_mode"])
+                ).strip()[:220]
+                parsed = retry_parsed
+                raw = retry_raw
+                raw_action = retry_action_raw
+            else:
+                if mode == "recovery":
+                    action = "turn_cw(15);"
+                    if int(repeated_action_count) % 2 == 1:
+                        action = "turn_ccw(15);"
+                    events.append("fallback_proxy_recovery_action")
+                else:
+                    action = "delay(0.4);"
+                    events.append("fallback_proxy_safe_delay")
+                sanitized_payload["action"] = action
+                sanitized_payload["why_action_matches_mode"] = (
+                    sanitized_payload.get("why_action_matches_mode")
+                    or "Fallback action preserves safety while awaiting cleaner structured decision output."
+                )
         next_subgoal = parsed.get("next_subgoal")
         return {
             "mode": mode,
@@ -776,21 +806,70 @@ class LLMPlanner():
         if not text:
             return ""
         text = re.sub(r"\s+", " ", text)
-        statement = text.split(";")[0].strip()
-        if not statement:
-            return ""
-        raw_patterns = [
-            r'^go_checkpoint\(\s*"([A-Za-z]\d+)"\s*\)$',
-            r"^move_forward\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)$",
-            r"^move_backward\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)$",
-            r"^move_left\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)$",
-            r"^move_right\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)$",
-            r"^turn_cw\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)$",
-            r"^turn_ccw\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)$",
-            r"^delay\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)$",
-            r'^log\(\s*"([^"]{1,60})"\s*\)$',
+        commands = []
+        patterns = [
+            r'go_checkpoint\(\s*[\'"]?([A-Za-z]\d+)[\'"]?\s*\)\s*;?',
+            r'move_forward\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'move_backward\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'move_back\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'move_left\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'move_right\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'turn_cw\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'turn_ccw\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'turn_right\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'turn_left\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'delay\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'hold\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'wait\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'reobserve\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'log\(\s*[\'"]([^\'"]{1,60})[\'"]\s*\)\s*;?',
         ]
-        for pattern in raw_patterns:
-            if re.match(pattern, statement):
-                return f"{statement};"
-        return ""
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                token = match.group(0)
+                token = token.strip()
+                if token.startswith("go_checkpoint"):
+                    cid = match.group(1).upper()
+                    commands.append(f'go_checkpoint("{cid}");')
+                elif token.startswith("log("):
+                    safe = re.sub(r"[^a-zA-Z0-9 _-]", "", match.group(1))[:60]
+                    commands.append(f'log("{safe}");')
+                else:
+                    name = token.split("(", 1)[0]
+                    alias = {
+                        "move_back": "move_backward",
+                        "turn_right": "turn_cw",
+                        "turn_left": "turn_ccw",
+                        "hold": "delay",
+                        "wait": "delay",
+                        "reobserve": "delay",
+                    }
+                    name = alias.get(name, name)
+                    value = float(match.group(1))
+                    if name.startswith("turn_"):
+                        commands.append(f"{name}({int(value)});")
+                    else:
+                        commands.append(f"{name}({value:.1f});")
+                if len(commands) >= 2:
+                    break
+            if len(commands) >= 2:
+                break
+        if not commands:
+            lower = text.lower()
+            number_match = re.search(r"([0-9]+(?:\.[0-9]+)?)", lower)
+            value = 0.6 if number_match is None else float(number_match.group(1))
+            if "move left" in lower:
+                commands.append(f"move_left({value:.1f});")
+            elif "move right" in lower:
+                commands.append(f"move_right({value:.1f});")
+            elif "move back" in lower or "backward" in lower:
+                commands.append(f"move_backward({value:.1f});")
+            elif "move forward" in lower:
+                commands.append(f"move_forward({value:.1f});")
+            elif "turn left" in lower or "ccw" in lower:
+                commands.append(f"turn_ccw({int(max(5.0, value))});")
+            elif "turn right" in lower or "cw" in lower:
+                commands.append(f"turn_cw({int(max(5.0, value))});")
+            elif "hold" in lower or "wait" in lower or "reobserve" in lower:
+                commands.append("delay(0.5);")
+        return "".join(commands)
