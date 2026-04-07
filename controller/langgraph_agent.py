@@ -471,8 +471,13 @@ class LangGraphOrchestrationRunner:
         next_route: RouteDecision = "continue"
         if mode in {"skip_current_subgoal", "replan"}:
             next_route = "reselect_subgoal"
+        updated_queue = [str(v).upper() for v in list(state.get("subgoal_queue", []))]
+        if not updated_queue:
+            updated_queue = list(remaining)
         if isinstance(suggested_subgoal, str) and suggested_subgoal.strip().upper() in remaining:
             next_route = "reselect_subgoal"
+            suggested_key = suggested_subgoal.strip().upper()
+            updated_queue = [suggested_key] + [cid for cid in updated_queue if cid != suggested_key]
         return {
             "last_plan_text": plan,
             "last_action_text": action_text,
@@ -483,6 +488,7 @@ class LangGraphOrchestrationRunner:
             "mode_reason": (reason or None),
             "current_strategy_summary": strategy_summary,
             "subgoal_reprioritization_suggestion": ([str(suggested_subgoal).upper()] if isinstance(suggested_subgoal, str) else []),
+            "subgoal_queue": updated_queue,
             "last_decision_payload": {
                 "mode": mode,
                 "reason": reason,
@@ -910,6 +916,26 @@ class LangGraphOrchestrationRunner:
                     }
 
         if not remaining:
+            current_incomplete = bool(
+                subgoal is not None
+                and str(subgoal).upper() not in completed
+                and (arrived_but_not_completed or waiting_on_completion or (not dwell_satisfied))
+            )
+            if current_incomplete:
+                return {
+                    "agent_step_count": step_count,
+                    "replan_count": replan_count,
+                    "execution_history": history,
+                    "mission_status": "running",
+                    "route_decision": "continue",
+                    "remaining_checkpoint_ids": [str(subgoal).upper()],
+                    "subgoal_queue": [str(subgoal).upper()],
+                    "waiting_on_checkpoint_completion": bool(waiting_on_completion),
+                    "waiting_checkpoint_id": waiting_checkpoint_id,
+                    "completion_monitor_status": completion_monitor_status,
+                    "arrived_but_not_completed": True,
+                    "subgoal_phase": "COMPLETE_SUBGOAL",
+                }
             return {
                 "agent_step_count": step_count,
                 "replan_count": replan_count,
