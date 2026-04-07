@@ -714,7 +714,8 @@ class LangGraphOrchestrationRunner:
                 f"progress_tick_ts={progress_tick_ts} "
                 f"drone_gt={latest_snapshot.get('drone_gt') if isinstance(latest_snapshot, dict) else None} "
                 f"cp_center={subgoal_center} "
-                f"dist_to_subgoal={subgoal_dist}"
+                f"dist_to_subgoal={subgoal_dist}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
             )
         action_target = self._extract_checkpoint_target(str(state.get("last_plan_text", "")))
         result_msg = str(result.get("message", "")).lower()
