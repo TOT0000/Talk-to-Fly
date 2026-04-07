@@ -305,16 +305,10 @@ class TaskRunLogger:
         self._active.any_collision_during_run = self._active.any_collision_during_run or collision_now
 
     def _detect_collision(self, snapshot: Dict) -> bool:
-        drone_gt = snapshot.get("drone_gt")
-        user_gt = snapshot.get("user_gt")
-        if drone_gt is None or user_gt is None:
+        safety_context = snapshot.get("safety_context")
+        if safety_context is None:
             return False
-        dx = float(drone_gt[0] - user_gt[0])
-        dy = float(drone_gt[1] - user_gt[1])
-        dz = float(drone_gt[2] - user_gt[2])
-        distance_3d = (dx * dx + dy * dy + dz * dz) ** 0.5
-        threshold = float(os.getenv("TYPEFLY_COLLISION_DISTANCE_M", "0.30"))
-        return distance_3d <= threshold
+        return bool(getattr(safety_context, "envelopes_overlap", False))
 
     def _append_event(self, now: float, event_type: str, snapshot: Dict):
         if not self._enabled:
@@ -323,7 +317,6 @@ class TaskRunLogger:
         details = {
             "scenario": self._active.scenario_name if self._active else "",
             "drone_gt": snapshot.get("drone_gt"),
-            "user_gt": snapshot.get("user_gt"),
         }
         row = {
             "run_id": self._active.run_id if self._active else "",
