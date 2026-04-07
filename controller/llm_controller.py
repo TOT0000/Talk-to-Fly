@@ -821,6 +821,9 @@ class LLMController():
         max_step_m = 1.0
         min_axis_step_m = 0.12
         no_progress_limit = 3
+        heading_align_far_deg = 14.0
+        heading_align_near_deg = 7.0
+        max_turn_step_deg = 28
 
         initial_snapshot = self.get_live_ui_snapshot()
         initial_control = (
@@ -905,22 +908,22 @@ class LLMController():
                     stop_reason = "tiny_residual_vector"
                     break
 
-                if abs(body_forward) >= abs(body_right):
-                    step = min(local_step_cap, abs(body_forward))
-                    if body_forward > 0:
-                        self.drone.move_forward(step)
-                        chosen_action = f"move_forward({step:.2f})"
+                desired_yaw = math.atan2(dy_w, dx_w)
+                yaw_error = (desired_yaw - yaw + math.pi) % (2.0 * math.pi) - math.pi
+                yaw_error_deg = math.degrees(yaw_error)
+                align_threshold = heading_align_near_deg if dist_control < 0.8 else heading_align_far_deg
+                if abs(yaw_error_deg) > align_threshold:
+                    turn_deg = int(max(5.0, min(float(max_turn_step_deg), abs(yaw_error_deg))))
+                    if yaw_error_deg > 0:
+                        self.drone.turn_ccw(turn_deg)
+                        chosen_action = f"turn_ccw({turn_deg})"
                     else:
-                        self.drone.move_backward(step)
-                        chosen_action = f"move_backward({step:.2f})"
+                        self.drone.turn_cw(turn_deg)
+                        chosen_action = f"turn_cw({turn_deg})"
                 else:
-                    step = min(local_step_cap, abs(body_right))
-                    if body_right > 0:
-                        self.drone.move_right(step)
-                        chosen_action = f"move_right({step:.2f})"
-                    else:
-                        self.drone.move_left(step)
-                        chosen_action = f"move_left({step:.2f})"
+                    forward_step = min(local_step_cap, max(0.15, dist_control * 0.65))
+                    self.drone.move_forward(forward_step)
+                    chosen_action = f"move_forward({forward_step:.2f})"
 
             print_debug(
                 "[GC_DEBUG] "
@@ -1899,6 +1902,14 @@ class LLMController():
                     "est_xy_bias_corrected": (
                         float(obs.localization_packet.estimated_position_3d[0] - obs.localization_packet.b_xy[0]),
                         float(obs.localization_packet.estimated_position_3d[1] - obs.localization_packet.b_xy[1]),
+                    ),
+                    "ui_xy": (
+                        tuple(float(v) for v in obs.gt_xy)
+                        if self.get_baseline_scene().id == "SCENE_MANUAL_WORKER_CONTROL"
+                        else (
+                            float(obs.localization_packet.estimated_position_3d[0] - obs.localization_packet.b_xy[0]),
+                            float(obs.localization_packet.estimated_position_3d[1] - obs.localization_packet.b_xy[1]),
+                        )
                     ),
                     "heading_yaw_rad": float(self.manual_worker_poses.get(str(obs.id), {}).get("yaw_rad", 0.0)),
                     "P_xy": np.asarray(obs.localization_packet.P_xy, dtype=float).copy(),
