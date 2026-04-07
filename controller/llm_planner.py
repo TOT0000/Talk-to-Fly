@@ -10,6 +10,7 @@ from .minispec_interpreter import MiniSpecValueType, evaluate_value
 from .abs.robot_wrapper import RobotType
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.50
 
 class LLMPlanner():
     def __init__(self, robot_type: RobotType):
@@ -61,7 +62,16 @@ class LLMPlanner():
             "- If the same action was already executed and no progress improved, avoid repeating it.\n"
             "- If risk is high, you may temporarily choose conservative avoidance/recovery action.\n"
             "- Avoidance is temporary, not a new mission objective.\n"
-            "- When you judge immediate risk has improved, return to go_checkpoint(current_subgoal).\n"
+            "- Recovery mode is controlled by system state; follow it explicitly.\n"
+            "- If recovery_mode is true, prioritize conservative recovery movement and re-observation over direct checkpoint approach.\n"
+            "- If recovery_mode is false (or recovery just exited because risk <= 0.2), prioritize go_checkpoint(current_subgoal).\n"
+            "- If current_subgoal risk is high, do not blindly rush go_checkpoint(current_subgoal).\n"
+            "- Recovery should be step-by-step: after each recovery step, re-observe latest risk/state before deciding the next step.\n"
+            "- During each re-observation, explicitly check current collision risk.\n"
+            "- If current collision risk drops below 0.2, prioritize returning to go_checkpoint(current_subgoal).\n"
+            "- When you judge immediate risk has improved to a safe level, return to go_checkpoint(current_subgoal).\n"
+            "- If risk is still high after re-observation, choose another conservative recovery step and re-observe again.\n"
+            "- Recovery goal is to leave danger and then resume current_subgoal, not endless wandering.\n"
             "- If stalled/no-progress, switch to a different conservative strategy.\n"
             "- Avoid long turn/move loops without objective progress.\n"
             "- reached checkpoint area is NOT completed checkpoint.\n"
@@ -74,6 +84,8 @@ class LLMPlanner():
             "Historical max collision risk: {historical_max_collision_risk}\n"
             "Dominant risky worker: {dominant_risky_worker}\n"
             "Per-worker collision risks: {per_worker_collision_risks}\n"
+            "Recovery mode: {recovery_mode}\n"
+            "Recovery reason: {recovery_reason}\n"
             "Worker states summary: {worker_states_summary}\n"
             "Last action: {last_action}\n"
             "Last result: {last_result}\n"
@@ -186,7 +198,7 @@ class LLMPlanner():
         benchmark_progress: Optional[dict] = None,
     ) -> str:
         current_collision_probability = 0.0 if safety_context is None else float(safety_context.current_collision_probability)
-        if current_collision_probability < 0.65:
+        if current_collision_probability < float(COLLISION_PROBABILITY_REPLAN_THRESHOLD):
             return ""
         if previous_plan is None and execution_history is None:
             return ""
@@ -217,7 +229,8 @@ class LLMPlanner():
             f"- remaining checkpoints: {remaining if remaining else ['(none)']}\n"
             f"- current target checkpoint: {current_target}\n"
             "- replan trigger reason:\n"
-            f"  - current collision probability >= 0.65 (current={current_collision_probability:.6f})\n"
+            f"  - current collision probability >= {float(COLLISION_PROBABILITY_REPLAN_THRESHOLD):.2f} "
+            f"(current={current_collision_probability:.6f})\n"
             f"  - dominant risky worker = {dominant_worker}"
         )
 
@@ -407,6 +420,8 @@ class LLMPlanner():
         stall_count: int,
         repeated_action_count: int,
         recent_history: list[dict],
+        recovery_mode: bool = False,
+        recovery_reason: str | None = None,
     ) -> str:
         prompt = self.prompt_langgraph_step.format(
             task_description=str(task_description or ""),
@@ -416,6 +431,8 @@ class LLMPlanner():
             historical_max_collision_risk=f"{float(historical_max_collision_risk):.6f}",
             per_worker_collision_risks=str(dict(per_worker_collision_risks or {})),
             dominant_risky_worker=str(dominant_risky_worker or "n/a"),
+            recovery_mode=str(bool(recovery_mode)),
+            recovery_reason=str(recovery_reason or "none"),
             worker_states_summary=str(list(worker_states_summary or [])[:3]),
             last_action=str(last_action or ""),
             last_result=str(last_result or ""),

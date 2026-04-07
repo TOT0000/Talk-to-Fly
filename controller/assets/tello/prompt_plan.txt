@@ -33,8 +33,8 @@ Runtime task/safety context to use explicitly:
 Planning contract:
 - Output exactly one MiniSpec sentence.
 - Use MiniSpec syntax only (`?cond{{...}}`, `;`, assignments, function calls).
-- For checkpoint tasks in normal risk (`current_collision_probability < 0.65`), `gc(...)` is allowed as the primary primitive.
-- Replan condition: `current_collision_probability >= 0.65`.
+- For checkpoint tasks in normal risk (`current_collision_probability < 0.5`), `gc(...)` is allowed as the primary primitive.
+- Replan condition: `current_collision_probability >= 0.5`.
 - Under replan condition:
   - this is continuation, not a fresh task from zero
   - continue unfinished checkpoints; do not redo completed checkpoints
