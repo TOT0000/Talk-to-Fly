@@ -226,7 +226,8 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             print_debug(
                 f"[PX4-SP] command={self._active_command_name or 'hold'} "
                 f"target=({x:.2f}, {y:.2f}, {z:.2f}) yaw="
-                f"{'None' if yaw is None else f'{yaw:.3f}'} publish_ts={publish_ts:.3f}"
+                f"{'None' if yaw is None else f'{yaw:.3f}'} publish_ts={publish_ts:.3f}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
             )
 
     def _get_state(self) -> Tuple[Tuple[float, float, float], float]:
