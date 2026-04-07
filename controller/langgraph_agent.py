@@ -81,6 +81,16 @@ class AgentState(TypedDict, total=False):
     recovery_last_risk: float | None
     recovery_just_exited: bool
 
+    # strategy memory layer
+    current_strategy_summary: str
+    last_failure_reason: str | None
+    recent_failed_approach_pattern: str | None
+    recent_recovery_hypothesis: str | None
+    blocked_workers_by_subgoal: dict[str, list[str]]
+    subgoal_attempt_history: dict[str, list[str]]
+    latest_failure_analysis: dict[str, Any] | None
+    pending_strategy_update: dict[str, Any] | None
+
 
 class LangGraphOrchestrationRunner:
     def __init__(self, controller):
@@ -152,6 +162,14 @@ class LangGraphOrchestrationRunner:
             "recovery_entry_risk": None,
             "recovery_last_risk": None,
             "recovery_just_exited": False,
+            "current_strategy_summary": "Prioritize safe progress toward current checkpoint; adapt approach when blocked.",
+            "last_failure_reason": None,
+            "recent_failed_approach_pattern": None,
+            "recent_recovery_hypothesis": None,
+            "blocked_workers_by_subgoal": {},
+            "subgoal_attempt_history": {},
+            "latest_failure_analysis": None,
+            "pending_strategy_update": None,
         }
         self._emit_agent_message(
             f"[AGENT] subgoal queue: {' -> '.join(list(decomposed)) if decomposed else '(empty)'}"
@@ -167,6 +185,8 @@ class LangGraphOrchestrationRunner:
         builder.add_node("plan_step", self._node_plan_step)
         builder.add_node("execute_step", self._node_execute_step)
         builder.add_node("evaluate_outcome", self._node_evaluate_outcome)
+        builder.add_node("analyze_failure_or_progress", self._node_analyze_failure_or_progress)
+        builder.add_node("update_strategy_memory", self._node_update_strategy_memory)
 
         builder.add_edge(START, "load_runtime_state")
         builder.add_edge("load_runtime_state", "refresh_progress")
@@ -178,13 +198,15 @@ class LangGraphOrchestrationRunner:
             "evaluate_outcome",
             self._route_from_evaluation,
             {
-                "continue": "load_runtime_state",
-                "retry_plan": "load_runtime_state",
-                "reselect_subgoal": "load_runtime_state",
+                "continue": "analyze_failure_or_progress",
+                "retry_plan": "analyze_failure_or_progress",
+                "reselect_subgoal": "analyze_failure_or_progress",
                 "end": END,
                 "abort": END,
             },
         )
+        builder.add_edge("analyze_failure_or_progress", "update_strategy_memory")
+        builder.add_edge("update_strategy_memory", "load_runtime_state")
         return builder.compile(checkpointer=self.checkpointer)
 
     def _node_load_runtime_state(self, state: AgentState) -> AgentState:
@@ -264,14 +286,8 @@ class LangGraphOrchestrationRunner:
             waiting_on_completion = False
             waiting_checkpoint_id = None
             monitor_status = "idle"
-        if (
-            state.get("route_decision") == "reselect_subgoal"
-            and current_subgoal in remaining
-            and len(remaining) > 1
-            and int(state.get("no_progress_steps", 0)) >= 2
-        ):
-            idx = remaining.index(current_subgoal)
-            current_subgoal = remaining[(idx + 1) % len(remaining)]
+        if state.get("route_decision") == "reselect_subgoal":
+            current_subgoal = remaining[0] if remaining else None
             subgoal_phase = "APPROACH_SUBGOAL"
             subgoal_reached = False
             arrived_but_not_completed = False
@@ -385,6 +401,12 @@ class LangGraphOrchestrationRunner:
             recent_history=list(state.get("execution_history", [])),
             recovery_mode=recovery_mode,
             recovery_reason=(None if state.get("recovery_reason") is None else str(state.get("recovery_reason"))),
+            strategy_summary=str(state.get("current_strategy_summary", "")),
+            last_failure_reason=(None if state.get("last_failure_reason") is None else str(state.get("last_failure_reason"))),
+            failed_approach_pattern=(None if state.get("recent_failed_approach_pattern") is None else str(state.get("recent_failed_approach_pattern"))),
+            recovery_hypothesis=(None if state.get("recent_recovery_hypothesis") is None else str(state.get("recent_recovery_hypothesis"))),
+            blocked_workers_for_subgoal=list((state.get("blocked_workers_by_subgoal", {}) or {}).get(str(subgoal).upper(), [])),
+            subgoal_attempts=list((state.get("subgoal_attempt_history", {}) or {}).get(str(subgoal).upper(), []))[-6:],
         )
         if not plan:
             plan = f'go_checkpoint("{subgoal}");'
@@ -949,6 +971,106 @@ class LangGraphOrchestrationRunner:
         )
         return route  # type: ignore[return-value]
 
+    def _node_analyze_failure_or_progress(self, state: AgentState) -> AgentState:
+        result = dict(state.get("last_action_result") or {})
+        last_plan = str(state.get("last_plan_text", "")).strip()
+        subgoal = None if state.get("current_subgoal_id") is None else str(state.get("current_subgoal_id")).upper()
+        route_decision = str(state.get("route_decision", "continue"))
+        analysis = self.controller.planner.reflect_langgraph_strategy(
+            task_description=str(state.get("user_task", "")),
+            current_subgoal=subgoal,
+            route_decision=route_decision,
+            last_action=last_plan,
+            last_result=result,
+            current_collision_risk=float(state.get("current_collision_risk", 0.0)),
+            per_worker_collision_risks=dict(state.get("per_worker_collision_risks", {})),
+            dominant_risky_worker=(None if state.get("dominant_risky_worker") is None else str(state.get("dominant_risky_worker"))),
+            worker_states_summary=list(state.get("worker_states", [])),
+            remaining_checkpoints=list(state.get("remaining_checkpoint_ids", [])),
+            subgoal_queue=list(state.get("subgoal_queue", [])),
+            current_strategy_summary=str(state.get("current_strategy_summary", "")),
+            last_failure_reason=(None if state.get("last_failure_reason") is None else str(state.get("last_failure_reason"))),
+            recent_failed_approach_pattern=(None if state.get("recent_failed_approach_pattern") is None else str(state.get("recent_failed_approach_pattern"))),
+            recent_recovery_hypothesis=(None if state.get("recent_recovery_hypothesis") is None else str(state.get("recent_recovery_hypothesis"))),
+            blocked_workers_by_subgoal=dict(state.get("blocked_workers_by_subgoal", {})),
+            subgoal_attempt_history=dict(state.get("subgoal_attempt_history", {})),
+            recent_history=list(state.get("execution_history", []))[-6:],
+        )
+        if analysis.get("failure_reason"):
+            self._emit_agent_message(
+                f"[ANALYZE] subgoal={subgoal or 'none'} failure_reason={analysis.get('failure_reason')} "
+                f"new_strategy={analysis.get('strategy_summary')}"
+            )
+        return {"pending_strategy_update": analysis}
+
+    def _node_update_strategy_memory(self, state: AgentState) -> AgentState:
+        pending = dict(state.get("pending_strategy_update") or {})
+        route_decision = str(state.get("route_decision", "continue"))
+        subgoal = None if state.get("current_subgoal_id") is None else str(state.get("current_subgoal_id")).upper()
+        remaining = [str(v).upper() for v in list(state.get("remaining_checkpoint_ids", []))]
+        queue = [str(v).upper() for v in list(state.get("subgoal_queue", []))]
+        blocked_workers = dict(state.get("blocked_workers_by_subgoal", {}))
+        attempt_history = dict(state.get("subgoal_attempt_history", {}))
+
+        action_signature = self._action_signature(str(state.get("last_action_text", "")))
+        if subgoal is not None and action_signature:
+            history_items = [str(v) for v in list(attempt_history.get(subgoal, []))]
+            if action_signature not in history_items:
+                history_items.append(action_signature)
+            attempt_history[subgoal] = history_items[-8:]
+
+        dominant_worker = state.get("dominant_risky_worker")
+        if subgoal is not None and route_decision in {"retry_plan", "reselect_subgoal"} and dominant_worker is not None:
+            workers = [str(v) for v in list(blocked_workers.get(subgoal, []))]
+            wid = str(dominant_worker)
+            if wid and wid not in workers and wid != "None":
+                workers.append(wid)
+            blocked_workers[subgoal] = workers[-4:]
+
+        failure_reason = pending.get("failure_reason")
+        failed_pattern = pending.get("failed_approach_pattern") or (action_signature if route_decision in {"retry_plan", "reselect_subgoal"} else None)
+        recovery_hypothesis = pending.get("recovery_hypothesis")
+        strategy_summary = pending.get("strategy_summary") or state.get("current_strategy_summary", "")
+
+        new_queue = list(queue) if queue else list(remaining)
+        raw_reordered = pending.get("reprioritized_subgoals")
+        if isinstance(raw_reordered, list):
+            reordered = [str(v).upper() for v in raw_reordered if str(v).upper() in remaining]
+            carry = [cid for cid in remaining if cid not in reordered]
+            if reordered:
+                new_queue = reordered + carry
+
+        target_subgoal = pending.get("next_subgoal")
+        if isinstance(target_subgoal, str):
+            target_subgoal = str(target_subgoal).upper()
+            if target_subgoal in remaining:
+                new_queue = [target_subgoal] + [cid for cid in new_queue if cid != target_subgoal]
+
+        next_route = str(pending.get("next_route_decision", route_decision))
+        if next_route not in {"continue", "retry_plan", "reselect_subgoal", "end", "abort"}:
+            next_route = route_decision
+        if next_route == "reselect_subgoal" and len(new_queue) > 1:
+            next_subgoal = new_queue[0]
+            if subgoal == next_subgoal:
+                new_queue = new_queue[1:] + [next_subgoal]
+            subgoal = None
+        elif next_route == "retry_plan":
+            next_route = "continue"
+
+        return {
+            "current_strategy_summary": str(strategy_summary),
+            "last_failure_reason": (None if failure_reason is None else str(failure_reason)),
+            "recent_failed_approach_pattern": (None if failed_pattern is None else str(failed_pattern)),
+            "recent_recovery_hypothesis": (None if recovery_hypothesis is None else str(recovery_hypothesis)),
+            "blocked_workers_by_subgoal": blocked_workers,
+            "subgoal_attempt_history": attempt_history,
+            "latest_failure_analysis": pending,
+            "pending_strategy_update": None,
+            "subgoal_queue": new_queue,
+            "current_subgoal_id": subgoal,
+            "route_decision": next_route,
+        }
+
     def _emit_agent_message(self, message: str):
         if hasattr(self.controller, "append_message"):
             self.controller.append_message(message)
@@ -963,3 +1085,13 @@ class LangGraphOrchestrationRunner:
         if end <= start:
             return None
         return text[start:end].strip().upper()
+
+    def _action_signature(self, action_text: str) -> str:
+        text = str(action_text or "").strip().lower()
+        if not text:
+            return ""
+        if text.startswith("go_checkpoint("):
+            return "go_checkpoint"
+        if "(" in text:
+            return text.split("(", 1)[0].strip()
+        return text[:24]
