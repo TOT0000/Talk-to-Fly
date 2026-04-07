@@ -285,7 +285,7 @@ class LLMController():
         checkpoint_id: str,
         *,
         timeout_seconds: float = 8.0,
-        risk_abort_threshold: float = COLLISION_PROBABILITY_REPLAN_THRESHOLD,
+        risk_abort_threshold: float | None = COLLISION_PROBABILITY_REPLAN_THRESHOLD,
     ) -> dict:
         checkpoint_key = str(checkpoint_id or "").upper()
         deadline = time.time() + max(0.2, float(timeout_seconds))
@@ -324,7 +324,7 @@ class LLMController():
                 progress = snapshot.get("benchmark_progress") if isinstance(snapshot, dict) else {}
                 safety = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
                 risk = None if safety is None else float(getattr(safety, "current_collision_probability", 0.0))
-                if risk is not None and risk >= float(risk_abort_threshold):
+                if (risk_abort_threshold is not None) and risk is not None and risk >= float(risk_abort_threshold):
                     return {
                         "event_type": "risk_abort",
                         "checkpoint_id": checkpoint_key,

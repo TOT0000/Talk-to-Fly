@@ -101,6 +101,42 @@ class LLMPlanner():
             "Recent execution history: {recent_history}\n"
             "Return action statements only, no explanation."
         )
+        self.prompt_langgraph_mode_action = (
+            "You are TypeFly LangGraph Mode+Action Decision Agent.\n"
+            "Decide BOTH the mode and the next action for this single step.\n"
+            "Output JSON only with keys: mode, reason, strategy_summary, action, next_subgoal.\n"
+            "mode must be one of: approach, recovery, replan, skip_current_subgoal.\n"
+            "Rules:\n"
+            "- Decide mode from latest runtime state; do not mechanically repeat previous mode.\n"
+            "- recovery is temporary risk reduction; after conditions improve, return to approach/go_checkpoint(current_subgoal).\n"
+            "- approach means direct task progress toward current_subgoal.\n"
+            "- skip_current_subgoal means temporary skip and choose another remaining checkpoint.\n"
+            "- Avoid repeating known failed approach patterns.\n"
+            "- action must be 1 short minispec statement ending with ';'.\n"
+            "Task: {task_description}\n"
+            "Current mode: {current_mode}\n"
+            "Current subgoal: {current_subgoal}\n"
+            "Remaining checkpoints: {remaining_checkpoints}\n"
+            "Current collision risk: {current_collision_risk}\n"
+            "Historical max collision risk: {historical_max_collision_risk}\n"
+            "Dominant risky worker: {dominant_risky_worker}\n"
+            "Per-worker collision risks: {per_worker_collision_risks}\n"
+            "Worker states summary: {worker_states_summary}\n"
+            "Last action: {last_action}\n"
+            "Last result: {last_result}\n"
+            "Recent failure reason: {recent_failure_reason}\n"
+            "Last wait/monitor event: {last_wait_event}\n"
+            "Last risk event: {last_risk_event}\n"
+            "Strategy summary: {strategy_summary}\n"
+            "Recent failed approach pattern: {failed_approach_pattern}\n"
+            "Recent recovery hypothesis: {recovery_hypothesis}\n"
+            "Blocked workers for current subgoal: {blocked_workers_for_subgoal}\n"
+            "Attempt history for current subgoal: {subgoal_attempts}\n"
+            "Stall count: {stall_count}\n"
+            "Repeated action count: {repeated_action_count}\n"
+            "Recent execution history: {recent_history}\n"
+            "Output JSON only."
+        )
         self.prompt_langgraph_reflection = (
             "You are TypeFly LangGraph Strategy Reflector.\n"
             "Analyze last step outcome and decide strategy-level correction.\n"
@@ -561,6 +597,79 @@ class LLMPlanner():
             "next_route_decision": next_route,
             "next_subgoal": parsed.get("next_subgoal"),
             "reprioritized_subgoals": parsed.get("reprioritized_subgoals", []),
+        }
+
+    def decide_langgraph_mode_and_action(
+        self,
+        task_description: str,
+        current_subgoal: str | None,
+        remaining_checkpoints: list[str],
+        current_collision_risk: float,
+        historical_max_collision_risk: float,
+        per_worker_collision_risks: dict[str, float],
+        dominant_risky_worker: str | None,
+        worker_states_summary: list[dict],
+        last_action: str,
+        last_result: str,
+        stall_count: int,
+        repeated_action_count: int,
+        recent_history: list[dict],
+        recovery_mode: bool = False,
+        recovery_reason: str | None = None,
+        strategy_summary: str = "",
+        last_failure_reason: str | None = None,
+        failed_approach_pattern: str | None = None,
+        recovery_hypothesis: str | None = None,
+        blocked_workers_for_subgoal: list[str] | None = None,
+        subgoal_attempts: list[str] | None = None,
+        current_mode: str = "approach",
+        last_wait_event: dict | None = None,
+        last_risk_event: dict | None = None,
+    ) -> dict:
+        prompt = self.prompt_langgraph_mode_action.format(
+            task_description=str(task_description or ""),
+            current_mode=str(current_mode or "approach"),
+            current_subgoal=str(current_subgoal or "None"),
+            remaining_checkpoints=[str(v) for v in list(remaining_checkpoints or [])],
+            current_collision_risk=f"{float(current_collision_risk):.6f}",
+            historical_max_collision_risk=f"{float(historical_max_collision_risk):.6f}",
+            per_worker_collision_risks=str(dict(per_worker_collision_risks or {})),
+            dominant_risky_worker=str(dominant_risky_worker or "n/a"),
+            worker_states_summary=str(list(worker_states_summary or [])[:3]),
+            last_action=str(last_action or ""),
+            last_result=str(last_result or ""),
+            recent_failure_reason=str(last_failure_reason or "none"),
+            last_wait_event=str(dict(last_wait_event or {})),
+            last_risk_event=str(dict(last_risk_event or {})),
+            strategy_summary=str(strategy_summary or ""),
+            failed_approach_pattern=str(failed_approach_pattern or "none"),
+            recovery_hypothesis=str(recovery_hypothesis or "none"),
+            blocked_workers_for_subgoal=str(list(blocked_workers_for_subgoal or [])),
+            subgoal_attempts=str(list(subgoal_attempts or [])),
+            stall_count=int(stall_count),
+            repeated_action_count=int(repeated_action_count),
+            recent_history=str(list(recent_history or [])[-4:]),
+        )
+        raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
+        parsed = self._safe_json_object(raw)
+        mode = str(parsed.get("mode", "approach")).strip().lower()
+        if mode not in {"approach", "recovery", "replan", "skip_current_subgoal"}:
+            mode = "approach"
+        action = self._sanitize_langgraph_action(str(parsed.get("action", "")))
+        if not action:
+            if mode == "skip_current_subgoal":
+                action = "delay(0.5);"
+            elif current_subgoal:
+                action = f'go_checkpoint("{str(current_subgoal).upper()}");'
+            else:
+                action = "delay(1.0);"
+        next_subgoal = parsed.get("next_subgoal")
+        return {
+            "mode": mode,
+            "reason": str(parsed.get("reason", "")).strip()[:180],
+            "strategy_summary": str(parsed.get("strategy_summary", strategy_summary or "")).strip()[:240],
+            "action": action,
+            "next_subgoal": next_subgoal,
         }
 
     def _safe_json_object(self, raw_text: str) -> dict:
