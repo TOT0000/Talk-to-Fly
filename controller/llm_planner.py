@@ -1,4 +1,4 @@
-import os, ast, re
+import os, ast, re, json
 from typing import Optional
 
 from .safety_context import SafetyContext
@@ -73,6 +73,7 @@ class LLMPlanner():
             "- If risk is still high after re-observation, choose another conservative recovery step and re-observe again.\n"
             "- Recovery goal is to leave danger and then resume current_subgoal, not endless wandering.\n"
             "- If stalled/no-progress, switch to a different conservative strategy.\n"
+            "- Use strategy memory to avoid repeating known failed approach patterns for this subgoal.\n"
             "- Avoid long turn/move loops without objective progress.\n"
             "- reached checkpoint area is NOT completed checkpoint.\n"
             "- Completion is determined only by official completion_state/progress.\n"
@@ -86,6 +87,12 @@ class LLMPlanner():
             "Per-worker collision risks: {per_worker_collision_risks}\n"
             "Recovery mode: {recovery_mode}\n"
             "Recovery reason: {recovery_reason}\n"
+            "Strategy summary: {strategy_summary}\n"
+            "Last failure reason: {last_failure_reason}\n"
+            "Recent failed approach pattern: {failed_approach_pattern}\n"
+            "Recent recovery hypothesis: {recovery_hypothesis}\n"
+            "Blocked workers for current subgoal: {blocked_workers_for_subgoal}\n"
+            "Attempt history for current subgoal: {subgoal_attempts}\n"
             "Worker states summary: {worker_states_summary}\n"
             "Last action: {last_action}\n"
             "Last result: {last_result}\n"
@@ -93,6 +100,42 @@ class LLMPlanner():
             "Repeated action count: {repeated_action_count}\n"
             "Recent execution history: {recent_history}\n"
             "Return action statements only, no explanation."
+        )
+        self.prompt_langgraph_reflection = (
+            "You are TypeFly LangGraph Strategy Reflector.\n"
+            "Analyze last step outcome and decide strategy-level correction.\n"
+            "Return JSON only with keys:\n"
+            "- failure_reason: short string\n"
+            "- failed_approach_pattern: short string for what should NOT be repeated now\n"
+            "- recovery_hypothesis: short string describing safer next tactic\n"
+            "- strategy_summary: short string for ongoing strategy memory\n"
+            "- next_route_decision: one of [continue, retry_plan, reselect_subgoal]\n"
+            "- next_subgoal: checkpoint id or null\n"
+            "- reprioritized_subgoals: ordered checkpoint list or []\n"
+            "Rules:\n"
+            "- If last step failed or risk_abort happened, explain why and avoid repeating same approach.\n"
+            "- You may reprioritize checkpoints when current subgoal is temporarily high-risk or blocked.\n"
+            "- Reprioritization must be temporary and mission-oriented.\n"
+            "- Keep every field concise.\n"
+            "Task: {task_description}\n"
+            "Current subgoal: {current_subgoal}\n"
+            "Route decision from evaluator: {route_decision}\n"
+            "Last action: {last_action}\n"
+            "Last result: {last_result}\n"
+            "Current collision risk: {current_collision_risk}\n"
+            "Dominant risky worker: {dominant_risky_worker}\n"
+            "Per-worker collision risks: {per_worker_collision_risks}\n"
+            "Worker states summary: {worker_states_summary}\n"
+            "Remaining checkpoints: {remaining_checkpoints}\n"
+            "Current queue: {subgoal_queue}\n"
+            "Current strategy summary: {current_strategy_summary}\n"
+            "Last failure reason memory: {last_failure_reason}\n"
+            "Recent failed approach memory: {recent_failed_approach_pattern}\n"
+            "Recent recovery hypothesis memory: {recent_recovery_hypothesis}\n"
+            "Blocked workers by subgoal: {blocked_workers_by_subgoal}\n"
+            "Subgoal attempt history: {subgoal_attempt_history}\n"
+            "Recent execution history: {recent_history}\n"
+            "Output JSON only."
         )
 
     def set_model(self, model_name):
@@ -422,6 +465,12 @@ class LLMPlanner():
         recent_history: list[dict],
         recovery_mode: bool = False,
         recovery_reason: str | None = None,
+        strategy_summary: str = "",
+        last_failure_reason: str | None = None,
+        failed_approach_pattern: str | None = None,
+        recovery_hypothesis: str | None = None,
+        blocked_workers_for_subgoal: list[str] | None = None,
+        subgoal_attempts: list[str] | None = None,
     ) -> str:
         prompt = self.prompt_langgraph_step.format(
             task_description=str(task_description or ""),
@@ -433,6 +482,12 @@ class LLMPlanner():
             dominant_risky_worker=str(dominant_risky_worker or "n/a"),
             recovery_mode=str(bool(recovery_mode)),
             recovery_reason=str(recovery_reason or "none"),
+            strategy_summary=str(strategy_summary or ""),
+            last_failure_reason=str(last_failure_reason or "none"),
+            failed_approach_pattern=str(failed_approach_pattern or "none"),
+            recovery_hypothesis=str(recovery_hypothesis or "none"),
+            blocked_workers_for_subgoal=str(list(blocked_workers_for_subgoal or [])),
+            subgoal_attempts=str(list(subgoal_attempts or [])),
             worker_states_summary=str(list(worker_states_summary or [])[:3]),
             last_action=str(last_action or ""),
             last_result=str(last_result or ""),
@@ -447,6 +502,98 @@ class LLMPlanner():
         if current_subgoal:
             return f'go_checkpoint("{str(current_subgoal).upper()}");'
         return "delay(1.0);"
+
+    def reflect_langgraph_strategy(
+        self,
+        task_description: str,
+        current_subgoal: str | None,
+        route_decision: str,
+        last_action: str,
+        last_result: dict,
+        current_collision_risk: float,
+        per_worker_collision_risks: dict[str, float],
+        dominant_risky_worker: str | None,
+        worker_states_summary: list[dict],
+        remaining_checkpoints: list[str],
+        subgoal_queue: list[str],
+        current_strategy_summary: str,
+        last_failure_reason: str | None,
+        recent_failed_approach_pattern: str | None,
+        recent_recovery_hypothesis: str | None,
+        blocked_workers_by_subgoal: dict[str, list[str]],
+        subgoal_attempt_history: dict[str, list[str]],
+        recent_history: list[dict],
+    ) -> dict:
+        prompt = self.prompt_langgraph_reflection.format(
+            task_description=str(task_description or ""),
+            current_subgoal=str(current_subgoal or "None"),
+            route_decision=str(route_decision or "continue"),
+            last_action=str(last_action or ""),
+            last_result=str(last_result or {}),
+            current_collision_risk=f"{float(current_collision_risk):.6f}",
+            dominant_risky_worker=str(dominant_risky_worker or "n/a"),
+            per_worker_collision_risks=str(dict(per_worker_collision_risks or {})),
+            worker_states_summary=str(list(worker_states_summary or [])[:3]),
+            remaining_checkpoints=str([str(v).upper() for v in list(remaining_checkpoints or [])]),
+            subgoal_queue=str([str(v).upper() for v in list(subgoal_queue or [])]),
+            current_strategy_summary=str(current_strategy_summary or ""),
+            last_failure_reason=str(last_failure_reason or "none"),
+            recent_failed_approach_pattern=str(recent_failed_approach_pattern or "none"),
+            recent_recovery_hypothesis=str(recent_recovery_hypothesis or "none"),
+            blocked_workers_by_subgoal=str(dict(blocked_workers_by_subgoal or {})),
+            subgoal_attempt_history=str(dict(subgoal_attempt_history or {})),
+            recent_history=str(list(recent_history or [])[-6:]),
+        )
+        raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
+        parsed = self._safe_json_object(raw)
+
+        fallback_failure = ""
+        if not bool((last_result or {}).get("ok", True)):
+            fallback_failure = str((last_result or {}).get("message", "step_failed"))[:120]
+        next_route = str(parsed.get("next_route_decision", route_decision or "continue"))
+        if next_route not in {"continue", "retry_plan", "reselect_subgoal"}:
+            next_route = str(route_decision or "continue")
+        return {
+            "failure_reason": str(parsed.get("failure_reason", fallback_failure)).strip()[:200],
+            "failed_approach_pattern": str(parsed.get("failed_approach_pattern", "")).strip()[:120],
+            "recovery_hypothesis": str(parsed.get("recovery_hypothesis", "")).strip()[:160],
+            "strategy_summary": str(parsed.get("strategy_summary", current_strategy_summary or "")).strip()[:240],
+            "next_route_decision": next_route,
+            "next_subgoal": parsed.get("next_subgoal"),
+            "reprioritized_subgoals": parsed.get("reprioritized_subgoals", []),
+        }
+
+    def _safe_json_object(self, raw_text: str) -> dict:
+        text = str(raw_text or "").strip()
+        if not text:
+            return {}
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
+        try:
+            obj = ast.literal_eval(text)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            try:
+                obj = json.loads(match.group(0))
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                pass
+            try:
+                obj = ast.literal_eval(match.group(0))
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                return {}
+        return {}
 
     def _sanitize_langgraph_action(self, raw_text: str) -> str:
         text = str(raw_text or "").strip().replace("\n", " ")
