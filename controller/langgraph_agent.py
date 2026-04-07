@@ -73,6 +73,7 @@ class AgentState(TypedDict, total=False):
     dwell_satisfied: bool
     waiting_on_checkpoint_completion: bool
     waiting_checkpoint_id: str | None
+    current_incomplete: bool
     last_progress_event: dict[str, Any] | None
     completion_monitor_status: str
     recovery_mode: bool
@@ -165,6 +166,7 @@ class LangGraphOrchestrationRunner:
             "dwell_satisfied": False,
             "waiting_on_checkpoint_completion": False,
             "waiting_checkpoint_id": None,
+            "current_incomplete": False,
             "last_progress_event": None,
             "completion_monitor_status": "idle",
             "recovery_mode": False,
@@ -271,63 +273,58 @@ class LangGraphOrchestrationRunner:
         }
 
     def _node_refresh_progress(self, state: AgentState) -> AgentState:
-        snapshot = state.get("latest_snapshot") or {}
         completed = set(str(v).upper() for v in state.get("completed_checkpoint_ids", []))
-        progress = snapshot.get("benchmark_progress") if isinstance(snapshot, dict) else None
-        if isinstance(progress, dict):
-            completed.update(str(v).upper() for v in progress.get("completed", []))
         active_ids = [str(v).upper() for v in state.get("active_checkpoint_ids", [])]
-        queue_order = [str(v).upper() for v in state.get("subgoal_queue", [])]
-        if not queue_order:
-            queue_order = [str(v).upper() for v in state.get("remaining_checkpoint_ids", [])]
-        if not queue_order:
-            queue_order = list(active_ids)
-        remaining = [cid for cid in queue_order if cid in active_ids and cid not in completed]
+        prior_queue = [str(v).upper() for v in state.get("subgoal_queue", [])]
+        remaining_active = [cid for cid in active_ids if cid not in completed]
+        queue = [cid for cid in prior_queue if cid in remaining_active]
+        for cid in remaining_active:
+            if cid not in queue:
+                queue.append(cid)
+        if not queue:
+            queue = list(remaining_active)
         return {
             "completed_checkpoint_ids": sorted(completed),
-            "remaining_checkpoint_ids": remaining,
-            "subgoal_queue": list(remaining),
+            "remaining_checkpoint_ids": list(remaining_active),
+            "subgoal_queue": queue,
         }
 
     def _node_select_subgoal(self, state: AgentState) -> AgentState:
-        remaining = list(state.get("remaining_checkpoint_ids", []))
+        remaining = [str(v).upper() for v in list(state.get("remaining_checkpoint_ids", []))]
+        queue = [str(v).upper() for v in list(state.get("subgoal_queue", [])) if str(v).upper() in remaining]
+        completed = set(str(v).upper() for v in state.get("completed_checkpoint_ids", []))
+
+        selected_from_agent = None
+        last_decision = dict(state.get("last_decision_payload") or {})
+        decision_mode = str(last_decision.get("mode", "")).strip().lower()
+        next_subgoal = last_decision.get("next_subgoal")
+        if isinstance(next_subgoal, str):
+            candidate = next_subgoal.strip().upper()
+            if candidate in remaining and candidate not in completed:
+                selected_from_agent = candidate
+
         current_subgoal = state.get("current_subgoal_id")
-        completed = set(state.get("completed_checkpoint_ids", []))
-        subgoal_phase = str(state.get("subgoal_phase", "APPROACH_SUBGOAL"))
-        subgoal_reached = bool(state.get("subgoal_reached", False))
-        arrived_but_not_completed = bool(state.get("arrived_but_not_completed", False))
-        arrived_wait_cycles = int(state.get("arrived_wait_cycles", 0))
-        waiting_on_completion = bool(state.get("waiting_on_checkpoint_completion", False))
-        waiting_checkpoint_id = state.get("waiting_checkpoint_id")
-        monitor_status = str(state.get("completion_monitor_status", "idle"))
-        if current_subgoal is None or current_subgoal in completed:
-            current_subgoal = remaining[0] if remaining else None
-            subgoal_phase = "APPROACH_SUBGOAL"
-            subgoal_reached = False
-            arrived_but_not_completed = False
-            arrived_wait_cycles = 0
-            waiting_on_completion = False
-            waiting_checkpoint_id = None
-            monitor_status = "idle"
-        if state.get("route_decision") == "reselect_subgoal":
-            current_subgoal = remaining[0] if remaining else None
-            subgoal_phase = "APPROACH_SUBGOAL"
-            subgoal_reached = False
-            arrived_but_not_completed = False
-            arrived_wait_cycles = 0
-            waiting_on_completion = False
-            waiting_checkpoint_id = None
-            monitor_status = "idle"
+        if isinstance(current_subgoal, str):
+            current_subgoal = current_subgoal.upper()
+        if current_subgoal in completed or current_subgoal not in remaining:
+            current_subgoal = None
+
+        current_incomplete = bool(state.get("current_incomplete", False))
+        explicit_switch = bool(selected_from_agent and decision_mode in {"skip_current_subgoal", "replan"})
+        if current_incomplete and current_subgoal is not None and (not explicit_switch):
+            selected = current_subgoal
+        else:
+            selected = selected_from_agent or current_subgoal
+        if selected is None:
+            selected = queue[0] if queue else (remaining[0] if remaining else None)
+
+        if isinstance(selected, str):
+            queue = [selected] + [cid for cid in queue if cid != selected]
+
         return {
             "current_subgoal_type": "checkpoint",
-            "current_subgoal_id": current_subgoal,
-            "subgoal_phase": subgoal_phase,
-            "subgoal_reached": subgoal_reached,
-            "arrived_but_not_completed": arrived_but_not_completed,
-            "arrived_wait_cycles": arrived_wait_cycles,
-            "waiting_on_checkpoint_completion": waiting_on_completion,
-            "waiting_checkpoint_id": waiting_checkpoint_id,
-            "completion_monitor_status": monitor_status,
+            "current_subgoal_id": selected,
+            "subgoal_queue": queue,
         }
 
     def _node_plan_step(self, state: AgentState) -> AgentState:
@@ -350,7 +347,15 @@ class LangGraphOrchestrationRunner:
         if subgoal is None and remaining:
             subgoal = remaining[0]
         if subgoal is None:
-            return {"last_plan_text": "", "last_action_text": "", "route_decision": "end"}
+            all_required_completed = not [cid for cid in state.get("active_checkpoint_ids", []) if str(cid).upper() not in completed]
+            if all_required_completed and (not bool(state.get("current_incomplete", False))):
+                return {"last_plan_text": "", "last_action_text": "", "route_decision": "end"}
+            return {
+                "last_plan_text": "",
+                "last_action_text": "",
+                "route_decision": "continue",
+                "last_action_result": {"ok": False, "recoverable": True, "message": "unresolved_decision:no_current_subgoal"},
+            }
         subgoal_phase = str(state.get("subgoal_phase", "APPROACH_SUBGOAL"))
         # In agent mode, completion/verify handling is observation-driven and delegated to LLM.
         if False and subgoal_phase in {"COMPLETE_SUBGOAL", "VERIFY_COMPLETE"}:
@@ -448,13 +453,7 @@ class LangGraphOrchestrationRunner:
         decision_trace = dict(decision.get("trace") or {})
         trace_events = list(decision_trace.get("events") or [])
         if not plan:
-            if mode == "skip_current_subgoal":
-                plan = "delay(0.5);"
-            elif mode == "replan":
-                plan = "log(\"request_replan\");"
-            else:
-                plan = "log(\"empty_action_from_decision\");"
-            trace_events.append("planner_empty_action_fallback")
+            trace_events.append("unresolved_decision")
         action_target = self._extract_checkpoint_target(plan)
         if action_target is not None:
             allow_switch = bool(
@@ -518,6 +517,14 @@ class LangGraphOrchestrationRunner:
 
     def _node_execute_step(self, state: AgentState) -> AgentState:
         if str(state.get("route_decision", "")) == "end":
+            completed = set(str(v).upper() for v in state.get("completed_checkpoint_ids", []))
+            active = [str(v).upper() for v in state.get("active_checkpoint_ids", [])]
+            all_required_completed = all(cid in completed for cid in active)
+            if not all_required_completed:
+                return {
+                    "last_action_result": {"ok": False, "recoverable": False, "message": "invalid_terminal_guard:not_all_completed"},
+                    "last_error": "invalid_terminal_guard:not_all_completed",
+                }
             return {
                 "last_action_result": {"ok": True, "recoverable": False, "message": "terminal_noop"},
                 "last_error": None,
@@ -572,21 +579,9 @@ class LangGraphOrchestrationRunner:
 
     def _node_evaluate_outcome(self, state: AgentState) -> AgentState:
         step_count = int(state.get("agent_step_count", 0)) + 1
-        replan_count = int(state.get("replan_count", 0))
         result = dict(state.get("last_action_result") or {})
         progress_event = result.get("event") if isinstance(result.get("event"), dict) else None
-        last_wait_event = None if progress_event is None else dict(progress_event)
-        last_risk_event = dict(state.get("last_risk_event") or {})
-        if isinstance(progress_event, dict):
-            risk_payload = progress_event.get("risk")
-            if risk_payload is not None or str(progress_event.get("event_type", "")) in {"risk_abort", "waiting_timeout"}:
-                last_risk_event = {
-                    "event_type": str(progress_event.get("event_type", "")),
-                    "reason": progress_event.get("reason"),
-                    "risk": risk_payload,
-                    "checkpoint_id": progress_event.get("checkpoint_id"),
-                    "ts": progress_event.get("timestamp", time.time()),
-                }
+
         history = list(state.get("execution_history", []))
         history.append(
             {
@@ -599,454 +594,106 @@ class LangGraphOrchestrationRunner:
                 "ts": time.time(),
             }
         )
-        if not bool(result.get("ok", False)):
-            replan_count += 1
-        if progress_event is not None:
-            event_type = str(progress_event.get("event_type", "unknown"))
-            checkpoint = str(progress_event.get("checkpoint_id") or state.get("current_subgoal_id") or "n/a").upper()
-            dwell = float(progress_event.get("dwell_seconds", 0.0) or 0.0)
-            required = float(progress_event.get("required_dwell_seconds", 0.0) or 0.0)
-            if event_type in {"dwell_started", "entered_checkpoint_area"}:
-                self._emit_agent_message(f"[EVENT] dwell in progress: {checkpoint} ({dwell:.1f} / {required:.1f} s)")
-            elif event_type == "dwell_progress":
-                print_debug(
-                    f"[EVENT] dwell progress: {checkpoint} ({dwell:.1f} / {required:.1f} s)",
-                    env_var="TYPEFLY_VERBOSE_DEBUG",
-                )
-            elif event_type == "dwell_satisfied":
-                self._emit_agent_message(f"[EVENT] dwell satisfied: {checkpoint}")
-            elif event_type == "checkpoint_completed":
-                self._emit_agent_message(f"[EVENT] checkpoint completed: {checkpoint}")
-            elif event_type == "left_checkpoint_area":
-                self._emit_agent_message(f"[EVENT] left checkpoint area before completion: {checkpoint}")
-            elif event_type == "risk_abort":
-                self._emit_agent_message(f"[EVENT] risk too high while waiting: {checkpoint} ({progress_event.get('reason')})")
-            elif event_type == "waiting_timeout":
-                self._emit_agent_message(f"[EVENT] waiting timeout: {checkpoint} ({progress_event.get('reason')})")
-            else:
-                self._emit_agent_message(f"[EVENT] {event_type}: {checkpoint}")
-        else:
-            self._emit_agent_message(
-                f"[RESULT] {'ok' if bool(result.get('ok', False)) else 'failed'}: {str(result.get('message', ''))[:120]}"
-            )
 
-        max_steps = int(state.get("max_agent_steps", 64))
-        max_replans = int(state.get("max_replan_attempts", 8))
-        if step_count >= max_steps:
-            self._emit_agent_message(
-                f"[EVENT] soft_limit_reached:max_agent_steps({max_steps}) -> continue_with_agent_control"
-            )
-        if replan_count > max_replans:
-            self._emit_agent_message(
-                f"[EVENT] soft_limit_reached:max_replan_attempts({max_replans}) -> continue_with_agent_control"
-            )
-
-        remaining = list(state.get("remaining_checkpoint_ids", []))
-        subgoal = state.get("current_subgoal_id")
-        current_mode = str(state.get("current_mode", "approach"))
-        recovery_mode = bool(current_mode == "recovery")
-        recovery_reason = state.get("mode_reason") if recovery_mode else None
-        recovery_entry_risk = state.get("recovery_entry_risk")
-        recovery_last_risk = state.get("recovery_last_risk")
-        recovery_just_exited = False
         latest_snapshot = self.controller.get_live_ui_snapshot()
-        latest_safety = latest_snapshot.get("safety_context") if isinstance(latest_snapshot, dict) else None
-        latest_collision_risk = 0.0 if latest_safety is None else float(getattr(latest_safety, "current_collision_probability", 0.0))
-        recovery_last_risk = float(latest_collision_risk)
-        if recovery_mode:
-            action_text = str(state.get("last_action_text", "")).strip()
-            print_debug(
-                f"[RECOVERY] step summary: subgoal={state.get('current_subgoal_id')} "
-                f"action={action_text} latest_risk={latest_collision_risk:.3f} "
-                f"recovery_mode={recovery_mode}",
-                env_var="TYPEFLY_VERBOSE_DEBUG",
-            )
         progress = latest_snapshot.get("benchmark_progress") if isinstance(latest_snapshot, dict) else None
-        progress_current_target = None
-        progress_active_enter_ts = None
-        progress_distance_m = None
-        progress_tick_ts = None
-        completed_from_progress = set()
-        if isinstance(progress, dict):
-            progress_current_target = progress.get("current_target")
-            progress_active_enter_ts = progress.get("active_enter_ts")
-            progress_distance_m = progress.get("distance_to_target_m")
-            progress_tick_ts = progress.get("tick_ts")
-            completed_from_progress = set(str(v).upper() for v in progress.get("completed", []))
         completed = set(str(v).upper() for v in state.get("completed_checkpoint_ids", []))
-        completed.update(completed_from_progress)
-        remaining = [cid for cid in remaining if str(cid).upper() not in completed]
-        no_progress_steps = int(state.get("no_progress_steps", 0))
-        repeated_action_count = int(state.get("repeated_action_count", 0))
-        arrived_but_not_completed = bool(state.get("arrived_but_not_completed", False))
-        arrived_wait_cycles = int(state.get("arrived_wait_cycles", 0))
-        in_radius = False
-        dwell_seconds = 0.0
-        required_dwell_seconds = float(state.get("required_dwell_seconds", 2.0))
-        dwell_satisfied = False
         if isinstance(progress, dict):
-            in_radius = bool(progress.get("in_radius", False))
-            dwell_seconds = float(progress.get("dwell_seconds", 0.0) or 0.0)
-            required_dwell_seconds = float(progress.get("required_dwell_seconds", required_dwell_seconds) or required_dwell_seconds)
-            dwell_satisfied = bool(progress.get("dwell_satisfied", False))
-        waiting_hint = (
-            bool(state.get("waiting_on_checkpoint_completion", False))
-            and state.get("waiting_checkpoint_id") is not None
-            and str(state.get("waiting_checkpoint_id")).upper() == str(subgoal).upper()
-        )
-        subgoal_center = None
-        subgoal_dist = None
-        subgoal_in_radius_geom = False
-        if subgoal is not None:
-            cp = BENCHMARK_CHECKPOINTS_BY_ID.get(str(subgoal))
-            drone_gt = latest_snapshot.get("drone_gt") if isinstance(latest_snapshot, dict) else None
-            if cp is not None and drone_gt is not None:
-                subgoal_center = (float(cp.x), float(cp.y), float(cp.radius_m))
-                subgoal_dist = math.hypot(float(drone_gt[0]) - float(cp.x), float(drone_gt[1]) - float(cp.y))
-                subgoal_in_radius_geom = bool(subgoal_dist <= float(cp.radius_m))
-        target_aligned = (
-            subgoal is not None
-            and progress_current_target is not None
-            and str(progress_current_target).upper() == str(subgoal).upper()
-        )
-        if waiting_hint and subgoal is not None:
-            target_aligned = True
-        effective_in_radius = bool(in_radius if target_aligned else subgoal_in_radius_geom)
-        if (not target_aligned) and (not waiting_hint):
-            dwell_seconds = 0.0
-            dwell_satisfied = False
-        if subgoal is not None:
-            print_debug(
-                "[AGENT-CHECKPOINT-ALIGN] "
-                f"subgoal={str(subgoal).upper()} "
-                f"action_target={self._extract_checkpoint_target(str(state.get('last_plan_text', '')))} "
-                f"progress_target={None if progress_current_target is None else str(progress_current_target).upper()} "
-                f"in_radius_progress={in_radius} "
-                f"in_radius_geom={subgoal_in_radius_geom} "
-                f"effective_in_radius={effective_in_radius} "
-                f"dwell_seconds={dwell_seconds:.3f} "
-                f"required_dwell={required_dwell_seconds:.3f} "
-                f"dwell_satisfied={dwell_satisfied} "
-                f"completed={sorted(completed)} "
-                f"progress_active_enter_ts={progress_active_enter_ts} "
-                f"progress_distance_m={progress_distance_m} "
-                f"progress_tick_ts={progress_tick_ts} "
-                f"drone_gt={latest_snapshot.get('drone_gt') if isinstance(latest_snapshot, dict) else None} "
-                f"cp_center={subgoal_center} "
-                f"dist_to_subgoal={subgoal_dist}",
-                env_var="TYPEFLY_VERBOSE_DEBUG",
-            )
-        action_target = self._extract_checkpoint_target(str(state.get("last_plan_text", "")))
-        result_msg = str(result.get("message", "")).lower()
-        reached_area = (" reached:" in result_msg or " reached " in result_msg) and ("approached" not in result_msg)
-        if action_target and reached_area:
-            self._emit_agent_message(f"[RESULT] reached checkpoint area: {action_target} (not yet completed)")
-        phase = str(state.get("subgoal_phase", "APPROACH_SUBGOAL"))
-        reached_flag = bool(state.get("subgoal_reached", False))
+            progress_target = progress.get("current_target")
+            if progress_target is not None:
+                progress_target = str(progress_target).upper()
+                progress_completed = set(str(v).upper() for v in progress.get("completed", []))
+                if (
+                    progress_target in progress_completed
+                    and bool(progress.get("dwell_satisfied", False))
+                    and bool(progress.get("in_radius", False))
+                ):
+                    completed.add(progress_target)
+        if progress_event and progress_event.get("checkpoint_id") and str(progress_event.get("event_type")) == "checkpoint_completed":
+            completed.add(str(progress_event.get("checkpoint_id")).upper())
+
+        active_ids = [str(v).upper() for v in state.get("active_checkpoint_ids", [])]
+        required_remaining = [cid for cid in active_ids if cid not in completed]
+
+        subgoal = state.get("current_subgoal_id")
+        if isinstance(subgoal, str):
+            subgoal = subgoal.upper()
+
+        in_radius = bool((progress or {}).get("in_radius", False)) if isinstance(progress, dict) else False
+        dwell_seconds = float((progress or {}).get("dwell_seconds", 0.0) or 0.0) if isinstance(progress, dict) else 0.0
+        required_dwell_seconds = float((progress or {}).get("required_dwell_seconds", state.get("required_dwell_seconds", 2.0)) or state.get("required_dwell_seconds", 2.0))
+        dwell_satisfied = bool((progress or {}).get("dwell_satisfied", False)) if isinstance(progress, dict) else False
+        progress_target = (None if not isinstance(progress, dict) else progress.get("current_target"))
+        target_aligned = bool(subgoal is not None and progress_target is not None and str(progress_target).upper() == subgoal)
+        effective_in_radius = bool(in_radius if target_aligned else False)
+
+        arrived_but_not_completed = bool(state.get("arrived_but_not_completed", False))
         waiting_on_completion = bool(state.get("waiting_on_checkpoint_completion", False))
         waiting_checkpoint_id = state.get("waiting_checkpoint_id")
-        completion_monitor_status = str(state.get("completion_monitor_status", "idle"))
-        if action_target and reached_area and action_target == str(subgoal).upper():
-            phase = "COMPLETE_SUBGOAL"
-            reached_flag = True
-            arrived_but_not_completed = True
-            arrived_wait_cycles = 0
-            waiting_on_completion = True
-            waiting_checkpoint_id = str(subgoal).upper()
-            completion_monitor_status = "waiting_event"
+
         if progress_event is not None:
             event_type = str(progress_event.get("event_type", ""))
             event_cp = str(progress_event.get("checkpoint_id") or (subgoal or "")).upper()
-            event_in_radius = bool(progress_event.get("in_radius", False))
-            event_dwell_satisfied = bool(progress_event.get("dwell_satisfied", False))
-            if event_type in {"entered_checkpoint_area", "dwell_started", "dwell_progress"}:
-                phase = "COMPLETE_SUBGOAL"
-                reached_flag = True
-                arrived_but_not_completed = True
-                waiting_on_completion = True
-                waiting_checkpoint_id = event_cp
-                completion_monitor_status = "event_progress"
-            elif event_type == "dwell_satisfied":
-                phase = "VERIFY_COMPLETE"
-                reached_flag = True
-                arrived_but_not_completed = True
-                waiting_on_completion = True
-                waiting_checkpoint_id = event_cp
-                completion_monitor_status = "event_dwell_satisfied"
-            elif event_type == "checkpoint_completed":
-                completed.add(event_cp)
-                phase = "DONE"
-                waiting_on_completion = False
-                waiting_checkpoint_id = None
-                completion_monitor_status = "event_completed"
-            elif event_type == "left_checkpoint_area":
-                phase = "APPROACH_SUBGOAL"
-                reached_flag = False
-                arrived_but_not_completed = False
-                waiting_on_completion = False
-                waiting_checkpoint_id = None
-                completion_monitor_status = "event_left_area"
-            elif event_type in {"risk_abort", "waiting_timeout"}:
-                waiting_on_completion = False
-                waiting_checkpoint_id = None
-                completion_monitor_status = f"event_{event_type}"
-                replan_count += 1 if event_type == "risk_abort" else 0
             if event_type in {"entered_checkpoint_area", "dwell_started", "dwell_progress", "dwell_satisfied"}:
-                in_radius = event_in_radius
-                dwell_satisfied = event_dwell_satisfied
-                dwell_seconds = float(progress_event.get("dwell_seconds", dwell_seconds) or dwell_seconds)
-                required_dwell_seconds = float(progress_event.get("required_dwell_seconds", required_dwell_seconds) or required_dwell_seconds)
-        if subgoal is not None and str(subgoal).upper() in completed:
-            self._emit_agent_message(f"[RESULT] checkpoint completed: {str(subgoal).upper()}")
-            phase = "DONE"
-            subgoal = None
-            reached_flag = False
-            arrived_but_not_completed = False
-            arrived_wait_cycles = 0
-            waiting_on_completion = False
-            waiting_checkpoint_id = None
-            completion_monitor_status = "completed"
-            repeated_action_count = 0
-            no_progress_steps = 0
-        elif phase == "VERIFY_COMPLETE" and subgoal is not None and str(subgoal).upper() not in completed:
-            if arrived_but_not_completed and effective_in_radius and not dwell_satisfied:
-                phase = "COMPLETE_SUBGOAL"
-                waiting_on_completion = True
-                waiting_checkpoint_id = str(subgoal).upper()
-                completion_monitor_status = "waiting_event"
-                self._emit_agent_message(
-                    f"[RESULT] dwell in progress: {str(subgoal).upper()} ({dwell_seconds:.2f} / {required_dwell_seconds:.2f} s)"
-                )
-                no_progress_steps = 0
-                repeated_action_count = 0
-            elif arrived_but_not_completed and (not effective_in_radius):
-                phase = "APPROACH_SUBGOAL"
-                reached_flag = False
+                arrived_but_not_completed = event_cp not in completed
+                waiting_on_completion = event_cp not in completed
+                waiting_checkpoint_id = event_cp
+            elif event_type == "left_checkpoint_area":
                 arrived_but_not_completed = False
-                arrived_wait_cycles = 0
                 waiting_on_completion = False
                 waiting_checkpoint_id = None
-                completion_monitor_status = "left_area"
-                self._emit_agent_message(
-                    f"[RESULT] left checkpoint area before dwell completion: {str(subgoal).upper()}"
-                )
-            elif arrived_but_not_completed and dwell_satisfied:
-                phase = "VERIFY_COMPLETE"
-                waiting_on_completion = True
-                waiting_checkpoint_id = str(subgoal).upper()
-                completion_monitor_status = "waiting_completion_sync"
-                self._emit_agent_message(
-                    f"[RESULT] dwell satisfied for {str(subgoal).upper()}, waiting completion state sync."
-                )
-            else:
-                phase = "APPROACH_SUBGOAL"
-                reached_flag = False
+            elif event_type == "checkpoint_completed":
                 arrived_but_not_completed = False
-                arrived_wait_cycles = 0
                 waiting_on_completion = False
                 waiting_checkpoint_id = None
-                completion_monitor_status = "approach_reset"
-                self._emit_agent_message(
-                    f"[RESULT] verify incomplete for {str(subgoal).upper()}, re-approach subgoal."
-                )
-        progress_signature = f"{subgoal}:{','.join(remaining)}"
-        prev_signature = str(state.get("last_progress_signature", ""))
-        if len(history) >= 2 and str(history[-1].get("plan", "")) == str(history[-2].get("plan", "")):
-            repeated_action_count += 1
-        else:
-            repeated_action_count = 0
-        if arrived_but_not_completed:
-            no_progress_steps = 0
-            repeated_action_count = 0
-        last_subgoal_distance = state.get("last_subgoal_distance_m")
-        if subgoal in remaining:
-            snapshot = state.get("latest_snapshot") or {}
-            drone_xy = None
-            if isinstance(snapshot, dict):
-                drone_gt = snapshot.get("drone_gt")
-                if drone_gt is not None:
-                    drone_xy = (float(drone_gt[0]), float(drone_gt[1]))
-            checkpoint = BENCHMARK_CHECKPOINTS_BY_ID.get(str(subgoal))
-            if checkpoint is not None and drone_xy is not None:
-                distance_m = math.hypot(drone_xy[0] - float(checkpoint.x), drone_xy[1] - float(checkpoint.y))
-                previous_distance = state.get("last_subgoal_distance_m")
-                if previous_distance is not None and (float(previous_distance) - float(distance_m)) < 0.05:
-                    no_progress_steps += 1
-                else:
-                    no_progress_steps = 0
-                progress_signature = f"{subgoal}:{','.join(remaining)}"
-                if progress_signature == prev_signature:
-                    no_progress_steps += 1
-                last_subgoal_distance = float(distance_m)
-                if (not arrived_but_not_completed) and repeated_action_count >= 2 and no_progress_steps >= 2:
-                    self._emit_agent_message("[EVENT] planning_stalled_observation")
-                    return {
-                        "route_decision": "continue",
-                        "mission_status": "running",
-                        "agent_step_count": step_count,
-                        "replan_count": replan_count,
-                        "execution_history": history,
-                        "last_subgoal_distance_m": last_subgoal_distance,
-                        "no_progress_steps": no_progress_steps,
-                        "repeated_action_count": repeated_action_count,
-                        "last_progress_signature": progress_signature,
-                        "subgoal_phase": phase,
-                        "subgoal_reached": reached_flag,
-                        "arrived_but_not_completed": arrived_but_not_completed,
-                        "arrived_wait_cycles": arrived_wait_cycles,
-                        "is_current_subgoal_completed": bool(subgoal is not None and str(subgoal).upper() in completed),
-                        "is_current_subgoal_in_radius": bool(effective_in_radius),
-                        "current_subgoal_dwell_seconds": float(dwell_seconds),
-                        "required_dwell_seconds": float(required_dwell_seconds),
-                        "dwell_satisfied": bool(dwell_satisfied),
-                        "waiting_on_checkpoint_completion": bool(waiting_on_completion),
-                        "waiting_checkpoint_id": waiting_checkpoint_id,
-                        "last_progress_event": (None if progress_event is None else dict(progress_event)),
-                        "completion_monitor_status": completion_monitor_status,
-                        "recovery_mode": bool(recovery_mode),
-                        "recovery_reason": (None if recovery_reason is None else str(recovery_reason)),
-                        "recovery_entry_risk": (None if recovery_entry_risk is None else float(recovery_entry_risk)),
-                        "recovery_last_risk": float(recovery_last_risk),
-                        "recovery_just_exited": bool(recovery_just_exited),
-                    }
+            self._emit_agent_message(f"[EVENT] {event_type}:{event_cp}")
+        elif result.get("message"):
+            self._emit_agent_message(f"[RESULT] {str(result.get('message'))[:120]}")
 
-        if not remaining:
-            current_incomplete = bool(
-                subgoal is not None
-                and str(subgoal).upper() not in completed
-                and (arrived_but_not_completed or waiting_on_completion or (not dwell_satisfied))
-            )
-            if current_incomplete:
-                self._emit_agent_message(
-                    f"[EVENT] final_subgoal_incomplete:{str(subgoal).upper()} -> continue_until_completion_event"
-                )
-                return {
-                    "agent_step_count": step_count,
-                    "replan_count": replan_count,
-                    "execution_history": history,
-                    "mission_status": "running",
-                    "route_decision": "continue",
-                    "remaining_checkpoint_ids": [str(subgoal).upper()],
-                    "subgoal_queue": [str(subgoal).upper()],
-                    "waiting_on_checkpoint_completion": bool(waiting_on_completion),
-                    "waiting_checkpoint_id": waiting_checkpoint_id,
-                    "completion_monitor_status": completion_monitor_status,
-                    "arrived_but_not_completed": True,
-                    "subgoal_phase": ("APPROACH_SUBGOAL" if subgoal is None else phase),
-                }
-            return {
-                "agent_step_count": step_count,
-                "replan_count": replan_count,
-                "execution_history": history,
-                "mission_status": "completed",
-                "route_decision": "end",
-                "completed_checkpoint_ids": sorted(completed),
-                "remaining_checkpoint_ids": remaining,
-                "current_subgoal_id": subgoal,
-                "subgoal_phase": ("APPROACH_SUBGOAL" if subgoal is None else phase),
-                "subgoal_reached": reached_flag,
-                "arrived_but_not_completed": arrived_but_not_completed,
-                "arrived_wait_cycles": arrived_wait_cycles,
-                "is_current_subgoal_completed": bool(subgoal is not None and str(subgoal).upper() in completed),
-                "is_current_subgoal_in_radius": bool(effective_in_radius),
-                "current_subgoal_dwell_seconds": float(dwell_seconds),
-                "required_dwell_seconds": float(required_dwell_seconds),
-                "dwell_satisfied": bool(dwell_satisfied),
-                "waiting_on_checkpoint_completion": bool(waiting_on_completion),
-                "waiting_checkpoint_id": waiting_checkpoint_id,
-                "last_progress_event": (None if progress_event is None else dict(progress_event)),
-                "completion_monitor_status": completion_monitor_status,
-                "last_progress_signature": progress_signature,
-                "last_subgoal_distance_m": last_subgoal_distance,
-                "no_progress_steps": no_progress_steps,
-                "repeated_action_count": repeated_action_count,
-                "recovery_mode": bool(recovery_mode),
-                "recovery_reason": (None if recovery_reason is None else str(recovery_reason)),
-                "recovery_entry_risk": (None if recovery_entry_risk is None else float(recovery_entry_risk)),
-                "recovery_last_risk": float(recovery_last_risk),
-                "recovery_just_exited": bool(recovery_just_exited),
-                "last_wait_event": last_wait_event,
-                "last_risk_event": (last_risk_event if last_risk_event else None),
-                "latest_collision_risk": float(latest_collision_risk),
-                "latest_dominant_risky_worker": state.get("dominant_risky_worker"),
-                "latest_per_worker_collision_risks": dict(state.get("per_worker_collision_risks", {})),
-            }
-        if not bool(result.get("ok", False)):
-            return {
-                "agent_step_count": step_count,
-                "replan_count": replan_count,
-                "execution_history": history,
-                "mission_status": "running",
-                "route_decision": "continue",
-                "completed_checkpoint_ids": sorted(completed),
-                "remaining_checkpoint_ids": remaining,
-                "current_subgoal_id": subgoal,
-                "subgoal_phase": ("APPROACH_SUBGOAL" if subgoal is None else phase),
-                "subgoal_reached": reached_flag,
-                "arrived_but_not_completed": arrived_but_not_completed,
-                "arrived_wait_cycles": arrived_wait_cycles,
-                "is_current_subgoal_completed": bool(subgoal is not None and str(subgoal).upper() in completed),
-                "is_current_subgoal_in_radius": bool(effective_in_radius),
-                "current_subgoal_dwell_seconds": float(dwell_seconds),
-                "required_dwell_seconds": float(required_dwell_seconds),
-                "dwell_satisfied": bool(dwell_satisfied),
-                "waiting_on_checkpoint_completion": bool(waiting_on_completion),
-                "waiting_checkpoint_id": waiting_checkpoint_id,
-                "last_progress_event": (None if progress_event is None else dict(progress_event)),
-                "completion_monitor_status": completion_monitor_status,
-                "last_progress_signature": progress_signature,
-                "last_subgoal_distance_m": last_subgoal_distance,
-                "no_progress_steps": no_progress_steps,
-                "repeated_action_count": repeated_action_count,
-                "recovery_mode": bool(recovery_mode),
-                "recovery_reason": (None if recovery_reason is None else str(recovery_reason)),
-                "recovery_entry_risk": (None if recovery_entry_risk is None else float(recovery_entry_risk)),
-                "recovery_last_risk": float(recovery_last_risk),
-                "recovery_just_exited": bool(recovery_just_exited),
-                "recent_failure_reason": str(result.get("message", ""))[:160],
-                "last_wait_event": last_wait_event,
-                "last_risk_event": (last_risk_event if last_risk_event else None),
-                "latest_collision_risk": float(latest_collision_risk),
-                "latest_dominant_risky_worker": state.get("dominant_risky_worker"),
-                "latest_per_worker_collision_risks": dict(state.get("per_worker_collision_risks", {})),
-            }
+        completion_verified = bool(subgoal is not None and subgoal in completed)
+        checkpoint_status = "completed" if completion_verified else ("reached" if effective_in_radius else "pending")
+        if subgoal is not None and (not completion_verified) and arrived_but_not_completed and (not effective_in_radius):
+            self._emit_agent_message(f"[EVENT] left_checkpoint_before_completion:{subgoal}")
+
+        current_incomplete = bool(subgoal is not None and subgoal not in completed and (arrived_but_not_completed or waiting_on_completion))
+        mission_completed = len(required_remaining) == 0 and (not current_incomplete)
+        route = str(state.get("route_decision", "continue"))
+        if mission_completed:
+            route = "end"
+        elif route == "end":
+            route = "continue"
+
         return {
             "agent_step_count": step_count,
-            "replan_count": replan_count,
             "execution_history": history,
-            "mission_status": "running",
-            "route_decision": "continue",
+            "mission_status": ("completed" if mission_completed else "running"),
+            "route_decision": route,
             "completed_checkpoint_ids": sorted(completed),
-            "remaining_checkpoint_ids": remaining,
-            "current_subgoal_id": subgoal,
-            "subgoal_phase": ("APPROACH_SUBGOAL" if subgoal is None else phase),
-            "subgoal_reached": reached_flag,
-            "arrived_but_not_completed": arrived_but_not_completed,
-            "arrived_wait_cycles": arrived_wait_cycles,
-            "is_current_subgoal_completed": bool(subgoal is not None and str(subgoal).upper() in completed),
+            "remaining_checkpoint_ids": required_remaining,
+            "is_current_subgoal_completed": completion_verified,
             "is_current_subgoal_in_radius": bool(effective_in_radius),
             "current_subgoal_dwell_seconds": float(dwell_seconds),
             "required_dwell_seconds": float(required_dwell_seconds),
             "dwell_satisfied": bool(dwell_satisfied),
-            "waiting_on_checkpoint_completion": bool(waiting_on_completion),
+            "arrived_but_not_completed": bool(arrived_but_not_completed and (not completion_verified)),
+            "waiting_on_checkpoint_completion": bool(waiting_on_completion and (not completion_verified)),
             "waiting_checkpoint_id": waiting_checkpoint_id,
+            "current_incomplete": bool(current_incomplete),
             "last_progress_event": (None if progress_event is None else dict(progress_event)),
-            "completion_monitor_status": completion_monitor_status,
-            "last_progress_signature": progress_signature,
-            "last_subgoal_distance_m": last_subgoal_distance,
-            "no_progress_steps": no_progress_steps,
-            "repeated_action_count": repeated_action_count,
-            "recovery_mode": bool(recovery_mode),
-            "recovery_reason": (None if recovery_reason is None else str(recovery_reason)),
-            "recovery_entry_risk": (None if recovery_entry_risk is None else float(recovery_entry_risk)),
-            "recovery_last_risk": float(recovery_last_risk),
-            "recovery_just_exited": bool(recovery_just_exited),
-            "recent_failure_reason": None,
-            "last_wait_event": last_wait_event,
-            "last_risk_event": (last_risk_event if last_risk_event else None),
-            "latest_collision_risk": float(latest_collision_risk),
-            "latest_dominant_risky_worker": state.get("dominant_risky_worker"),
-            "latest_per_worker_collision_risks": dict(state.get("per_worker_collision_risks", {})),
+            "action_result": result,
+            "stop_reason": (None if bool(result.get("ok", True)) else str(result.get("message", ""))[:160]),
+            "failure_reason": (None if bool(result.get("ok", True)) else str(result.get("message", ""))[:160]),
+            "entered_checkpoint_area": bool(effective_in_radius),
+            "left_checkpoint_before_completion": bool(subgoal is not None and arrived_but_not_completed and (not effective_in_radius) and (not completion_verified)),
+            "dwell_progress": {
+                "seconds": float(dwell_seconds),
+                "required_seconds": float(required_dwell_seconds),
+            },
+            "completion_verified": bool(completion_verified),
+            "checkpoint_status": checkpoint_status,
+            "completed_set": sorted(completed),
+            "recent_failure_reason": None if bool(result.get("ok", True)) else str(result.get("message", ""))[:160],
+            "last_wait_event": (None if progress_event is None else dict(progress_event)),
         }
 
     def _route_from_evaluation(self, state: AgentState) -> RouteDecision:
@@ -1142,12 +789,13 @@ class LangGraphOrchestrationRunner:
         next_route = str(pending.get("next_route_decision", route_decision)) if allow_reprioritize else route_decision
         if next_route not in {"continue", "retry_plan", "reselect_subgoal", "end", "abort"}:
             next_route = route_decision
-        if next_route == "reselect_subgoal" and len(new_queue) > 1:
-            next_subgoal = new_queue[0]
-            if subgoal == next_subgoal:
-                new_queue = new_queue[1:] + [next_subgoal]
-            subgoal = None
-        elif next_route == "retry_plan":
+        target_subgoal = pending.get("next_subgoal")
+        if isinstance(target_subgoal, str):
+            target_subgoal = target_subgoal.upper()
+            if target_subgoal in remaining:
+                subgoal = target_subgoal
+                new_queue = [target_subgoal] + [cid for cid in new_queue if cid != target_subgoal]
+        if next_route == "retry_plan":
             next_route = "continue"
 
         return {
