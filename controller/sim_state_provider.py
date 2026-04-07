@@ -148,7 +148,8 @@ class SimStateProvider(StateProvider):
                 f"  true_ranges={self._fmt_arr(packet.true_ranges)}\n"
                 f"  measured_ranges={self._fmt_arr(packet.measured_ranges)}\n"
                 f"  bias_values={self._fmt_arr(packet.bias_values)}\n"
-                f"  random_noise_values={self._fmt_arr(packet.random_noise_values)}"
+                f"  random_noise_values={self._fmt_arr(packet.random_noise_values)}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
             )
         if (now - self._last_generation_summary_log_ts[entity_type]) >= self._localization_summary_log_interval_s:
             self._last_generation_summary_log_ts[entity_type] = now
@@ -156,7 +157,8 @@ class SimStateProvider(StateProvider):
                 f"[LOC-{entity_type.upper()}] gt={self._fmt_vec(packet.gt_position_3d)} "
                 f"est={self._fmt_vec(packet.estimated_position_3d)} "
                 f"err={self._localization_error_norm(packet):.3f}m "
-                f"seq={packet.sequence_number}"
+                f"seq={packet.sequence_number}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
             )
 
     def _log_localization_receive(self, packet: LocalizedStatePacket):
@@ -168,7 +170,8 @@ class SimStateProvider(StateProvider):
                 f"[LOC-RX-{entity_type.upper()}]\n"
                 f"  seq={packet.sequence_number}\n"
                 f"  state_generation_timestamp={packet.state_generation_timestamp:.3f}\n"
-                f"  delivery=immediate"
+                f"  delivery=immediate",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
             )
         if (now - self._last_receive_summary_log_ts[entity_type]) >= self._localization_summary_log_interval_s:
             self._last_receive_summary_log_ts[entity_type] = now
@@ -176,7 +179,8 @@ class SimStateProvider(StateProvider):
                 f"[LOC-{entity_type.upper()}] gt={self._fmt_vec(packet.gt_position_3d)} "
                 f"est={self._fmt_vec(packet.estimated_position_3d)} "
                 f"err={self._localization_error_norm(packet):.3f}m "
-                f"seq={packet.sequence_number}"
+                f"seq={packet.sequence_number}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
             )
 
     def debug_log_latest_localization_snapshot(self, reason: str = "snapshot", now: Optional[float] = None):
@@ -189,14 +193,18 @@ class SimStateProvider(StateProvider):
             }
         for entity_type, packet in packets.items():
             if packet is None:
-                print_debug(f"[LOC-{entity_type.upper()}] reason={reason} no received packet yet")
+                print_debug(
+                    f"[LOC-{entity_type.upper()}] reason={reason} no received packet yet",
+                    env_var="TYPEFLY_VERBOSE_DEBUG",
+                )
                 continue
             print_debug(
                 f"[LOC-{entity_type.upper()}] reason={reason} "
                 f"gt={self._fmt_vec(packet.gt_position_3d)} "
                 f"est={self._fmt_vec(packet.estimated_position_3d)} "
                 f"err={self._localization_error_norm(packet):.3f}m "
-                f"seq={packet.sequence_number}"
+                f"seq={packet.sequence_number}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
             )
 
     def _on_vehicle_local_position(self, msg):
