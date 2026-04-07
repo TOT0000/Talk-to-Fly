@@ -722,16 +722,13 @@ class LLMController():
     def _format_planner_location_info(self) -> str:
         context = self._get_planner_position_context()
         drone_pos = context["drone_pos"]
-        user_pos = context["user_pos"]
         print_debug(
             "[P-LOCATION-CONTEXT] "
-            f"drone_source={context['drone_source']} user_source={context['user_source']} "
-            f"drone_est={drone_pos} user_est={user_pos}"
+            f"drone_source={context['drone_source']} "
+            f"drone_est={drone_pos}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
         )
-        return (
-            f"Drone estimated position: x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}\n"
-            f"User estimated position: x={user_pos[0]:.2f}, y={user_pos[1]:.2f}, z={user_pos[2]:.2f}"
-        )
+        return f"Drone estimated position: x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}"
 
     def skill_get_drone_position(self) -> Tuple[str, bool]:
         context = self._get_planner_position_context()
@@ -1831,40 +1828,9 @@ class LLMController():
                 now=now,
                 safety_state=safety_state,
             )
-        user_heading = float(self.get_user_heading_yaw())
-        user_ref = user_est or user_gt
-        right_offset_m = 1.0
-        right_dx = math.sin(user_heading) * right_offset_m
-        right_dy = -math.cos(user_heading) * right_offset_m
-        left_dx = -right_dx
-        left_dy = -right_dy
         candidate_targets = []
         for point in self.get_baseline_scene().task_points:
             candidate_targets.append({"id": point.id, "x": float(point.x), "y": float(point.y), "z": float(point.z)})
-        candidate_targets.append(
-            {
-                "id": "user",
-                "x": float(user_ref[0]),
-                "y": float(user_ref[1]),
-                "z": float(user_ref[2]),
-            }
-        )
-        candidate_targets.append(
-            {
-                "id": "user_right_side",
-                "x": float(user_ref[0] + right_dx),
-                "y": float(user_ref[1] + right_dy),
-                "z": float(user_ref[2]),
-            }
-        )
-        candidate_targets.append(
-            {
-                "id": "user_left_side",
-                "x": float(user_ref[0] + left_dx),
-                "y": float(user_ref[1] + left_dy),
-                "z": float(user_ref[2]),
-            }
-        )
         candidate_path_summaries = []
         for target in candidate_targets:
             path = self._compute_path_eval_for_target(
@@ -1906,16 +1872,10 @@ class LLMController():
                     safety_state=None,
                 )
         drone_bias_xy = None if drone_packet is None else tuple(float(v) for v in drone_packet.b_xy[:2])
-        user_bias_xy = None if user_packet is None else tuple(float(v) for v in user_packet.b_xy[:2])
         drone_corrected = None if drone_est is None else (
             float(drone_est[0] - (0.0 if drone_bias_xy is None else drone_bias_xy[0])),
             float(drone_est[1] - (0.0 if drone_bias_xy is None else drone_bias_xy[1])),
             float(drone_est[2]),
-        )
-        user_corrected = None if user_est is None else (
-            float(user_est[0] - (0.0 if user_bias_xy is None else user_bias_xy[0])),
-            float(user_est[1] - (0.0 if user_bias_xy is None else user_bias_xy[1])),
-            float(user_est[2]),
         )
         self._update_benchmark_progress_from_snapshot({"drone_gt": drone_gt})
 
@@ -1926,16 +1886,9 @@ class LLMController():
             "drone_est_raw": drone_est,
             "drone_bias_xy": drone_bias_xy,
             "drone_P_xy": (None if drone_packet is None else np.asarray(drone_packet.P_xy, dtype=float).copy()),
-            "user_gt": user_gt,
-            "user_est": user_est,
-            "user_est_bias_corrected": user_corrected,
-            "user_est_raw": user_est,
-            "user_bias_xy": user_bias_xy,
-            "user_P_xy": (None if user_packet is None else np.asarray(user_packet.P_xy, dtype=float).copy()),
             "safety_state": safety_state,
             "safety_context": safety_context,
             "drone_yaw_rad": self._get_drone_yaw_rad(),
-            "user_heading_yaw_rad": self.get_user_heading_yaw(),
             "baseline_scene_id": self.baseline_scene_id,
             "baseline_scene": self.get_baseline_scene(),
             "baseline_scene_state": self.baseline_scene_state,
@@ -1986,20 +1939,19 @@ class LLMController():
                 f"overlap={safety_context.envelopes_overlap} "
                 f"overlap_from_gap={consistency_from_gap} "
                 f"drone_center={tuple(float(v) for v in safety_state.drone_center_xy)} "
-                f"user_center={tuple(float(v) for v in safety_state.user_center_xy)} "
                 f"drone_radius={safety_state.drone_radius_along_user_direction:.6f} "
-                f"user_radius={safety_state.user_radius_along_drone_direction:.6f} "
                 f"score={safety_context.safety_score:.6f} "
                 f"current_p={safety_context.current_collision_probability:.6f} "
-                f"reason_tags={safety_context.reason_tags}"
+                f"reason_tags={safety_context.reason_tags}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
             )
         self._debug_log_obstacle_envelopes(snapshot.get("obstacle_envelope_states"))
         self._debug_log_localization_pipeline_comparison(snapshot)
         self._debug_log_collision_probability_pipeline(snapshot)
         print_debug(
             "[UI-SNAPSHOT] "
-            f"drone_gt={snapshot['drone_gt']} drone_est={snapshot['drone_est']} "
-            f"user_gt={snapshot['user_gt']} user_est={snapshot['user_est']}"
+            f"drone_gt={snapshot['drone_gt']} drone_est={snapshot['drone_est']}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
         )
         return snapshot
 
@@ -2040,7 +1992,7 @@ class LLMController():
             "  "
             + f"scene_current_collision_probability={float(getattr(safety_context, 'current_collision_probability', 0.0)):.6f}"
         )
-        print_debug("\n".join(lines))
+        print_debug("\n".join(lines), env_var="TYPEFLY_VERBOSE_DEBUG")
 
     def _get_drone_yaw_rad(self) -> float:
         get_yaw = getattr(self.drone, "get_drone_yaw", None)
@@ -2244,7 +2196,7 @@ class LLMController():
                 f"axes=({obs.envelope.major_axis_radius:.3f},{obs.envelope.minor_axis_radius:.3f}) "
                 f"ori={obs.envelope.orientation_deg:.1f}"
             )
-        print_debug("[BASELINE-OBS] " + " | ".join(parts))
+        print_debug("[BASELINE-OBS] " + " | ".join(parts), env_var="TYPEFLY_VERBOSE_DEBUG")
 
     def _build_envelope_audit_summary(self, snapshot):
         safety_state = snapshot.get("safety_state")
@@ -2344,9 +2296,9 @@ class LLMController():
                 f"minor={entity['minor_axis']:.3f} ori={entity['orientation_deg']:.2f}"
             )
         ratio_text = ", ".join(f"{k}={v:.3f}" for k, v in sorted((audit.get("ratios") or {}).items()))
-        print_debug("[ENVELOPE-AUDIT] " + " || ".join(lines))
+        print_debug("[ENVELOPE-AUDIT] " + " || ".join(lines), env_var="TYPEFLY_VERBOSE_DEBUG")
         if ratio_text:
-            print_debug("[ENVELOPE-RATIOS] " + ratio_text)
+            print_debug("[ENVELOPE-RATIOS] " + ratio_text, env_var="TYPEFLY_VERBOSE_DEBUG")
 
     def _fmt_array_debug(self, arr):
         values = np.asarray(arr, dtype=float).reshape(-1)
@@ -2356,27 +2308,7 @@ class LLMController():
         safety_state = snapshot.get("safety_state")
         if safety_state is None:
             return
-        user_packet = getattr(safety_state, "user_packet", None)
         obstacle_states = snapshot.get("obstacle_envelope_states") or []
-        if user_packet is None:
-            return
-
-        lines = [
-            "[PIPELINE-CHECK] USER",
-            f"  GT position: ({float(user_packet.gt_position_3d[0]):.3f}, {float(user_packet.gt_position_3d[1]):.3f}, {float(user_packet.gt_position_3d[2]):.3f})",
-            f"  simulated anchor measurements: {self._fmt_array_debug(user_packet.measured_ranges)}",
-            f"  estimated position: ({float(user_packet.estimated_position_3d[0]):.3f}, {float(user_packet.estimated_position_3d[1]):.3f}, {float(user_packet.estimated_position_3d[2]):.3f})",
-            f"  localization covariance-like M_xy: {np.asarray(user_packet.M_xy, dtype=float).tolist()}",
-            "  localization pipeline function: IterativeLeastSquaresEstimator3D.estimate",
-            "  envelope builder function: build_safety_envelope",
-            (
-                "  final major/minor/orientation: "
-                f"{float(safety_state.user_envelope.major_axis_radius):.3f}/"
-                f"{float(safety_state.user_envelope.minor_axis_radius):.3f}/"
-                f"{float(safety_state.user_envelope.orientation_deg):.3f}"
-            ),
-        ]
-        print_debug("\n".join(lines))
 
         for obs in obstacle_states:
             packet = obs.localization_packet
@@ -2395,7 +2327,7 @@ class LLMController():
                     f"{float(obs.envelope.orientation_deg):.3f}"
                 ),
             ]
-            print_debug("\n".join(obs_lines))
+            print_debug("\n".join(obs_lines), env_var="TYPEFLY_VERBOSE_DEBUG")
 
     def start_robot(self):
         print_t("[C] Connecting to robot...")
