@@ -73,7 +73,6 @@ class AgentState(TypedDict, total=False):
     dwell_satisfied: bool
     waiting_on_checkpoint_completion: bool
     waiting_checkpoint_id: str | None
-    current_incomplete: bool
     last_progress_event: dict[str, Any] | None
     completion_monitor_status: str
     recovery_mode: bool
@@ -166,7 +165,6 @@ class LangGraphOrchestrationRunner:
             "dwell_satisfied": False,
             "waiting_on_checkpoint_completion": False,
             "waiting_checkpoint_id": None,
-            "current_incomplete": False,
             "last_progress_event": None,
             "completion_monitor_status": "idle",
             "recovery_mode": False,
@@ -273,7 +271,11 @@ class LangGraphOrchestrationRunner:
         }
 
     def _node_refresh_progress(self, state: AgentState) -> AgentState:
+        snapshot = state.get("latest_snapshot") or {}
         completed = set(str(v).upper() for v in state.get("completed_checkpoint_ids", []))
+        progress = snapshot.get("benchmark_progress") if isinstance(snapshot, dict) else None
+        if isinstance(progress, dict):
+            completed.update(str(v).upper() for v in progress.get("completed", []))
         active_ids = [str(v).upper() for v in state.get("active_checkpoint_ids", [])]
         prior_queue = [str(v).upper() for v in state.get("subgoal_queue", [])]
         remaining_active = [cid for cid in active_ids if cid not in completed]
@@ -296,7 +298,6 @@ class LangGraphOrchestrationRunner:
 
         selected_from_agent = None
         last_decision = dict(state.get("last_decision_payload") or {})
-        decision_mode = str(last_decision.get("mode", "")).strip().lower()
         next_subgoal = last_decision.get("next_subgoal")
         if isinstance(next_subgoal, str):
             candidate = next_subgoal.strip().upper()
@@ -309,12 +310,7 @@ class LangGraphOrchestrationRunner:
         if current_subgoal in completed or current_subgoal not in remaining:
             current_subgoal = None
 
-        current_incomplete = bool(state.get("current_incomplete", False))
-        explicit_switch = bool(selected_from_agent and decision_mode in {"skip_current_subgoal", "replan"})
-        if current_incomplete and current_subgoal is not None and (not explicit_switch):
-            selected = current_subgoal
-        else:
-            selected = selected_from_agent or current_subgoal
+        selected = selected_from_agent or current_subgoal
         if selected is None:
             selected = queue[0] if queue else (remaining[0] if remaining else None)
 
@@ -348,7 +344,7 @@ class LangGraphOrchestrationRunner:
             subgoal = remaining[0]
         if subgoal is None:
             all_required_completed = not [cid for cid in state.get("active_checkpoint_ids", []) if str(cid).upper() not in completed]
-            if all_required_completed and (not bool(state.get("current_incomplete", False))):
+            if all_required_completed:
                 return {"last_plan_text": "", "last_action_text": "", "route_decision": "end"}
             return {
                 "last_plan_text": "",
@@ -517,14 +513,6 @@ class LangGraphOrchestrationRunner:
 
     def _node_execute_step(self, state: AgentState) -> AgentState:
         if str(state.get("route_decision", "")) == "end":
-            completed = set(str(v).upper() for v in state.get("completed_checkpoint_ids", []))
-            active = [str(v).upper() for v in state.get("active_checkpoint_ids", [])]
-            all_required_completed = all(cid in completed for cid in active)
-            if not all_required_completed:
-                return {
-                    "last_action_result": {"ok": False, "recoverable": False, "message": "invalid_terminal_guard:not_all_completed"},
-                    "last_error": "invalid_terminal_guard:not_all_completed",
-                }
             return {
                 "last_action_result": {"ok": True, "recoverable": False, "message": "terminal_noop"},
                 "last_error": None,
@@ -599,16 +587,7 @@ class LangGraphOrchestrationRunner:
         progress = latest_snapshot.get("benchmark_progress") if isinstance(latest_snapshot, dict) else None
         completed = set(str(v).upper() for v in state.get("completed_checkpoint_ids", []))
         if isinstance(progress, dict):
-            progress_target = progress.get("current_target")
-            if progress_target is not None:
-                progress_target = str(progress_target).upper()
-                progress_completed = set(str(v).upper() for v in progress.get("completed", []))
-                if (
-                    progress_target in progress_completed
-                    and bool(progress.get("dwell_satisfied", False))
-                    and bool(progress.get("in_radius", False))
-                ):
-                    completed.add(progress_target)
+            completed.update(str(v).upper() for v in progress.get("completed", []))
         if progress_event and progress_event.get("checkpoint_id") and str(progress_event.get("event_type")) == "checkpoint_completed":
             completed.add(str(progress_event.get("checkpoint_id")).upper())
 
@@ -655,13 +634,10 @@ class LangGraphOrchestrationRunner:
         if subgoal is not None and (not completion_verified) and arrived_but_not_completed and (not effective_in_radius):
             self._emit_agent_message(f"[EVENT] left_checkpoint_before_completion:{subgoal}")
 
-        current_incomplete = bool(subgoal is not None and subgoal not in completed and (arrived_but_not_completed or waiting_on_completion))
-        mission_completed = len(required_remaining) == 0 and (not current_incomplete)
+        mission_completed = len(required_remaining) == 0
         route = str(state.get("route_decision", "continue"))
         if mission_completed:
             route = "end"
-        elif route == "end":
-            route = "continue"
 
         return {
             "agent_step_count": step_count,
@@ -678,7 +654,6 @@ class LangGraphOrchestrationRunner:
             "arrived_but_not_completed": bool(arrived_but_not_completed and (not completion_verified)),
             "waiting_on_checkpoint_completion": bool(waiting_on_completion and (not completion_verified)),
             "waiting_checkpoint_id": waiting_checkpoint_id,
-            "current_incomplete": bool(current_incomplete),
             "last_progress_event": (None if progress_event is None else dict(progress_event)),
             "action_result": result,
             "stop_reason": (None if bool(result.get("ok", True)) else str(result.get("message", ""))[:160]),
