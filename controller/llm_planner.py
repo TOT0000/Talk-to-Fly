@@ -104,7 +104,7 @@ class LLMPlanner():
         self.prompt_langgraph_mode_action = (
             "You are TypeFly LangGraph Mode+Action Decision Agent.\n"
             "Decide BOTH the mode and the next action for this single step.\n"
-            "Output JSON only with keys: mode, reason, strategy_summary, action, next_subgoal.\n"
+            "Output JSON only with keys: mode, reason, strategy_summary, action, next_subgoal, why_action_matches_mode.\n"
             "mode must be one of: approach, recovery, replan, skip_current_subgoal.\n"
             "next_subgoal default is null.\n"
             "Rules:\n"
@@ -122,6 +122,10 @@ class LLMPlanner():
             "- Distinguish skip_current_subgoal vs replan:\n"
             "  - skip_current_subgoal: temporary checkpoint switch within remaining checkpoints; must nominate a different next_subgoal now.\n"
             "  - replan: requires broader strategy update (e.g., resequencing or route strategy change), beyond a temporary one-step detour.\n"
+            "- Checkpoint ordering is dynamic, not fixed:\n"
+            "  - Do NOT mechanically follow A1->A2->A3->A4.\n"
+            "  - Choose next_subgoal by balancing safety and efficiency using current drone position, worker layout, and local risk.\n"
+            "  - If current_subgoal is temporarily high-risk/inefficient, prefer skip_current_subgoal with a safer and shorter next_subgoal.\n"
             "- next_subgoal rules:\n"
             "  - Use null by default.\n"
             "  - Fill next_subgoal only when actually switching checkpoint target (especially skip_current_subgoal).\n"
@@ -134,6 +138,14 @@ class LLMPlanner():
             "  - reason: one short concrete sentence.\n"
             "  - strategy_summary: one short concrete sentence.\n"
             "  - action: exactly one short MiniSpec statement ending with ';'.\n"
+            "  - why_action_matches_mode: one short sentence explicitly proving action and mode are consistent.\n"
+            "Executable action grammar (must match exactly one statement):\n"
+            "- move_forward(0.1~2.0); move_backward(0.1~2.0); move_left(0.1~2.0); move_right(0.1~2.0);\n"
+            "- turn_cw(5~90); turn_ccw(5~90); delay(0.1~2.0); go_checkpoint(\"A1\"); log(\"short_text\");\n"
+            "Alias normalization allowed by system: move_back->move_backward, hold/wait/reobserve->delay.\n"
+            "Output examples (format + semantics):\n"
+            "{{\"mode\":\"approach\",\"reason\":\"Risk is moderate and path is usable.\",\"strategy_summary\":\"Resume mission progress toward current checkpoint.\",\"action\":\"go_checkpoint(\\\"A2\\\");\",\"next_subgoal\":null,\"why_action_matches_mode\":\"Approach mode should prioritize direct progress to the current subgoal.\"}}\n"
+            "{{\"mode\":\"recovery\",\"reason\":\"Immediate collision risk near A2 is high.\",\"strategy_summary\":\"Create lateral spacing before re-observing risk.\",\"action\":\"move_left(0.8);\",\"next_subgoal\":null,\"why_action_matches_mode\":\"Recovery mode uses one short de-risking reposition step instead of direct checkpoint approach.\"}}\n"
             "Task: {task_description}\n"
             "Current mode: {current_mode}\n"
             "Current subgoal: {current_subgoal}\n"
@@ -173,6 +185,7 @@ class LLMPlanner():
             "- If last step failed or risk_abort happened, explain why and avoid repeating same approach.\n"
             "- You may reprioritize checkpoints when current subgoal is temporarily high-risk or blocked.\n"
             "- Reprioritization must be temporary and mission-oriented.\n"
+            "- Prioritize safe + efficient ordering; do not keep a fixed lexical checkpoint order.\n"
             "- Keep every field concise.\n"
             "Task: {task_description}\n"
             "Current subgoal: {current_subgoal}\n"
@@ -359,26 +372,19 @@ class LLMPlanner():
             except Exception:
                 location_info = None
             if location_info is None:
-                user_pos = (0.00, 0.00, 0.00)
                 drone_pos = (0.00, 0.00, 0.00)
                 try:
                     if self.controller:
                         if hasattr(self.controller, 'state_provider'):
                             get_est_drone = getattr(self.controller.state_provider, 'get_estimated_drone_position', None)
-                            get_est_user = getattr(self.controller.state_provider, 'get_estimated_user_position', None)
                             if callable(get_est_drone):
                                 value = get_est_drone()
                                 if value is not None:
                                     drone_pos = value
-                            if callable(get_est_user):
-                                value = get_est_user()
-                                if value is not None:
-                                    user_pos = value
                 except Exception:
                     pass
                 location_info = (
-                    f"Drone estimated position: x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}\n"
-                    f"User estimated position: x={user_pos[0]:.2f}, y={user_pos[1]:.2f}, z={user_pos[2]:.2f}"
+                    f"Drone estimated position: x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}"
                 )
 
         full_scene = f"{scene_description}\n{location_info}".strip()
@@ -441,27 +447,20 @@ class LLMPlanner():
             location_info = None
 
         if location_info is None:
-            person_pos = (0.00, 0.00, 0.00)
             drone_pos = (0.00, 0.00, 0.00)
 
             try:
                 if self.controller and hasattr(self.controller, 'state_provider'):
                     get_est_drone = getattr(self.controller.state_provider, 'get_estimated_drone_position', None)
-                    get_est_user = getattr(self.controller.state_provider, 'get_estimated_user_position', None)
                     if callable(get_est_drone):
                         value = get_est_drone()
                         if value is not None:
                             drone_pos = value
-                    if callable(get_est_user):
-                        value = get_est_user()
-                        if value is not None:
-                            person_pos = value
             except Exception:
                 pass
 
             location_info = (
-                f"Drone estimated position: x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}\n"
-                f"User estimated position: x={person_pos[0]:.2f}, y={person_pos[1]:.2f}, z={person_pos[2]:.2f}"
+                f"Drone estimated position: x={drone_pos[0]:.2f}, y={drone_pos[1]:.2f}, z={drone_pos[2]:.2f}"
             )
 
         # 是否啟用影像辨識
@@ -646,11 +645,23 @@ class LLMPlanner():
         current_mode: str = "approach",
         last_wait_event: dict | None = None,
         last_risk_event: dict | None = None,
+        current_subgoal_phase: str = "APPROACH_SUBGOAL",
+        reached_not_completed: bool = False,
+        in_checkpoint_radius: bool = False,
+        dwell_seconds: float = 0.0,
+        dwell_required_seconds: float = 2.0,
+        dwell_satisfied: bool = False,
     ) -> dict:
         prompt = self.prompt_langgraph_mode_action.format(
             task_description=str(task_description or ""),
             current_mode=str(current_mode or "approach"),
             current_subgoal=str(current_subgoal or "None"),
+            current_subgoal_phase=str(current_subgoal_phase or "APPROACH_SUBGOAL"),
+            reached_not_completed=bool(reached_not_completed),
+            in_checkpoint_radius=bool(in_checkpoint_radius),
+            dwell_seconds=f"{float(dwell_seconds):.3f}",
+            dwell_required_seconds=f"{float(dwell_required_seconds):.3f}",
+            dwell_satisfied=bool(dwell_satisfied),
             remaining_checkpoints=[str(v) for v in list(remaining_checkpoints or [])],
             current_collision_risk=f"{float(current_collision_risk):.6f}",
             historical_max_collision_risk=f"{float(historical_max_collision_risk):.6f}",
@@ -673,17 +684,68 @@ class LLMPlanner():
         )
         raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
         parsed = self._safe_json_object(raw)
+        events: list[str] = []
+        if not parsed:
+            events.append("parser_empty_object")
+        elif str(parsed.get("mode", "")).strip().lower() not in {"approach", "recovery", "replan", "skip_current_subgoal"}:
+            events.append("parser_normalized_mode_to_approach")
         mode = str(parsed.get("mode", "approach")).strip().lower()
         if mode not in {"approach", "recovery", "replan", "skip_current_subgoal"}:
             mode = "approach"
-        action = self._sanitize_langgraph_action(str(parsed.get("action", "")))
+        raw_action = str(parsed.get("action", ""))
+        action = self._sanitize_langgraph_action(raw_action)
+        sanitized_payload = {
+            "mode": mode,
+            "reason": str(parsed.get("reason", "")).strip()[:180],
+            "strategy_summary": str(parsed.get("strategy_summary", strategy_summary or "")).strip()[:240],
+            "action": action,
+            "next_subgoal": parsed.get("next_subgoal"),
+            "why_action_matches_mode": str(parsed.get("why_action_matches_mode", "")).strip()[:220],
+        }
+        if raw_action.strip() and (action != raw_action.strip()):
+            events.append("sanitize_changed_action_format")
         if not action:
-            if mode == "skip_current_subgoal":
-                action = "delay(0.5);"
-            elif current_subgoal:
-                action = f'go_checkpoint("{str(current_subgoal).upper()}");'
+            events.append("sanitize_invalid_action")
+            retry_prompt = (
+                prompt
+                + "\n\nYour previous action was invalid/unparseable for MiniSpec."
+                + " Return JSON only. Keep same intent, but rewrite action as exactly one valid MiniSpec statement."
+            )
+            retry_raw = str(self.llm.request(retry_prompt, self.model_name, stream=False) or "").strip()
+            retry_parsed = self._safe_json_object(retry_raw)
+            retry_action_raw = str(retry_parsed.get("action", ""))
+            retry_action = self._sanitize_langgraph_action(retry_action_raw)
+            events.append("fallback_reprompt")
+            if retry_action:
+                action = retry_action
+                if retry_action_raw.strip() and retry_action != retry_action_raw.strip():
+                    events.append("sanitize_changed_action_format_on_reprompt")
+                sanitized_payload["action"] = action
+                sanitized_payload["reason"] = str(retry_parsed.get("reason", sanitized_payload["reason"])).strip()[:180]
+                sanitized_payload["strategy_summary"] = str(
+                    retry_parsed.get("strategy_summary", sanitized_payload["strategy_summary"])
+                ).strip()[:240]
+                sanitized_payload["next_subgoal"] = retry_parsed.get("next_subgoal", sanitized_payload["next_subgoal"])
+                sanitized_payload["why_action_matches_mode"] = str(
+                    retry_parsed.get("why_action_matches_mode", sanitized_payload["why_action_matches_mode"])
+                ).strip()[:220]
+                parsed = retry_parsed
+                raw = retry_raw
+                raw_action = retry_action_raw
             else:
-                action = "delay(1.0);"
+                if mode == "recovery":
+                    action = "turn_cw(15);"
+                    if int(repeated_action_count) % 2 == 1:
+                        action = "turn_ccw(15);"
+                    events.append("fallback_proxy_recovery_action")
+                else:
+                    action = "delay(0.4);"
+                    events.append("fallback_proxy_safe_delay")
+                sanitized_payload["action"] = action
+                sanitized_payload["why_action_matches_mode"] = (
+                    sanitized_payload.get("why_action_matches_mode")
+                    or "Fallback action preserves safety while awaiting cleaner structured decision output."
+                )
         next_subgoal = parsed.get("next_subgoal")
         return {
             "mode": mode,
@@ -691,6 +753,20 @@ class LLMPlanner():
             "strategy_summary": str(parsed.get("strategy_summary", strategy_summary or "")).strip()[:240],
             "action": action,
             "next_subgoal": next_subgoal,
+            "why_action_matches_mode": str(parsed.get("why_action_matches_mode", "")).strip()[:220],
+            "trace": {
+                "raw_llm_payload": raw,
+                "parsed_payload": {
+                    "mode": str(parsed.get("mode", "")),
+                    "reason": str(parsed.get("reason", "")),
+                    "strategy_summary": str(parsed.get("strategy_summary", "")),
+                    "action": raw_action,
+                    "next_subgoal": parsed.get("next_subgoal"),
+                    "why_action_matches_mode": str(parsed.get("why_action_matches_mode", "")),
+                },
+                "sanitized_payload": sanitized_payload,
+                "events": events,
+            },
         }
 
     def _safe_json_object(self, raw_text: str) -> dict:
@@ -729,16 +805,23 @@ class LLMPlanner():
         text = str(raw_text or "").strip().replace("\n", " ")
         if not text:
             return ""
+        text = re.sub(r"\s+", " ", text)
         commands = []
         patterns = [
             r'go_checkpoint\(\s*[\'"]?([A-Za-z]\d+)[\'"]?\s*\)\s*;?',
             r'move_forward\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
             r'move_backward\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'move_back\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
             r'move_left\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
             r'move_right\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
             r'turn_cw\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
             r'turn_ccw\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'turn_right\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'turn_left\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
             r'delay\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'hold\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'wait\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
+            r'reobserve\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
             r'log\(\s*[\'"]([^\'"]{1,60})[\'"]\s*\)\s*;?',
         ]
         for pattern in patterns:
@@ -753,6 +836,15 @@ class LLMPlanner():
                     commands.append(f'log("{safe}");')
                 else:
                     name = token.split("(", 1)[0]
+                    alias = {
+                        "move_back": "move_backward",
+                        "turn_right": "turn_cw",
+                        "turn_left": "turn_ccw",
+                        "hold": "delay",
+                        "wait": "delay",
+                        "reobserve": "delay",
+                    }
+                    name = alias.get(name, name)
                     value = float(match.group(1))
                     if name.startswith("turn_"):
                         commands.append(f"{name}({int(value)});")
@@ -762,4 +854,22 @@ class LLMPlanner():
                     break
             if len(commands) >= 2:
                 break
+        if not commands:
+            lower = text.lower()
+            number_match = re.search(r"([0-9]+(?:\.[0-9]+)?)", lower)
+            value = 0.6 if number_match is None else float(number_match.group(1))
+            if "move left" in lower:
+                commands.append(f"move_left({value:.1f});")
+            elif "move right" in lower:
+                commands.append(f"move_right({value:.1f});")
+            elif "move back" in lower or "backward" in lower:
+                commands.append(f"move_backward({value:.1f});")
+            elif "move forward" in lower:
+                commands.append(f"move_forward({value:.1f});")
+            elif "turn left" in lower or "ccw" in lower:
+                commands.append(f"turn_ccw({int(max(5.0, value))});")
+            elif "turn right" in lower or "cw" in lower:
+                commands.append(f"turn_cw({int(max(5.0, value))});")
+            elif "hold" in lower or "wait" in lower or "reobserve" in lower:
+                commands.append("delay(0.5);")
         return "".join(commands)

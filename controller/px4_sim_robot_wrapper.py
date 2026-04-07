@@ -363,10 +363,10 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             print_debug(f"[PX4-MOVE] abort command={skill_name} reason=offboard_not_ready")
             return False, False
 
-        # Local NED frame assumption:
-        # +X forward, +Y right, +Z down.
-        dx = forward_m * math.cos(yaw) - right_m * math.sin(yaw)
-        dy = forward_m * math.sin(yaw) + right_m * math.cos(yaw)
+        # Body-to-world mapping aligned to UI XY convention:
+        # +forward moves toward heading; +right moves to drone starboard side.
+        dx = forward_m * math.cos(yaw) + right_m * math.sin(yaw)
+        dy = forward_m * math.sin(yaw) - right_m * math.cos(yaw)
         dz = -up_m  # up in NED means z decreases
 
         target_x = x + dx

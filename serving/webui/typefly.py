@@ -1017,15 +1017,15 @@ class TypeFly:
                 ys.extend(float(point[1]) for point in history)
         safety_state = snapshot.get("safety_state") if snapshot else None
         if safety_state is not None:
-            for envelope in (safety_state.drone_envelope, safety_state.user_envelope):
-                xs.extend([
-                    float(envelope.center_xy[0] - envelope.major_axis_radius),
-                    float(envelope.center_xy[0] + envelope.major_axis_radius),
-                ])
-                ys.extend([
-                    float(envelope.center_xy[1] - envelope.major_axis_radius),
-                    float(envelope.center_xy[1] + envelope.major_axis_radius),
-                ])
+            envelope = safety_state.drone_envelope
+            xs.extend([
+                float(envelope.center_xy[0] - envelope.major_axis_radius),
+                float(envelope.center_xy[0] + envelope.major_axis_radius),
+            ])
+            ys.extend([
+                float(envelope.center_xy[1] - envelope.major_axis_radius),
+                float(envelope.center_xy[1] + envelope.major_axis_radius),
+            ])
         if not xs or not ys:
             return (0.0, 5.0), (0.0, 5.0)
         pad = 0.5
@@ -1060,6 +1060,27 @@ class TypeFly:
 
         drone_gt = positions.get("drone_gt")
         drone_est = positions.get("drone_est")
+        gt_history = list(self.position_history.get("drone_gt", []))
+        est_history = list(self.position_history.get("drone_est", []))
+        if len(gt_history) >= 2:
+            ax_xy.plot(
+                [p[0] for p in gt_history],
+                [p[1] for p in gt_history],
+                color="#0B57D0",
+                linewidth=1.3,
+                alpha=0.45,
+                label="UAV trajectory",
+            )
+        if show_raw_estimate and len(est_history) >= 2:
+            ax_xy.plot(
+                [p[0] for p in est_history],
+                [p[1] for p in est_history],
+                color="#8AB4F8",
+                linewidth=1.0,
+                alpha=0.35,
+                linestyle="--",
+                label="UAV est trajectory",
+            )
         if drone_gt is not None:
             ax_xy.add_patch(Circle((drone_gt[0], drone_gt[1]), UAV_RADIUS_M, fill=False, edgecolor="#0B57D0", linewidth=2.0, label="UAV true"))
         if drone_est is not None:
@@ -1071,20 +1092,21 @@ class TypeFly:
         for worker in workers:
             gt_xy = worker.get("gt_xy")
             est_xy = worker.get("est_xy_bias_corrected")
+            ui_xy = worker.get("ui_xy") or est_xy or gt_xy
             wid = worker.get("id")
             if gt_xy is not None:
                 ax_xy.add_patch(Circle((gt_xy[0], gt_xy[1]), WORKER_RADIUS_M, fill=False, edgecolor="#7B1FA2", linewidth=1.8))
-            if est_xy is not None:
-                ax_xy.add_patch(Circle((est_xy[0], est_xy[1]), WORKER_RADIUS_M, fill=False, edgecolor="#CE93D8", linewidth=1.3, linestyle="--"))
-                ax_xy.text(est_xy[0] + 0.08, est_xy[1] + 0.08, str(wid), fontsize=8, color="#4A148C")
+            if ui_xy is not None:
+                ax_xy.add_patch(Circle((ui_xy[0], ui_xy[1]), WORKER_RADIUS_M, fill=False, edgecolor="#CE93D8", linewidth=1.3, linestyle="--"))
+                ax_xy.text(ui_xy[0] + 0.08, ui_xy[1] + 0.08, str(wid), fontsize=8, color="#4A148C")
                 heading = float(worker.get("heading_yaw_rad", 0.0))
                 arrow_len = 0.45
-                wx, wy = float(est_xy[0]), float(est_xy[1])
+                wx, wy = float(ui_xy[0]), float(ui_xy[1])
                 wdx = arrow_len * float(math.cos(heading))
                 wdy = arrow_len * float(math.sin(heading))
                 ax_xy.arrow(wx, wy, wdx, wdy, head_width=0.12, head_length=0.14, color="#6A1B9A", linewidth=1.2, length_includes_head=True, zorder=4)
-            if gt_xy is not None and est_xy is not None:
-                ax_xy.plot([gt_xy[0], est_xy[0]], [gt_xy[1], est_xy[1]], color="#8E24AA", linewidth=0.7, alpha=0.8)
+            if gt_xy is not None and ui_xy is not None:
+                ax_xy.plot([gt_xy[0], ui_xy[0]], [gt_xy[1], ui_xy[1]], color="#8E24AA", linewidth=0.7, alpha=0.8)
             if show_raw_estimate and worker.get("est_xy_raw") is not None:
                 raw = worker["est_xy_raw"]
                 ax_xy.scatter([raw[0]], [raw[1]], marker="x", c="#6A1B9A", s=22)
@@ -1170,7 +1192,7 @@ class TypeFly:
             snapshot=snapshot,
             xlim=dynamic_xlim,
             ylim=dynamic_ylim,
-            title="Drone / User Localization & Safety Envelope (XY view)",
+            title="Drone Localization & Safety Envelope (XY view)",
             figsize=(5.8, 4.4),
             show_legend=False,
             show_error_ellipse=show_error_ellipse,
