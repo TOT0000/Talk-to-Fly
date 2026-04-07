@@ -846,6 +846,8 @@ class LLMController():
             completed_set = set(str(v).upper() for v in list(progress.get("completed") or []))
             completion_state = checkpoint.id in completed_set
             runtime_target = None if progress.get("current_target") is None else str(progress.get("current_target")).upper()
+            progress_in_radius = bool(progress.get("in_radius", False))
+            progress_target_match = bool(runtime_target == checkpoint.id)
             safety_context = snapshot.get("safety_context")
             current_p = 0.0 if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
             if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
@@ -862,7 +864,11 @@ class LLMController():
 
             in_radius_by_control = dist_control <= float(checkpoint.radius_m)
             in_radius_by_true = (dist_true is not None and dist_true <= float(checkpoint.radius_m))
-            stop_condition = bool(in_radius_by_control or in_radius_by_true or completion_state)
+            in_progress_radius = bool(progress_target_match and progress_in_radius)
+            if true_pos is None:
+                stop_condition = bool(completion_state or in_progress_radius or in_radius_by_control)
+            else:
+                stop_condition = bool(completion_state or (in_radius_by_true and in_progress_radius))
 
             body_forward = math.cos(yaw) * dx_w + math.sin(yaw) * dy_w
             body_right = -math.sin(yaw) * dx_w + math.cos(yaw) * dy_w
@@ -871,7 +877,16 @@ class LLMController():
             dist_trend = "improving" if dist_control + 0.02 < best_dist else "flat_or_worse"
             if stop_condition:
                 reached = True
-                stop_reason = "completion_state" if completion_state else ("true_radius" if in_radius_by_true else "estimated_radius")
+                if completion_state:
+                    stop_reason = "completion_state"
+                elif in_progress_radius and in_radius_by_true:
+                    stop_reason = "true_radius+progress_in_radius"
+                elif in_progress_radius:
+                    stop_reason = "progress_in_radius"
+                elif in_radius_by_true:
+                    stop_reason = "true_radius"
+                else:
+                    stop_reason = "estimated_radius"
             else:
                 if dist_control + 0.02 < best_dist:
                     best_dist = dist_control
