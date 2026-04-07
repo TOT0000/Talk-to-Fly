@@ -90,6 +90,11 @@ class AgentState(TypedDict, total=False):
     subgoal_attempt_history: dict[str, list[str]]
     latest_failure_analysis: dict[str, Any] | None
     pending_strategy_update: dict[str, Any] | None
+    current_mode: str
+    mode_reason: str | None
+    last_decision_payload: dict[str, Any] | None
+    recent_failure_reason: str | None
+    subgoal_reprioritization_suggestion: list[str]
 
 
 class LangGraphOrchestrationRunner:
@@ -170,6 +175,11 @@ class LangGraphOrchestrationRunner:
             "subgoal_attempt_history": {},
             "latest_failure_analysis": None,
             "pending_strategy_update": None,
+            "current_mode": "approach",
+            "mode_reason": None,
+            "last_decision_payload": None,
+            "recent_failure_reason": None,
+            "subgoal_reprioritization_suggestion": [],
         }
         self._emit_agent_message(
             f"[AGENT] subgoal queue: {' -> '.join(list(decomposed)) if decomposed else '(empty)'}"
@@ -319,8 +329,7 @@ class LangGraphOrchestrationRunner:
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
         subgoal = state.get("current_subgoal_id")
-        recovery_mode = bool(state.get("recovery_mode", False))
-        recovery_just_exited = bool(state.get("recovery_just_exited", False))
+        current_mode = str(state.get("current_mode", "approach"))
         completed = set(str(v).upper() for v in state.get("completed_checkpoint_ids", []))
         remaining = [str(v).upper() for v in state.get("remaining_checkpoint_ids", []) if str(v).upper() not in completed]
         if subgoal in completed:
@@ -328,24 +337,7 @@ class LangGraphOrchestrationRunner:
         if subgoal is None and remaining:
             subgoal = remaining[0]
         if subgoal is None:
-            if recovery_just_exited and not recovery_mode:
-                self._emit_agent_message("[RECOVERY] exit condition met but no subgoal available, cannot resume go_checkpoint.")
             return {"last_plan_text": "", "last_action_text": "", "route_decision": "end"}
-        if recovery_just_exited and not recovery_mode:
-            plan = f'go_checkpoint("{str(subgoal).upper()}");'
-            self._emit_agent_message(
-                f"[RECOVERY] exited recovery mode, resume checkpoint approach: {str(subgoal).upper()}"
-            )
-            self._emit_agent_message(f"[STEP] current subgoal: {subgoal}")
-            self._emit_agent_message(f"[ACTION] {plan}")
-            return {
-                "last_plan_text": plan,
-                "last_action_text": plan,
-                "route_decision": "continue",
-                "current_subgoal_id": subgoal,
-                "current_subgoal_type": "checkpoint",
-                "recovery_just_exited": False,
-            }
         subgoal_phase = str(state.get("subgoal_phase", "APPROACH_SUBGOAL"))
         if subgoal_phase in {"COMPLETE_SUBGOAL", "VERIFY_COMPLETE"}:
             in_radius = bool(state.get("is_current_subgoal_in_radius", False))
@@ -376,12 +368,21 @@ class LangGraphOrchestrationRunner:
             self._emit_agent_message(f"[STEP] current subgoal: {subgoal}")
             if plan != "wait_checkpoint_event();":
                 self._emit_agent_message(f"[ACTION] {plan}")
+            self._emit_agent_message("[MODE] approach | reason=complete_or_verify_subgoal_phase")
             return {
                 "last_plan_text": plan,
                 "last_action_text": action_text,
                 "route_decision": "continue",
                 "current_subgoal_id": subgoal,
                 "current_subgoal_type": "checkpoint",
+                "current_mode": "approach",
+                "mode_reason": "complete_or_verify_subgoal_phase",
+                "last_decision_payload": {
+                    "mode": "approach",
+                    "reason": "complete_or_verify_subgoal_phase",
+                    "strategy_summary": str(state.get("current_strategy_summary", "")),
+                    "action": plan,
+                },
                 "waiting_on_checkpoint_completion": bool(plan == "wait_checkpoint_event();"),
                 "waiting_checkpoint_id": (str(subgoal).upper() if plan == "wait_checkpoint_event();" else None),
                 "completion_monitor_status": ("waiting_event" if plan == "wait_checkpoint_event();" else "active"),
@@ -391,7 +392,7 @@ class LangGraphOrchestrationRunner:
         no_progress_steps = int(state.get("no_progress_steps", 0))
         repeated_action_count = int(state.get("repeated_action_count", 0))
         last_action = str(state.get("last_action_text", "")).strip()
-        plan = self.controller.planner.plan_langgraph_step_action(
+        decision = self.controller.planner.decide_langgraph_mode_and_action(
             task_description=str(state.get("user_task", "")),
             current_subgoal=str(subgoal),
             remaining_checkpoints=remaining,
@@ -413,9 +414,20 @@ class LangGraphOrchestrationRunner:
             recovery_hypothesis=(None if state.get("recent_recovery_hypothesis") is None else str(state.get("recent_recovery_hypothesis"))),
             blocked_workers_for_subgoal=list((state.get("blocked_workers_by_subgoal", {}) or {}).get(str(subgoal).upper(), [])),
             subgoal_attempts=list((state.get("subgoal_attempt_history", {}) or {}).get(str(subgoal).upper(), []))[-6:],
+            current_mode=current_mode,
         )
+        plan = str(decision.get("action", "")).strip()
+        mode = str(decision.get("mode", "approach")).strip().lower()
+        reason = str(decision.get("reason", "")).strip()[:180]
+        strategy_summary = str(decision.get("strategy_summary", state.get("current_strategy_summary", ""))).strip()
+        suggested_subgoal = decision.get("next_subgoal")
         if not plan:
-            plan = f'go_checkpoint("{subgoal}");'
+            if mode == "skip_current_subgoal":
+                plan = "delay(0.5);"
+            elif mode == "replan":
+                plan = "log(\"request_replan\");"
+            else:
+                plan = f'go_checkpoint("{subgoal}");'
         action_target = self._extract_checkpoint_target(plan)
         if action_target is not None:
             if action_target in completed or action_target not in remaining:
@@ -424,20 +436,32 @@ class LangGraphOrchestrationRunner:
             subgoal = action_target
         action_text = plan
         self._emit_agent_message(f"[STEP] current subgoal: {subgoal}")
+        self._emit_agent_message(f"[MODE] {mode} | reason={reason or 'n/a'} | strategy={strategy_summary[:100]}")
         self._emit_agent_message(f"[ACTION] {plan}")
-        if (not recovery_mode) and float(state.get("current_collision_risk", 0.0)) <= 0.2 and (not plan.startswith('go_checkpoint("')):
-            print_debug(
-                "[RECOVERY-TRACE] exit condition satisfied but not resuming go_checkpoint: "
-                f"subgoal={subgoal} route={state.get('route_decision')} "
-                f"phase={state.get('subgoal_phase')} recovery_mode={recovery_mode} next_action={plan}",
-                env_var="TYPEFLY_VERBOSE_DEBUG",
-            )
+        next_route: RouteDecision = "continue"
+        if mode in {"skip_current_subgoal", "replan"}:
+            next_route = "reselect_subgoal"
+        if isinstance(suggested_subgoal, str) and suggested_subgoal.strip().upper() in remaining:
+            next_route = "reselect_subgoal"
         return {
             "last_plan_text": plan,
             "last_action_text": action_text,
-            "route_decision": "continue",
+            "route_decision": next_route,
             "current_subgoal_id": subgoal,
             "current_subgoal_type": "checkpoint",
+            "current_mode": mode,
+            "mode_reason": (reason or None),
+            "current_strategy_summary": strategy_summary,
+            "subgoal_reprioritization_suggestion": ([str(suggested_subgoal).upper()] if isinstance(suggested_subgoal, str) else []),
+            "last_decision_payload": {
+                "mode": mode,
+                "reason": reason,
+                "strategy_summary": strategy_summary,
+                "action": plan,
+                "next_subgoal": suggested_subgoal,
+            },
+            "recovery_mode": bool(mode == "recovery"),
+            "recovery_reason": (reason or None) if mode == "recovery" else None,
             "recovery_just_exited": False,
         }
 
@@ -565,40 +589,22 @@ class LangGraphOrchestrationRunner:
 
         remaining = list(state.get("remaining_checkpoint_ids", []))
         subgoal = state.get("current_subgoal_id")
-        recovery_mode = bool(state.get("recovery_mode", False))
-        recovery_reason = state.get("recovery_reason")
+        current_mode = str(state.get("current_mode", "approach"))
+        recovery_mode = bool(current_mode == "recovery")
+        recovery_reason = state.get("mode_reason") if recovery_mode else None
         recovery_entry_risk = state.get("recovery_entry_risk")
         recovery_last_risk = state.get("recovery_last_risk")
-        recovery_just_exited = bool(state.get("recovery_just_exited", False))
+        recovery_just_exited = False
         latest_snapshot = self.controller.get_live_ui_snapshot()
         latest_safety = latest_snapshot.get("safety_context") if isinstance(latest_snapshot, dict) else None
         latest_collision_risk = 0.0 if latest_safety is None else float(getattr(latest_safety, "current_collision_probability", 0.0))
         recovery_last_risk = float(latest_collision_risk)
-        if (not recovery_mode) and latest_collision_risk >= 0.5:
-            recovery_mode = True
-            recovery_reason = "risk>=0.5"
-            recovery_entry_risk = float(latest_collision_risk)
-            recovery_just_exited = False
-            self._emit_agent_message(
-                f"[RECOVERY] enter mode: subgoal={state.get('current_subgoal_id')} "
-                f"risk={latest_collision_risk:.3f} reason={recovery_reason} "
-                f"route={state.get('route_decision')}"
-            )
-        elif recovery_mode and latest_collision_risk <= 0.2:
-            recovery_mode = False
-            recovery_reason = None
-            recovery_entry_risk = None
-            recovery_just_exited = True
-            self._emit_agent_message(
-                f"[RECOVERY] exit mode: subgoal={state.get('current_subgoal_id')} "
-                f"risk={latest_collision_risk:.3f} reason=risk<=0.2"
-            )
         if recovery_mode:
             action_text = str(state.get("last_action_text", "")).strip()
             print_debug(
                 f"[RECOVERY] step summary: subgoal={state.get('current_subgoal_id')} "
                 f"action={action_text} latest_risk={latest_collision_risk:.3f} "
-                f"recovery_mode={recovery_mode} exit_condition_met={latest_collision_risk <= 0.2}",
+                f"recovery_mode={recovery_mode}",
                 env_var="TYPEFLY_VERBOSE_DEBUG",
             )
         progress = latest_snapshot.get("benchmark_progress") if isinstance(latest_snapshot, dict) else None
@@ -722,33 +728,7 @@ class LangGraphOrchestrationRunner:
                 waiting_on_completion = False
                 waiting_checkpoint_id = None
                 completion_monitor_status = f"event_{event_type}"
-                if event_type == "risk_abort":
-                    event_risk = progress_event.get("risk")
-                    risk_value = latest_collision_risk if event_risk is None else float(event_risk)
-                    recovery_mode = True
-                    recovery_reason = "risk_abort_event"
-                    recovery_entry_risk = float(risk_value)
-                    recovery_just_exited = False
-                    self._emit_agent_message(
-                        f"[RECOVERY] enter mode: risk={risk_value:.3f} reason=risk_abort_event"
-                    )
-                return {
-                    "agent_step_count": step_count,
-                    "replan_count": replan_count + (1 if event_type == "risk_abort" else 0),
-                    "execution_history": history,
-                    "mission_status": "running",
-                    "route_decision": "retry_plan" if event_type == "waiting_timeout" else "reselect_subgoal",
-                    "last_error": str(progress_event.get("reason", event_type)),
-                    "last_progress_event": dict(progress_event),
-                    "completion_monitor_status": completion_monitor_status,
-                    "waiting_on_checkpoint_completion": waiting_on_completion,
-                    "waiting_checkpoint_id": waiting_checkpoint_id,
-                    "recovery_mode": bool(recovery_mode),
-                    "recovery_reason": (None if recovery_reason is None else str(recovery_reason)),
-                    "recovery_entry_risk": (None if recovery_entry_risk is None else float(recovery_entry_risk)),
-                    "recovery_last_risk": float(recovery_last_risk),
-                    "recovery_just_exited": bool(recovery_just_exited),
-                }
+                replan_count += 1 if event_type == "risk_abort" else 0
             if event_type in {"entered_checkpoint_area", "dwell_started", "dwell_progress", "dwell_satisfied"}:
                 in_radius = event_in_radius
                 dwell_satisfied = event_dwell_satisfied
@@ -904,15 +884,6 @@ class LangGraphOrchestrationRunner:
                 "recovery_just_exited": bool(recovery_just_exited),
             }
         if not bool(result.get("ok", False)):
-            result_message = str(result.get("message", "")).lower()
-            if ("collision_probability_high" in result_message) and (not recovery_mode):
-                recovery_mode = True
-                recovery_reason = "go_checkpoint_high_risk_stop"
-                recovery_entry_risk = float(max(latest_collision_risk, float(state.get("current_collision_risk", 0.0))))
-                recovery_just_exited = False
-                self._emit_agent_message(
-                    f"[RECOVERY] enter mode: risk={float(recovery_entry_risk):.3f} reason=go_checkpoint_high_risk_stop"
-                )
             return {
                 "agent_step_count": step_count,
                 "replan_count": replan_count,
@@ -944,6 +915,7 @@ class LangGraphOrchestrationRunner:
                 "recovery_entry_risk": (None if recovery_entry_risk is None else float(recovery_entry_risk)),
                 "recovery_last_risk": float(recovery_last_risk),
                 "recovery_just_exited": bool(recovery_just_exited),
+                "recent_failure_reason": str(result.get("message", ""))[:160],
             }
         return {
             "agent_step_count": step_count,
@@ -976,6 +948,7 @@ class LangGraphOrchestrationRunner:
             "recovery_entry_risk": (None if recovery_entry_risk is None else float(recovery_entry_risk)),
             "recovery_last_risk": float(recovery_last_risk),
             "recovery_just_exited": bool(recovery_just_exited),
+            "recent_failure_reason": None,
         }
 
     def _route_from_evaluation(self, state: AgentState) -> RouteDecision:
