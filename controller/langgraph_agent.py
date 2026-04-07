@@ -437,13 +437,17 @@ class LangGraphOrchestrationRunner:
         reason = str(decision.get("reason", "")).strip()[:180]
         strategy_summary = str(decision.get("strategy_summary", state.get("current_strategy_summary", ""))).strip()
         suggested_subgoal = decision.get("next_subgoal")
+        why_match = str(decision.get("why_action_matches_mode", "")).strip()[:220]
+        decision_trace = dict(decision.get("trace") or {})
+        trace_events = list(decision_trace.get("events") or [])
         if not plan:
             if mode == "skip_current_subgoal":
                 plan = "delay(0.5);"
             elif mode == "replan":
                 plan = "log(\"request_replan\");"
             else:
-                plan = f'go_checkpoint("{subgoal}");'
+                plan = "log(\"empty_action_from_decision\");"
+            trace_events.append("planner_empty_action_fallback")
         action_target = self._extract_checkpoint_target(plan)
         if action_target is not None:
             allow_switch = bool(
@@ -451,21 +455,29 @@ class LangGraphOrchestrationRunner:
                 or (isinstance(suggested_subgoal, str) and str(suggested_subgoal).strip())
             )
             if (subgoal is not None) and action_target != str(subgoal).upper() and (not allow_switch):
-                action_target = str(subgoal).upper()
-                plan = f'go_checkpoint("{action_target}");'
+                trace_events.append("target_mismatch_preserved")
             if action_target in completed or action_target not in remaining:
-                action_target = str(subgoal).upper()
-                plan = f'go_checkpoint("{action_target}");'
-            subgoal = action_target
+                trace_events.append("target_outside_remaining_preserved")
+            if action_target in remaining:
+                subgoal = action_target
         action_text = plan
         self._emit_agent_message(f"[STEP] current subgoal: {subgoal}")
         self._emit_agent_message(f"[MODE] {mode} | reason={reason or 'n/a'} | strategy={strategy_summary[:100]}")
+        if why_match:
+            self._emit_agent_message(f"[ANALYZE] {why_match}")
+        for event in trace_events:
+            self._emit_agent_message(f"[EVENT] {event}")
         self._emit_agent_message(f"[ACTION] {plan}")
         next_route: RouteDecision = "continue"
         if mode in {"skip_current_subgoal", "replan"}:
             next_route = "reselect_subgoal"
+        updated_queue = [str(v).upper() for v in list(state.get("subgoal_queue", []))]
+        if not updated_queue:
+            updated_queue = list(remaining)
         if isinstance(suggested_subgoal, str) and suggested_subgoal.strip().upper() in remaining:
             next_route = "reselect_subgoal"
+            suggested_key = suggested_subgoal.strip().upper()
+            updated_queue = [suggested_key] + [cid for cid in updated_queue if cid != suggested_key]
         return {
             "last_plan_text": plan,
             "last_action_text": action_text,
@@ -476,12 +488,21 @@ class LangGraphOrchestrationRunner:
             "mode_reason": (reason or None),
             "current_strategy_summary": strategy_summary,
             "subgoal_reprioritization_suggestion": ([str(suggested_subgoal).upper()] if isinstance(suggested_subgoal, str) else []),
+            "subgoal_queue": updated_queue,
             "last_decision_payload": {
                 "mode": mode,
                 "reason": reason,
                 "strategy_summary": strategy_summary,
                 "action": plan,
                 "next_subgoal": suggested_subgoal,
+                "why_action_matches_mode": why_match,
+                "trace": {
+                    "raw_llm_payload": decision_trace.get("raw_llm_payload"),
+                    "parsed_payload": decision_trace.get("parsed_payload"),
+                    "sanitized_payload": decision_trace.get("sanitized_payload"),
+                    "executor_input": plan,
+                    "events": trace_events,
+                },
             },
             "recovery_mode": bool(mode == "recovery"),
             "recovery_reason": (reason or None) if mode == "recovery" else None,
@@ -500,6 +521,7 @@ class LangGraphOrchestrationRunner:
                 "last_action_result": {"ok": False, "recoverable": False, "message": "empty_plan"},
                 "last_error": "empty_plan",
             }
+        self._emit_agent_message(f"[EVENT] executor_input={plan}")
         if plan == "wait_checkpoint_event();":
             checkpoint_id = state.get("waiting_checkpoint_id") or state.get("current_subgoal_id")
             event = self.controller.wait_for_checkpoint_progress_event(
@@ -894,6 +916,26 @@ class LangGraphOrchestrationRunner:
                     }
 
         if not remaining:
+            current_incomplete = bool(
+                subgoal is not None
+                and str(subgoal).upper() not in completed
+                and (arrived_but_not_completed or waiting_on_completion or (not dwell_satisfied))
+            )
+            if current_incomplete:
+                return {
+                    "agent_step_count": step_count,
+                    "replan_count": replan_count,
+                    "execution_history": history,
+                    "mission_status": "running",
+                    "route_decision": "continue",
+                    "remaining_checkpoint_ids": [str(subgoal).upper()],
+                    "subgoal_queue": [str(subgoal).upper()],
+                    "waiting_on_checkpoint_completion": bool(waiting_on_completion),
+                    "waiting_checkpoint_id": waiting_checkpoint_id,
+                    "completion_monitor_status": completion_monitor_status,
+                    "arrived_but_not_completed": True,
+                    "subgoal_phase": "COMPLETE_SUBGOAL",
+                }
             return {
                 "agent_step_count": step_count,
                 "replan_count": replan_count,
