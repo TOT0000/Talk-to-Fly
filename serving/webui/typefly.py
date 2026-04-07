@@ -1017,15 +1017,15 @@ class TypeFly:
                 ys.extend(float(point[1]) for point in history)
         safety_state = snapshot.get("safety_state") if snapshot else None
         if safety_state is not None:
-            for envelope in (safety_state.drone_envelope, safety_state.user_envelope):
-                xs.extend([
-                    float(envelope.center_xy[0] - envelope.major_axis_radius),
-                    float(envelope.center_xy[0] + envelope.major_axis_radius),
-                ])
-                ys.extend([
-                    float(envelope.center_xy[1] - envelope.major_axis_radius),
-                    float(envelope.center_xy[1] + envelope.major_axis_radius),
-                ])
+            envelope = safety_state.drone_envelope
+            xs.extend([
+                float(envelope.center_xy[0] - envelope.major_axis_radius),
+                float(envelope.center_xy[0] + envelope.major_axis_radius),
+            ])
+            ys.extend([
+                float(envelope.center_xy[1] - envelope.major_axis_radius),
+                float(envelope.center_xy[1] + envelope.major_axis_radius),
+            ])
         if not xs or not ys:
             return (0.0, 5.0), (0.0, 5.0)
         pad = 0.5
@@ -1170,7 +1170,7 @@ class TypeFly:
             snapshot=snapshot,
             xlim=dynamic_xlim,
             ylim=dynamic_ylim,
-            title="Drone / User Localization & Safety Envelope (XY view)",
+            title="Drone Localization & Safety Envelope (XY view)",
             figsize=(5.8, 4.4),
             show_legend=False,
             show_error_ellipse=show_error_ellipse,
