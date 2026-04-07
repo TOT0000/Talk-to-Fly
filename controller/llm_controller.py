@@ -795,7 +795,7 @@ class LLMController():
         return None, False
     
     def skill_re_plan(self) -> Tuple[None, bool]:
-        print_t("[REPLAN_DEBUG] source=rp_skill")
+        print_debug("[REPLAN_DEBUG] source=rp_skill", env_var="TYPEFLY_VERBOSE_DEBUG")
         return None, True
 
     def skill_takeoff(self) -> Tuple[None, bool]:
@@ -821,6 +821,9 @@ class LLMController():
         max_step_m = 1.0
         min_axis_step_m = 0.12
         no_progress_limit = 3
+        heading_align_far_deg = 14.0
+        heading_align_near_deg = 7.0
+        max_turn_step_deg = 28
 
         initial_snapshot = self.get_live_ui_snapshot()
         initial_control = (
@@ -905,22 +908,22 @@ class LLMController():
                     stop_reason = "tiny_residual_vector"
                     break
 
-                if abs(body_forward) >= abs(body_right):
-                    step = min(local_step_cap, abs(body_forward))
-                    if body_forward > 0:
-                        self.drone.move_forward(step)
-                        chosen_action = f"move_forward({step:.2f})"
+                desired_yaw = math.atan2(dy_w, dx_w)
+                yaw_error = (desired_yaw - yaw + math.pi) % (2.0 * math.pi) - math.pi
+                yaw_error_deg = math.degrees(yaw_error)
+                align_threshold = heading_align_near_deg if dist_control < 0.8 else heading_align_far_deg
+                if abs(yaw_error_deg) > align_threshold:
+                    turn_deg = int(max(5.0, min(float(max_turn_step_deg), abs(yaw_error_deg))))
+                    if yaw_error_deg > 0:
+                        self.drone.turn_ccw(turn_deg)
+                        chosen_action = f"turn_ccw({turn_deg})"
                     else:
-                        self.drone.move_backward(step)
-                        chosen_action = f"move_backward({step:.2f})"
+                        self.drone.turn_cw(turn_deg)
+                        chosen_action = f"turn_cw({turn_deg})"
                 else:
-                    step = min(local_step_cap, abs(body_right))
-                    if body_right > 0:
-                        self.drone.move_right(step)
-                        chosen_action = f"move_right({step:.2f})"
-                    else:
-                        self.drone.move_left(step)
-                        chosen_action = f"move_left({step:.2f})"
+                    forward_step = min(local_step_cap, max(0.15, dist_control * 0.65))
+                    self.drone.move_forward(forward_step)
+                    chosen_action = f"move_forward({forward_step:.2f})"
 
             print_debug(
                 "[GC_DEBUG] "
@@ -1008,44 +1011,49 @@ class LLMController():
     def _on_statement_executed_for_replan(self):
         if self.auto_replan_protection_remaining > 0:
             self.auto_replan_protection_remaining -= 1
-            print_t(
+            print_debug(
                 "[REPLAN_DEBUG] "
-                f"protection_window_active remaining_statements={self.auto_replan_protection_remaining}"
+                f"protection_window_active remaining_statements={self.auto_replan_protection_remaining}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
             )
 
     def _should_trigger_auto_replan(self, current_p: float, source: str) -> bool:
         current_p = float(current_p)
         if self.auto_replan_protection_remaining > 0:
-            print_t(
+            print_debug(
                 "[REPLAN_DEBUG] "
                 f"auto_replan_suppressed p={current_p:.6f} reason=protection_window "
-                f"remaining_statements={self.auto_replan_protection_remaining} source={source}"
+                f"remaining_statements={self.auto_replan_protection_remaining} source={source}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
             )
             return False
 
         if not self.auto_replan_armed:
             if current_p <= COLLISION_PROBABILITY_REARM_THRESHOLD:
                 self.auto_replan_armed = True
-                print_t(
+                print_debug(
                     "[REPLAN_DEBUG] "
                     f"auto_replan_rearmed p={current_p:.6f} "
-                    f"threshold={COLLISION_PROBABILITY_REARM_THRESHOLD:.2f}"
+                    f"threshold={COLLISION_PROBABILITY_REARM_THRESHOLD:.2f}",
+                    env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
             else:
-                print_t(
+                print_debug(
                     "[REPLAN_DEBUG] "
-                    f"auto_replan_suppressed p={current_p:.6f} reason=disarmed source={source}"
+                    f"auto_replan_suppressed p={current_p:.6f} reason=disarmed source={source}",
+                    env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
             return False
 
         if current_p >= COLLISION_PROBABILITY_REPLAN_THRESHOLD:
             self.auto_replan_armed = False
-            print_t(
+            print_debug(
                 "[REPLAN_DEBUG] "
                 f"auto_replan_triggered p={current_p:.6f} armed=True source={source} "
-                f"trigger_threshold={COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}"
+                f"trigger_threshold={COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
             )
-            print_t("[REPLAN_DEBUG] auto_replan_armed=False")
+            print_debug("[REPLAN_DEBUG] auto_replan_armed=False", env_var="TYPEFLY_VERBOSE_DEBUG")
             return True
         return False
 
@@ -1388,7 +1396,7 @@ class LLMController():
                         replan_source = "collision_threshold_callback"
                     elif "High-level skill" in replan_value:
                         replan_source = "high_level_skill_failure"
-                    print_t(f"[REPLAN_DEBUG] source={replan_source} ret_val={replan_value}")
+                    print_debug(f"[REPLAN_DEBUG] source={replan_source} ret_val={replan_value}", env_var="TYPEFLY_VERBOSE_DEBUG")
                     replan_attempts += 1
                     self.task_run_logger.update_execution_info(
                         execution_success=False,
@@ -1557,9 +1565,7 @@ class LLMController():
         self.initial_scenario_state = {
             "selected_mode": report.selected_mode,
             "target_drone_gt": report.target_drone_position_3d,
-            "target_user_gt": report.target_user_position_3d,
             "actual_drone_gt": report.actual_drone_gt_position_3d,
-            "actual_user_gt": report.actual_user_gt_position_3d,
             "safety_score": report.measured_initial_safety_score,
             "current_collision_probability": report.measured_initial_collision_probability,
             "envelope_gap_m": report.measured_initial_envelope_gap_m,
@@ -1595,9 +1601,7 @@ class LLMController():
         return {
             "selected_mode": None if report is None else report.selected_mode,
             "target_drone_gt": None if report is None else report.target_drone_position_3d,
-            "target_user_gt": None if report is None else report.target_user_position_3d,
             "actual_drone_gt": snapshot.get("drone_gt") if snapshot else None,
-            "actual_user_gt": snapshot.get("user_gt") if snapshot else None,
             "current_collision_probability": None if safety_context is None else float(safety_context.current_collision_probability),
             "historical_max_collision_probability": None if safety_context is None else float(safety_context.historical_max_collision_probability),
             "safety_score": None if safety_context is None else float(safety_context.safety_score),
@@ -1801,26 +1805,12 @@ class LLMController():
             or _call_position(provider, "get_drone_position")
             or (0.0, 0.0, 0.0)
         )
-        user_gt = (
-            _call_position(provider, "get_user_position")
-            or _as_position_tuple(getattr(provider, "_user_position", None))
-            or _call_position(provider, "get_ground_truth_user_position")
-            or (0.0, 0.0, 0.0)
-        )
-
         drone_est = _call_position(self.drone, "get_estimated_drone_position")
         if drone_est is None:
             drone_packet = provider.get_latest_received_drone_packet() if hasattr(provider, "get_latest_received_drone_packet") else None
             drone_est = None if drone_packet is None else _as_position_tuple(drone_packet.estimated_position_3d)
         else:
             drone_packet = provider.get_latest_received_drone_packet() if hasattr(provider, "get_latest_received_drone_packet") else None
-
-        user_est = _call_position(provider, "get_estimated_user_position")
-        if user_est is None:
-            user_packet = provider.get_latest_received_user_packet() if hasattr(provider, "get_latest_received_user_packet") else None
-            user_est = None if user_packet is None else _as_position_tuple(user_packet.estimated_position_3d)
-        else:
-            user_packet = provider.get_latest_received_user_packet() if hasattr(provider, "get_latest_received_user_packet") else None
 
         baseline_state = self.baseline_scene_state or {}
         scene_start_ts = float(baseline_state.get("captured_at", now))
@@ -1843,10 +1833,10 @@ class LLMController():
             path = self._compute_path_eval_for_target(
                 self.get_baseline_scene(),
                 drone_est or drone_gt,
-                user_est or user_gt,
+                None,
                 target_xy=(target["x"], target["y"]),
                 obstacle_envelopes=obstacle_states,
-                user_envelope=(None if safety_state is None else safety_state.user_envelope),
+                user_envelope=None,
             )
             candidate_path_summaries.append(
                 {
@@ -1912,6 +1902,14 @@ class LLMController():
                     "est_xy_bias_corrected": (
                         float(obs.localization_packet.estimated_position_3d[0] - obs.localization_packet.b_xy[0]),
                         float(obs.localization_packet.estimated_position_3d[1] - obs.localization_packet.b_xy[1]),
+                    ),
+                    "ui_xy": (
+                        tuple(float(v) for v in obs.gt_xy)
+                        if self.get_baseline_scene().id == "SCENE_MANUAL_WORKER_CONTROL"
+                        else (
+                            float(obs.localization_packet.estimated_position_3d[0] - obs.localization_packet.b_xy[0]),
+                            float(obs.localization_packet.estimated_position_3d[1] - obs.localization_packet.b_xy[1]),
+                        )
                     ),
                     "heading_yaw_rad": float(self.manual_worker_poses.get(str(obs.id), {}).get("yaw_rad", 0.0)),
                     "P_xy": np.asarray(obs.localization_packet.P_xy, dtype=float).copy(),
@@ -2067,7 +2065,6 @@ class LLMController():
         if target is None:
             return None
         drone_pos = snapshot.get("drone_est") or snapshot.get("drone_gt")
-        user_pos = snapshot.get("user_est") or snapshot.get("user_gt")
         if drone_pos is None:
             return None
         safety_context = snapshot.get("safety_context")
@@ -2077,10 +2074,10 @@ class LLMController():
         path_eval = self._compute_path_eval(
             scene,
             drone_pos,
-            user_pos,
+            None,
             now_s=time.time(),
             obstacle_envelopes=obstacle_envelopes,
-            user_envelope=(None if snapshot.get("safety_state") is None else snapshot.get("safety_state").user_envelope),
+            user_envelope=None,
         )
         risk_high = bool(
             safety_context is not None
@@ -2096,8 +2093,6 @@ class LLMController():
                 obstacle = next((o for o in obstacle_envelopes if o.id == path_eval.blocking_entity), None)
                 if obstacle is not None:
                     side = "left" if float(obstacle.est_xy[1]) <= float(drone_pos[1]) else "right"
-            elif path_eval.blocking_entity == "user" and user_pos is not None:
-                side = "left" if float(user_pos[1]) <= float(drone_pos[1]) else "right"
             if side == "left":
                 plan = "tu(35);mf(0.9);tc(35);mf(0.9);d(0.2);"
             else:
@@ -2214,7 +2209,6 @@ class LLMController():
             return result
 
         drone_matrix = getattr(safety_state.drone_packet, "M_xy", None)
-        user_matrix = getattr(safety_state.user_packet, "M_xy", None)
         result["entities"].append(
             {
                 "id": "drone",
@@ -2232,25 +2226,6 @@ class LLMController():
                 "major_axis": float(safety_state.drone_envelope.major_axis_radius),
                 "minor_axis": float(safety_state.drone_envelope.minor_axis_radius),
                 "orientation_deg": float(safety_state.drone_envelope.orientation_deg),
-            }
-        )
-        result["entities"].append(
-            {
-                "id": "user",
-                "gt": snapshot.get("user_gt"),
-                "est": snapshot.get("user_est"),
-                "matrix_xy": user_matrix,
-                "matrix_source": "provider_packet.M_xy",
-                "called_function": "build_safety_envelope",
-                "localization_pipeline_function": "IterativeLeastSquaresEstimator3D.estimate",
-                "base_sigma": "packet covariance",
-                "nominal_size_used": False,
-                "bias_used": False,
-                "extra_inflation": "none",
-                "chi2": getattr(safety_state.user_envelope, "chi2_val", None),
-                "major_axis": float(safety_state.user_envelope.major_axis_radius),
-                "minor_axis": float(safety_state.user_envelope.minor_axis_radius),
-                "orientation_deg": float(safety_state.user_envelope.orientation_deg),
             }
         )
         obstacles_by_id = {}
@@ -2279,11 +2254,9 @@ class LLMController():
             )
 
         drone_major = float(safety_state.drone_envelope.major_axis_radius)
-        user_major = float(safety_state.user_envelope.major_axis_radius)
         ratios = {}
         for obs_state in obstacle_states:
             ratios[f"{obs_state.id}_to_drone_major"] = float(obs_state.envelope.major_axis_radius / max(1e-6, drone_major))
-            ratios[f"{obs_state.id}_to_user_major"] = float(obs_state.envelope.major_axis_radius / max(1e-6, user_major))
         result["ratios"] = ratios
         return result
 
