@@ -102,8 +102,6 @@ class TypeFly:
         self.position_history = {
             "drone_gt": deque(maxlen=100),
             "drone_est": deque(maxlen=100),
-            "user_gt": deque(maxlen=100),
-            "user_est": deque(maxlen=100),
         }
         self.worker_collision_history = {
             "worker_1": deque(maxlen=100),
@@ -360,7 +358,7 @@ class TypeFly:
             return
 
         timestamp = time.time()
-        tag = "[DronePos]" if source == "drone" else "[UserPos]" if source == "user" else "[Pos]"
+        tag = "[DronePos]" if source == "drone" else "[Pos]"
 
         # 初始化紀錄字典
         if not hasattr(self, '_last_position_map'):
@@ -389,7 +387,7 @@ class TypeFly:
                 self._last_print_position_map = {}
 
             last_print_time = self._last_print_position_map.get(source, 0)
-            if timestamp - last_print_time > 5:
+            if source == "drone" and timestamp - last_print_time > 5:
                 print_debug(f"{tag} x={x:.2f}, y={y:.2f}, z={z:.2f}")
                 self._last_print_position_map[source] = timestamp
 
@@ -751,9 +749,8 @@ class TypeFly:
             "outputs=[anchor_3d,global_xy_plot,xy_plot,x_plot,y_plot,z_plot,counter,status,entity] "
             f"drone_gt={None if not snapshot else snapshot.get('drone_gt')} "
             f"drone_est={None if not snapshot else snapshot.get('drone_est')} "
-            f"user_gt={None if not snapshot else snapshot.get('user_gt')} "
-            f"user_est={None if not snapshot else snapshot.get('user_est')} "
-            f"counter={counter}"
+            f"counter={counter}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
         )
         return anchor_plot, global_xy, xy, x, y, z, counter, status_md, entity_md
 
@@ -780,16 +777,11 @@ class TypeFly:
             return {
                 "drone_gt": None,
                 "drone_est": None,
-                "user_gt": None,
-                "user_est": None,
             }
         positions = {
             "drone_gt": snapshot.get("drone_gt"),
             # default visualization uses bias-corrected estimate.
             "drone_est": snapshot.get("drone_est_bias_corrected") or snapshot.get("drone_est"),
-            "user_gt": snapshot.get("user_gt"),
-            # default visualization uses bias-corrected estimate.
-            "user_est": snapshot.get("user_est_bias_corrected") or snapshot.get("user_est"),
         }
         return positions
 
@@ -894,7 +886,10 @@ class TypeFly:
         for key, value in positions.items():
             if value is not None:
                 self.position_history[key].append(tuple(float(v) for v in value))
-                print_debug(f"[UI-HISTORY] key={key} appended={self.position_history[key][-1]}")
+                print_debug(
+                    f"[UI-HISTORY] key={key} appended={self.position_history[key][-1]}",
+                    env_var="TYPEFLY_VERBOSE_DEBUG",
+                )
 
     def _append_worker_collision_history(self, snapshot):
         safety_context = snapshot.get("safety_context") if snapshot else None
@@ -1011,7 +1006,7 @@ class TypeFly:
     def _axis_limits_from_snapshot(self, snapshot):
         positions = self._extract_ui_positions(snapshot)
         xs, ys = [], []
-        for key in ("drone_gt", "drone_est", "user_gt", "user_est"):
+        for key in ("drone_gt", "drone_est"):
             value = positions.get(key)
             if value is not None:
                 xs.append(float(value[0]))
@@ -1157,9 +1152,8 @@ class TypeFly:
         print_debug(
             "[UI-PLOT] "
             f"drone_gt={positions['drone_gt']} "
-            f"drone_est={positions['drone_est']} "
-            f"user_gt={positions['user_gt']} "
-            f"user_est={positions['user_est']}"
+            f"drone_est={positions['drone_est']}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
         )
 
         global_xy = self._render_xy_view(

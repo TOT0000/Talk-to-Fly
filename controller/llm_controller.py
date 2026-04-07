@@ -277,7 +277,8 @@ class LLMController():
             "[BENCHMARK-PROGRESS-EVENT] "
             f"id={event['event_id']} type={event_type} checkpoint={event.get('checkpoint_id')} "
             f"in_radius={in_radius} dwell={dwell_seconds:.3f}/{required_dwell_seconds:.3f} "
-            f"dwell_satisfied={dwell_satisfied} completed={completed} reason={reason} risk={risk}"
+            f"dwell_satisfied={dwell_satisfied} completed={completed} reason={reason} risk={risk}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
         )
 
     def wait_for_checkpoint_progress_event(
@@ -294,7 +295,8 @@ class LLMController():
         print_debug(
             "[BENCHMARK-WAIT-START] "
             f"checkpoint={checkpoint_key} cursor={last_seen_event_id} "
-            f"queue_len={len(self._progress_event_queue)}"
+            f"queue_len={len(self._progress_event_queue)}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
         )
         self.set_benchmark_progress_focus_checkpoint(checkpoint_key)
         try:
@@ -305,7 +307,8 @@ class LLMController():
                         "[BENCHMARK-WAIT-TIMEOUT] "
                         f"checkpoint={checkpoint_key} "
                         f"queue_len={len(self._progress_event_queue)} "
-                        f"last_seen_event_id={last_seen_event_id}"
+                        f"last_seen_event_id={last_seen_event_id}",
+                        env_var="TYPEFLY_VERBOSE_DEBUG",
                     )
                     return {
                         "event_type": "waiting_timeout",
@@ -358,7 +361,8 @@ class LLMController():
                             "[BENCHMARK-WAIT-MATCH] "
                             f"checkpoint={checkpoint_key} event_id={event.get('event_id')} "
                             f"type={event.get('event_type')} queue_len={len(queue_list)} "
-                            f"cursor={last_seen_event_id} skipped_old={len(skipped_old)}"
+                            f"cursor={last_seen_event_id} skipped_old={len(skipped_old)}",
+                            env_var="TYPEFLY_VERBOSE_DEBUG",
                         )
                         return event
 
@@ -375,7 +379,8 @@ class LLMController():
                         f"distance_m={progress.get('distance_to_target_m')} "
                         f"drone_pos={progress.get('drone_true_position')} "
                         f"cp_center={progress.get('checkpoint_center')} "
-                        f"queue_len={len(queue_list)}"
+                        f"queue_len={len(queue_list)}",
+                        env_var="TYPEFLY_VERBOSE_DEBUG",
                     )
                     wait_s = min(0.25, max(0.01, deadline - time.time()))
                     self._progress_event_cv.wait(timeout=wait_s)
@@ -555,7 +560,8 @@ class LLMController():
             f"checkpoint_center={checkpoint_center} "
             f"uav_true_position={tuple(float(v) for v in drone_gt)} "
             f"distance_m={distance_m:.3f} "
-            f"tick_ts={now:.6f}"
+            f"tick_ts={now:.6f}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
         )
 
     def _resolve_active_objective_set(self, task_text: str) -> dict:
@@ -916,7 +922,7 @@ class LLMController():
                         self.drone.move_left(step)
                         chosen_action = f"move_left({step:.2f})"
 
-            print_t(
+            print_debug(
                 "[GC_DEBUG] "
                 f"cp={checkpoint.id} "
                 f"target=({checkpoint.x:.2f},{checkpoint.y:.2f}) "
@@ -932,7 +938,8 @@ class LLMController():
                 f"action={chosen_action} "
                 f"stop_condition={stop_condition} completion_state={completion_state} "
                 f"dist_trend={dist_trend} "
-                f"reason={stop_reason if stop_condition else 'continue'}"
+                f"reason={stop_reason if stop_condition else 'continue'}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
             )
 
             if stop_condition:
