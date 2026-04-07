@@ -405,6 +405,7 @@ class LangGraphOrchestrationRunner:
         no_progress_steps = int(state.get("no_progress_steps", 0))
         repeated_action_count = int(state.get("repeated_action_count", 0))
         last_action = str(state.get("last_action_text", "")).strip()
+        recovery_mode = bool(current_mode == "recovery")
         decision = self.controller.planner.decide_langgraph_mode_and_action(
             task_description=str(state.get("user_task", "")),
             current_subgoal=str(subgoal),
