@@ -553,7 +553,7 @@ class LangGraphOrchestrationRunner:
                 "last_error": None if ok else str(event.get("reason", event_type)),
             }
         try:
-            ret = self.controller.execute_minispec(plan, silent=True, allow_auto_interrupt=False)
+            ret = self.controller.execute_minispec(plan, silent=True, allow_auto_interrupt=True)
             ok = True
             recoverable = False
             if isinstance(ret, tuple) and len(ret) >= 2:

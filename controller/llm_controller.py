@@ -877,7 +877,9 @@ class LLMController():
             if true_pos is None:
                 stop_condition = bool(completion_state or in_progress_radius or in_radius_by_control)
             else:
-                stop_condition = bool(completion_state or (in_radius_by_true and in_progress_radius))
+                # Do not require progress-target synchronization to stop at the commanded checkpoint.
+                # If true position is already in checkpoint radius, gc should be considered reached.
+                stop_condition = bool(completion_state or in_radius_by_true or in_progress_radius)
 
             body_forward = math.cos(yaw) * dx_w + math.sin(yaw) * dy_w
             body_right = -math.sin(yaw) * dx_w + math.cos(yaw) * dy_w
@@ -888,7 +890,7 @@ class LLMController():
                 reached = True
                 if completion_state:
                     stop_reason = "completion_state"
-                elif in_progress_radius and in_radius_by_true:
+                elif in_radius_by_true and in_progress_radius:
                     stop_reason = "true_radius+progress_in_radius"
                 elif in_progress_radius:
                     stop_reason = "progress_in_radius"
@@ -1079,6 +1081,9 @@ class LLMController():
         return image
     
     def execute_minispec(self, minispec: str, silent: bool = False, allow_auto_interrupt: bool = True):
+        focus_checkpoint = self._extract_first_checkpoint_from_plan(minispec)
+        if focus_checkpoint is not None:
+            self.set_benchmark_progress_focus_checkpoint(focus_checkpoint)
         interpreter = MiniSpecInterpreter(
             None if silent else self.message_queue,
             should_abort=(self._should_abort_current_execution_for_replan if allow_auto_interrupt else None),
@@ -1090,6 +1095,16 @@ class LLMController():
         if hasattr(ret_val, "value") and isinstance(ret_val.value, str) and ret_val.value.startswith("MiniSpec execution error"):
             raise RuntimeError(ret_val.value)
         return ret_val
+
+    def _extract_first_checkpoint_from_plan(self, minispec: str) -> Optional[str]:
+        text = str(minispec or "")
+        m = re.search(r"(?:gc|go_checkpoint)\(\s*['\"]?\s*([A-Za-z]\d+)\s*['\"]?\s*\)", text)
+        if not m:
+            return None
+        checkpoint_id = str(m.group(1)).upper()
+        if checkpoint_id in BENCHMARK_CHECKPOINTS_BY_ID:
+            return checkpoint_id
+        return None
 
     def _should_abort_current_execution_for_replan(self) -> Tuple[bool, str]:
         snapshot = self.get_live_ui_snapshot()
