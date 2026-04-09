@@ -43,3 +43,10 @@ def test_examples_files_are_real_and_nonempty_and_referenced():
     assert 'Example H5 (HardGate heartbeat: infer execution anomaly and replan all remaining unfinished checkpoints)' in HARD_EXAMPLES
     assert 'Agent heartbeat examples:' in PLANNER_SOURCE
     assert '{agent_heartbeat_examples}' in PLANNER_SOURCE
+
+
+def test_heartbeat_parser_has_fenced_and_embedded_json_fallback_paths():
+    assert '_parse_heartbeat_response_json' in PLANNER_SOURCE
+    assert "```(?:json)?\\s*(.*?)\\s*```" in PLANNER_SOURCE
+    assert 'start = text.find("{")' in PLANNER_SOURCE
+    assert 'end = text.rfind("}")' in PLANNER_SOURCE

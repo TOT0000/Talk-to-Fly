@@ -657,11 +657,8 @@ class LLMPlanner():
             "Return JSON only."
         )
         raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
-        parsed_ok = True
-        try:
-            parsed = json.loads(raw)
-        except Exception:
-            parsed_ok = False
+        parsed, parsed_ok = self._parse_heartbeat_response_json(raw)
+        if not parsed_ok:
             parsed = {"response": "continue", "reason": f"non_json_response:{raw[:120]}", "plan": ""}
         response = str(parsed.get("response", "continue")).strip().lower()
         if response not in {"continue", "full_replan_plan"}:
@@ -673,6 +670,44 @@ class LLMPlanner():
             "raw_response": raw,
             "parsed_ok": bool(parsed_ok),
         }
+
+    @staticmethod
+    def _parse_heartbeat_response_json(raw: str) -> tuple[dict, bool]:
+        text = str(raw or "").strip()
+        if not text:
+            return {}, False
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed, True
+        except Exception:
+            pass
+
+        fenced_match = re.fullmatch(
+            r"```(?:json)?\s*(.*?)\s*```",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if fenced_match:
+            text = str(fenced_match.group(1) or "").strip()
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    return parsed, True
+            except Exception:
+                pass
+
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            candidate = text[start:end + 1].strip()
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    return parsed, True
+            except Exception:
+                pass
+        return {}, False
     
     def probe(self, question: str) -> MiniSpecValueType:
         location_info = None
