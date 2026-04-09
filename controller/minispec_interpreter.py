@@ -6,7 +6,13 @@ import time
 from typing import Optional
 from threading import Thread
 from queue import Queue
-from openai import ChatCompletion, Stream
+from typing import Any
+
+try:
+    from openai import ChatCompletion, Stream
+except Exception:  # pragma: no cover - typing fallback for lightweight test environments
+    ChatCompletion = Any
+    Stream = Any
 from .skillset import SkillSet
 from .utils import split_args, print_t
 
@@ -80,7 +86,7 @@ class MiniSpecProgram:
         self.current_statement = Statement(self.env)
         self.mq = mq
 
-    def parse(self, code_instance: Stream[ChatCompletion.ChatCompletionChunk] | List[str], exec: bool = False) -> bool:
+    def parse(self, code_instance: Any | List[str], exec: bool = False) -> bool:
         for chunk in code_instance:
             if isinstance(chunk, str):
                 code = chunk
@@ -608,7 +614,14 @@ class MiniSpecInterpreter:
         self.message_queue = message_queue
         self.should_abort = should_abort
 
-    def execute(self, code: Stream[ChatCompletion.ChatCompletionChunk] | List[str]) -> MiniSpecReturnValue:
+    def _drain_execution_queue(self) -> int:
+        drained = 0
+        while not Statement.execution_queue.empty():
+            Statement.execution_queue.get()
+            drained += 1
+        return drained
+
+    def execute(self, code: Any | List[str]) -> MiniSpecReturnValue:
         print_t(f'>>> Get a stream')
         self.execution_history = []
         self.timestamp_get_plan = time.time()
@@ -626,8 +639,11 @@ class MiniSpecInterpreter:
                 except Exception:
                     should_abort, reason = (False, "")
                 if should_abort:
-                    while not Statement.execution_queue.empty():
-                        Statement.execution_queue.get()
+                    dropped_count = self._drain_execution_queue()
+                    print_t(
+                        "[TYPEFLY-QUEUE] "
+                        f"clearing remaining statements due to replan trigger, dropped old remaining statements count={dropped_count}"
+                    )
                     self.timestamp_end_execution = time.time()
                     self.timestamp_start_execution = None
                     msg = f"MiniSpec execution interrupted for replan: {reason or 'runtime_high_risk'}"
@@ -643,8 +659,7 @@ class MiniSpecInterpreter:
                 try:
                     ret_val = statement.eval()
                 except Exception as e:
-                    while not Statement.execution_queue.empty():
-                        Statement.execution_queue.get()
+                    self._drain_execution_queue()
                     self.timestamp_end_execution = time.time()
                     self.timestamp_start_execution = None
                     error_message = f"MiniSpec execution error at statement `{statement}`: {e}"
@@ -652,9 +667,22 @@ class MiniSpecInterpreter:
                     self.ret_queue.put(MiniSpecReturnValue(error_message, False))
                     return
                 print_t(f'Queue statement done: {statement}')
+                if ret_val.replan:
+                    dropped_count = self._drain_execution_queue()
+                    print_t(
+                        "[TYPEFLY-QUEUE] "
+                        f"clearing remaining statements due to replan trigger, dropped old remaining statements count={dropped_count}"
+                    )
+                    print_t(
+                        "[TYPEFLY-INTERRUPT] "
+                        f"statement requested replan, aborting current execution: {ret_val.value}"
+                    )
+                    self.timestamp_end_execution = time.time()
+                    self.timestamp_start_execution = None
+                    self.ret_queue.put(ret_val)
+                    return
                 if statement.ret:
-                    while not Statement.execution_queue.empty():
-                        Statement.execution_queue.get()
+                    self._drain_execution_queue()
                     self.ret_queue.put(ret_val)
                     return
                 self.execution_history.append(statement)
