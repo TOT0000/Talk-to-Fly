@@ -24,6 +24,12 @@ from controller.llm_controller import LLMController
 from controller.utils import print_debug, print_t
 from controller.llm_wrapper import GPT4, LLAMA3
 from controller.abs.robot_wrapper import RobotType
+from controller.llm_controller import (
+    MODE_TYPEFLY_ONESHOT,
+    MODE_TYPEFLY_THRESHOLD_REPLAN,
+    MODE_AGENT_HEARTBEAT_SOFT,
+    MODE_AGENT_HEARTBEAT_HARDGATE,
+)
 from controller.experiment_scenarios import SCENARIOS, normalize_scenario_name
 from controller.baseline_scenes import BASELINE_SCENES, normalize_baseline_scene_id
 from controller.anchor_provider import AnchorGeometryProvider
@@ -92,7 +98,7 @@ class TypeFly:
         self.asyncio_loop = asyncio.get_event_loop()
         self.use_llama3 = False
         self.robot_type = controller_robot_type
-        self.selected_framework_mode = "typefly_baseline"
+        self.selected_framework_mode = MODE_TYPEFLY_ONESHOT
         self.selected_worker_move_step = 0.5
         self.selected_worker_turn_step = 15.0
 
@@ -161,9 +167,14 @@ class TypeFly:
             with gr.Row():
                 with gr.Column(scale=1, min_width=260, elem_classes="scenario-panel"):
                     self.framework_mode_selector = gr.Dropdown(
-                        choices=["typefly_baseline", "langgraph_agent"],
-                        value="typefly_baseline",
-                        label="Framework Mode",
+                        choices=[
+                            MODE_TYPEFLY_ONESHOT,
+                            MODE_TYPEFLY_THRESHOLD_REPLAN,
+                            MODE_AGENT_HEARTBEAT_SOFT,
+                            MODE_AGENT_HEARTBEAT_HARDGATE,
+                        ],
+                        value=MODE_TYPEFLY_ONESHOT,
+                        label="Execution Mode",
                     )
                     baseline_scene_choices = [sid for sid in ("SCENE_BENCHMARK_DEMO", "SCENE_MANUAL_WORKER_CONTROL") if sid in BASELINE_SCENES]
                     self.baseline_scene_selector = gr.Dropdown(
@@ -479,11 +490,10 @@ class TypeFly:
         return f"Baseline scene `{normalized}` applied. drone_init={self._fmt_vec(state.get('drone_initial_pose'))} user={self._fmt_vec(state.get('user_position'))} user_yaw={user_yaw_deg:.1f}deg"
 
     def set_framework_mode(self, framework_mode: str):
-        normalized = str(framework_mode or "typefly_baseline").strip().lower()
-        if normalized not in {"typefly_baseline", "langgraph_agent"}:
-            normalized = "typefly_baseline"
+        normalized = self.llm_controller._normalize_framework_mode(framework_mode)
         self.selected_framework_mode = normalized
-        return f"Framework mode switched to `{normalized}`."
+        print_t(f"[MODE] selected={normalized}")
+        return f"Execution mode switched to `{normalized}`."
 
     def _apply_mode_and_collect(self, scenario_name):
         normalized = normalize_scenario_name(scenario_name)
@@ -597,7 +607,7 @@ class TypeFly:
             )
             self.worker_collision_active = {k: False for k in self.worker_collision_active.keys()}
             self.mission_collision_count = 0
-            framework_mode = str(getattr(self, "selected_framework_mode", "typefly_baseline"))
+            framework_mode = str(getattr(self, "selected_framework_mode", MODE_TYPEFLY_ONESHOT))
             task_thread = Thread(
                 target=self.llm_controller.execute_task_description,
                 args=(message, framework_mode),

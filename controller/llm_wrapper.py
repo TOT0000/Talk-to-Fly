@@ -8,12 +8,13 @@ GEMINI_BASE_URL = os.environ.get(
     "GEMINI_BASE_URL",
     "https://generativelanguage.googleapis.com/v1beta/openai/",
 )
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL_NAME = "gpt-4o"
+GEMINI_MODEL = MODEL_NAME
 
 # Keep legacy aliases for compatibility with existing callers/UI toggles.
-GPT3 = GEMINI_MODEL
-GPT4 = GEMINI_MODEL
-LLAMA3 = GEMINI_MODEL
+GPT3 = MODEL_NAME
+GPT4 = MODEL_NAME
+LLAMA3 = MODEL_NAME
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 chat_log_path = os.path.join(CURRENT_DIR, "assets/chat_log.txt")
@@ -48,7 +49,8 @@ class LLMWrapper:
         )
 
     def request(self, prompt, model_name=GEMINI_MODEL, stream=False) -> str | Stream[ChatCompletion.ChatCompletionChunk]:
-        selected_model = str(model_name or GEMINI_MODEL)
+        # Model is intentionally fixed to gpt-4o.
+        selected_model = MODEL_NAME
         print_debug(
             "[LLM-REQUEST] "
             f"model={selected_model} "
