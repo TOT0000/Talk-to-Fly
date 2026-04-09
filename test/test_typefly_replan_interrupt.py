@@ -91,7 +91,7 @@ def test_typefly_replan_uses_fresh_llm_response_and_discards_old_queue(monkeypat
     controller.message_queue = None
     controller.execution_history = []
     controller.current_plan = None
-    controller.framework_mode = "typefly_baseline"
+    controller.framework_mode = "typefly-threshold-replan"
     controller.execution_mode = "Waiting"
     controller.active_objective_set = {"active_checkpoint_ids": []}
     controller.latest_benchmark_progress = {"completed": []}
@@ -120,7 +120,7 @@ def test_typefly_replan_uses_fresh_llm_response_and_discards_old_queue(monkeypat
 
     monkeypatch.setattr("controller.llm_controller.AUTO_REPLAN_PROTECTION_STATEMENTS", 0)
 
-    controller.execute_task_description("run mission", framework_mode="typefly_baseline")
+    controller.execute_task_description("run mission", framework_mode="typefly-threshold-replan")
 
     assert len(planner_calls) == 2
     assert queued_programs == ["gc('A1');d(2.0);", "ml(1.0);gc('A2');d(2.0);"]
