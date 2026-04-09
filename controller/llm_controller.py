@@ -1183,6 +1183,11 @@ class LLMController():
         return None
 
     def _should_abort_current_execution_for_replan(self) -> Tuple[bool, str]:
+        # In Agent Mode (LangGraph), disable collision-probability hard-threshold
+        # auto-interrupt behavior. Agent decisions should rely on geometry + risk
+        # reasoning in the planner, not a fixed 0.50 trigger in controller runtime.
+        if str(getattr(self, "framework_mode", "")).strip().lower() == "langgraph_agent":
+            return False, ""
         snapshot = self.get_live_ui_snapshot()
         if not isinstance(snapshot, dict):
             return False, ""
