@@ -83,4 +83,4 @@ Never include arithmetic, logical operators, or indexing directly in a function 
 
 
 IMPORTANT REMINDER:
-When generating control plans, you must rely exclusively on the style and structure demonstrated in the provided plan_examples.txt. The guides.txt and prompt_plan.txt exist to reinforce and highlight these mandatory constraints. Ignoring these instructions will lead to invalid MiniSpec plans, runtime errors, or task failure. Always generate correct and parsable MiniSpec programs.
+When generating control plans, you must rely exclusively on the style and structure demonstrated in the provided prompt examples sections (TypeFly initial/replan and Agent decomposition/mode-action/reflection examples). The guides and prompt templates exist to reinforce these mandatory constraints. Ignoring these instructions will lead to invalid MiniSpec plans, runtime errors, or task failure. Always generate correct and parsable MiniSpec programs.
