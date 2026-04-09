@@ -1552,6 +1552,11 @@ class LLMController():
                         raise RuntimeError("TypeFly-OneShot does not permit replan.")
                     replan_attempts += 1
                     self._replan_attempts = replan_attempts
+                    if replan_source == "collision_threshold_callback":
+                        print_t(
+                            f"[TYPEFLY-INTERRUPT-REPLAN] triggered by collision_probability > "
+                            f"{COLLISION_PROBABILITY_REPLAN_THRESHOLD:.1f}"
+                        )
                     print_t(f"[FULL-REPLAN] mode={selected_framework} count={replan_attempts}")
                     print_t(f"[REPLAN-COUNT] current={replan_attempts} limit={max_replan_attempts}")
                     self.task_run_logger.update_execution_info(
@@ -1582,19 +1587,43 @@ class LLMController():
                     f"ret_replan={bool(getattr(ret_val, 'replan', False))}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
-                if selected_framework != MODE_TYPEFLY_ONESHOT and ((not plan_completed) or (active_ids and (not zone_completed))):
+                if (not plan_completed) or (active_ids and (not zone_completed)):
+                    self.append_message(
+                        f"[LOG] Completion mismatch detected (auto-replan disabled), "
+                        f"missing={missing_from_plan if missing_from_plan else '[]'}"
+                    )
+                remaining_active = sorted(cid for cid in active_ids if cid not in completed_set)
+                if selected_framework == MODE_TYPEFLY_THRESHOLD_REPLAN and remaining_active:
+                    print_t(
+                        "[TYPEFLY-POSTCHECK] "
+                        f"queue finished but remaining checkpoints exist: {remaining_active}"
+                    )
+                    self.append_message(
+                        f"[LOG] [TYPEFLY-POSTCHECK] queue finished but remaining checkpoints exist: {remaining_active}"
+                    )
+                    if replan_attempts >= max_replan_attempts:
+                        print_t(f"[REPLAN-COUNT] current={replan_attempts} limit={max_replan_attempts}")
+                        print_t("[TYPEFLY-POSTCHECK-REPLAN] skip auto replan because replan cap reached")
+                        raise RuntimeError(
+                            "Post-check auto replan blocked by replan cap with remaining checkpoints: "
+                            f"{remaining_active}"
+                        )
+                    print_t(
+                        "[TYPEFLY-POSTCHECK-REPLAN] "
+                        f"remaining checkpoints after previous replan: {remaining_active}"
+                    )
+                    print_t("[TYPEFLY-POSTCHECK-REPLAN] invoking automatic replan for unfinished checkpoints")
                     replan_attempts += 1
                     self._replan_attempts = replan_attempts
                     print_t(f"[FULL-REPLAN] mode={selected_framework} count={replan_attempts}")
                     print_t(f"[REPLAN-COUNT] current={replan_attempts} limit={max_replan_attempts}")
-                    if replan_attempts > max_replan_attempts:
-                        raise RuntimeError(
-                            "Task end check failed: plan/objective completion mismatch "
-                            f"(missing={missing_from_plan}, zone_completed={zone_completed})"
-                        )
+                    self.task_run_logger.update_execution_info(
+                        execution_success=False,
+                        failure_reason="post_queue_unfinished_checkpoints_auto_replan",
+                        task_completed=False,
+                    )
                     self.append_message(
-                        f"[LOG] Completion mismatch detected, replan attempt={replan_attempts}, "
-                        f"missing={missing_from_plan if missing_from_plan else '[]'}"
+                        f"[LOG] [TYPEFLY-POSTCHECK-REPLAN] invoking automatic replan for unfinished checkpoints: {remaining_active}"
                     )
                     self.execution_mode = "Planning"
                     continue

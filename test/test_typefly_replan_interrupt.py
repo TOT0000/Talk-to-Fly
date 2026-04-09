@@ -127,3 +127,119 @@ def test_typefly_replan_uses_fresh_llm_response_and_discards_old_queue(monkeypat
     assert queued_programs[1] != queued_programs[0]
     plan_markers = [msg for msg in displayed_messages if isinstance(msg, str) and msg.startswith("[Plan]:")]
     assert len(plan_markers) == 2
+
+
+def _build_minimal_controller_for_postcheck(plans, completed_after_exec, mode="typefly-threshold-replan", replan_limit=5):
+    pytest.importorskip("PIL")
+    from controller.llm_controller import LLMController
+
+    controller = LLMController.__new__(LLMController)
+    displayed_messages = []
+    queued_programs = []
+    planner_calls = []
+
+    class _Planner:
+        def plan(self, **kwargs):
+            planner_calls.append(kwargs)
+            return plans[len(planner_calls) - 1]
+
+    def _execute_minispec_stub(program_text, silent=False, allow_auto_interrupt=True):
+        queued_programs.append(program_text)
+        idx = len(queued_programs) - 1
+        controller.latest_benchmark_progress = {"completed": list(completed_after_exec[idx])}
+        return MiniSpecReturnValue("ok", False)
+
+    controller.replan_limit = int(replan_limit)
+    controller.controller_wait_takeoff = False
+    controller.message_queue = None
+    controller.execution_history = []
+    controller.current_plan = None
+    controller.framework_mode = mode
+    controller.execution_mode = "Waiting"
+    controller.active_objective_set = {"active_checkpoint_ids": ["A1", "A2"]}
+    controller.latest_benchmark_progress = {"completed": []}
+    controller._benchmark_plan_checkpoint_sequence = []
+    controller._task_id_counter = 0
+    controller.auto_replan_armed = True
+    controller.auto_replan_protection_remaining = 0
+    controller.planner_mode = "llm"
+    controller.planner = _Planner()
+    controller.task_run_logger = _NoopLogger()
+    controller.vision = SimpleNamespace(get_obj_list=lambda: "")
+    controller.enable_video = False
+    controller.state_provider = SimpleNamespace(debug_log_latest_localization_snapshot=lambda **kwargs: None)
+    controller.safety_assessor = SimpleNamespace(build_from_provider=lambda provider: None)
+
+    controller.append_message = displayed_messages.append
+    controller._resolve_active_objective_set = lambda task_text: {"active_checkpoint_ids": ["A1", "A2"]}
+    controller._reset_benchmark_progress_tracking = lambda: None
+    controller._format_planner_location_info = lambda: "loc"
+    controller.get_live_ui_snapshot = lambda: {"safety_context": None, "benchmark_progress": dict(controller.latest_benchmark_progress)}
+    controller._debug_log_safety_context = lambda safety: None
+    controller._build_baseline_control_plan = lambda **kwargs: None
+    controller._sanitize_minispec_plan = lambda raw_plan: str(raw_plan)
+    controller.execute_minispec = _execute_minispec_stub
+    controller.get_active_scenario_name = lambda: "test"
+    controller._pending_heartbeat_replan_plan = None
+    controller._pending_heartbeat_reason = ""
+
+    return controller, planner_calls, queued_programs, displayed_messages
+
+
+def test_threshold_mode_postqueue_unfinished_triggers_auto_replan(monkeypatch):
+    controller, planner_calls, queued_programs, displayed_messages = _build_minimal_controller_for_postcheck(
+        plans=["gc('A1');", "gc('A2');"],
+        completed_after_exec=[["A1"], ["A1", "A2"]],
+        mode="typefly-threshold-replan",
+        replan_limit=5,
+    )
+    monkeypatch.setattr("controller.llm_controller.AUTO_REPLAN_PROTECTION_STATEMENTS", 0)
+    controller.execute_task_description("run mission", framework_mode="typefly-threshold-replan")
+
+    assert len(planner_calls) == 2
+    assert queued_programs == ["gc('A1');", "gc('A2');"]
+    assert any("TYPEFLY-POSTCHECK-REPLAN" in str(msg) for msg in displayed_messages)
+
+
+def test_threshold_mode_postqueue_replan_repeats_until_completed(monkeypatch):
+    controller, planner_calls, queued_programs, _ = _build_minimal_controller_for_postcheck(
+        plans=["gc('A1');", "gc('A1');", "gc('A2');"],
+        completed_after_exec=[[], ["A1"], ["A1", "A2"]],
+        mode="typefly-threshold-replan",
+        replan_limit=5,
+    )
+    monkeypatch.setattr("controller.llm_controller.AUTO_REPLAN_PROTECTION_STATEMENTS", 0)
+    controller.execute_task_description("run mission", framework_mode="typefly-threshold-replan")
+
+    assert len(planner_calls) == 3
+    assert len(queued_programs) == 3
+
+
+def test_threshold_mode_postqueue_replan_stops_at_cap(monkeypatch):
+    controller, planner_calls, queued_programs, displayed_messages = _build_minimal_controller_for_postcheck(
+        plans=["gc('A1');", "gc('A1');", "gc('A1');"],
+        completed_after_exec=[[], [], []],
+        mode="typefly-threshold-replan",
+        replan_limit=1,
+    )
+    monkeypatch.setattr("controller.llm_controller.AUTO_REPLAN_PROTECTION_STATEMENTS", 0)
+    controller.execute_task_description("run mission", framework_mode="typefly-threshold-replan")
+
+    assert len(planner_calls) == 2
+    assert len(queued_programs) == 2
+    assert any("Error: Post-check auto replan blocked by replan cap" in str(msg) for msg in displayed_messages)
+
+
+def test_postqueue_auto_replan_not_applied_to_agent_modes(monkeypatch):
+    controller, planner_calls, queued_programs, displayed_messages = _build_minimal_controller_for_postcheck(
+        plans=["gc('A1');", "gc('A2');"],
+        completed_after_exec=[["A1"], ["A1", "A2"]],
+        mode="agent-heartbeat-soft",
+        replan_limit=5,
+    )
+    monkeypatch.setattr("controller.llm_controller.AUTO_REPLAN_PROTECTION_STATEMENTS", 0)
+    controller.execute_task_description("run mission", framework_mode="agent-heartbeat-soft")
+
+    assert len(planner_calls) == 1
+    assert len(queued_programs) == 1
+    assert not any("TYPEFLY-POSTCHECK-REPLAN" in str(msg) for msg in displayed_messages)
