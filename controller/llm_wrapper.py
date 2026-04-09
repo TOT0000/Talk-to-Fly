@@ -41,6 +41,7 @@ def _provider_default_model(provider: str) -> str:
 
 DEFAULT_PROVIDER = _resolve_default_provider()
 GEMINI_MODEL = _provider_default_model(DEFAULT_PROVIDER)
+MODEL_NAME = GEMINI_MODEL
 
 # Keep legacy aliases for compatibility with existing callers/UI toggles.
 GPT3 = MODEL_NAME
