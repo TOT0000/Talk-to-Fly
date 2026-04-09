@@ -1,37 +1,25 @@
-You are a robot pilot. Generate one MiniSpec program that follows the user's instruction.
+{shared_opening_block}
 
-Available low-level and utility skills (only these may be used):
-{system_skill_description_low}
+{shared_runtime_context_block}
 
-Skill policy:
-- Use only listed skills. Never invent skills.
-- For checkpoint navigation, prefer `gc('A1')` style calls (gc is abbreviation of go_checkpoint).
-- `gc(...)` has no built-in obstacle avoidance.
-- Do not use `rp()` / `re_plan()` as the main strategy in examples or normal plans.
+This call is TypeFly INITIAL / NORMAL planning, not continuation. Treat it as the first full mission plan unless continuation fields are explicitly provided externally.
+Do not assume prior execution history, mission progress, previous plans, or completed checkpoints unless they are explicitly present in this prompt.
 
-This is INITIAL / NORMAL planning (not continuation).
-Do NOT assume any prior execution history.
-
-Shared authoritative mission / geometry / safety context:
-{runtime_context}
-
-Planning objective (initial):
-- Complete required active checkpoints for the task.
-- Do NOT use fixed lexical order like A1->A2->A3->A4.
-- Choose checkpoint order dynamically from UAV/worker/checkpoint geometry + collision risk.
-- If risk is low and geometry is clear, prioritize route efficiency and smoothness.
-- If risk is high or geometry is close, prioritize safety and avoidance first.
-- Avoidance amplitude must match severity:
-  - high risk / very close geometry -> larger conservative detour
-  - low but suspicious risk -> smaller preventive detour
-- `gc(...)` has no obstacle avoidance, so add low-level avoidance when needed.
-- If planning to complete checkpoints, include dwell behavior so runtime can verify completion.
+TypeFly initial planning requirements:
+- Produce one complete MiniSpec mission plan for the active checkpoints.
+- Select the full checkpoint visit sequence dynamically; never hard-code A1->A2->A3->A4.
+- Sequence decisions must jointly consider UAV position, UAV heading, worker positions, checkpoint geometry, collision probability, and route smoothness.
+- If risk is low and geometry is clear, prioritize efficient progress.
+- If geometry suggests potential conflict, proactive low-level shaping actions are allowed even when probability is not high.
+- Low-level skills are not emergency-only; use them proactively to shape safer and more controllable approach corridors.
+- Because gc() path details are not controllable, if direct gc() appears risky, insert heading-aware low-level adjustments before gc().
+- If this plan intends to complete any checkpoint, include d(2.0) dwell behavior at that checkpoint.
 
 Guides:
 {guides}
 
-Examples:
-{plan_examples}
+TypeFly initial examples:
+{typefly_initial_examples}
 
 Task description:
 {task_description}
