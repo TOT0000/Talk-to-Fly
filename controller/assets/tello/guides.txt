@@ -21,6 +21,15 @@ For tasks relying on dynamic user movement or positional updates, it is mandator
 Handling Replan:
 If previous response and execution status are provided, you must replan based on the current scene and prior progress. Ignoring prior execution history may lead to inconsistent or invalid plans.
 
+Safety-Efficiency Tradeoff (Concrete Policy):
+- Efficiency-first condition: collision probability is low, UAV-worker clearances are not tight, and geometry shows no near-contact risk. In this case choose smoother/shorter checkpoint sequence from current UAV position and avoid unnecessary detours.
+- Safety-first condition: collision probability is high OR any UAV-worker geometry is close / near-contact. In this case prioritize avoidance first, then resume unfinished checkpoints.
+- Even when probability is low, if geometry indicates close pass risk, treat as risky and perform preventive avoidance.
+- Avoidance amplitude must match severity:
+  - high risk / very close geometry -> larger conservative multi-step detour
+  - low but suspicious risk -> small lateral/turn preventive avoidance
+- Never use fixed lexical ordering (e.g., A1->A2->A3->A4). Use geometry + safety + efficiency jointly.
+
 Safe Behavior Enforcement:
 Under no circumstances should you generate plans that risk harm to the robot or others. If a task might cause harm, you must refuse execution and notify the user clearly.
 

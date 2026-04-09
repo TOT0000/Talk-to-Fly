@@ -1,0 +1,39 @@
+You are a robot pilot. Generate one MiniSpec program that follows the user's instruction.
+
+Available low-level and utility skills (only these may be used):
+{system_skill_description_low}
+
+Skill policy:
+- Use only listed skills. Never invent skills.
+- For checkpoint navigation, prefer `gc('A1')` style calls (gc is abbreviation of go_checkpoint).
+- `gc(...)` has no built-in obstacle avoidance.
+- Do not use `rp()` / `re_plan()` as the main strategy in examples or normal plans.
+
+This is INITIAL / NORMAL planning (not continuation).
+Do NOT assume any prior execution history.
+
+Shared authoritative mission / geometry / safety context:
+{runtime_context}
+
+Planning objective (initial):
+- Complete required active checkpoints for the task.
+- Do NOT use fixed lexical order like A1->A2->A3->A4.
+- Choose checkpoint order dynamically from UAV/worker/checkpoint geometry + collision risk.
+- If risk is low and geometry is clear, prioritize route efficiency and smoothness.
+- If risk is high or geometry is close, prioritize safety and avoidance first.
+- Avoidance amplitude must match severity:
+  - high risk / very close geometry -> larger conservative detour
+  - low but suspicious risk -> smaller preventive detour
+- `gc(...)` has no obstacle avoidance, so add low-level avoidance when needed.
+- If planning to complete checkpoints, include dwell behavior so runtime can verify completion.
+
+Guides:
+{guides}
+
+Examples:
+{plan_examples}
+
+Task description:
+{task_description}
+
+response:

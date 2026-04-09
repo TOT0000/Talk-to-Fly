@@ -8,6 +8,7 @@ from .vision_skill_wrapper import VisionSkillWrapper
 from .utils import print_debug, print_t
 from .minispec_interpreter import MiniSpecValueType, evaluate_value
 from .abs.robot_wrapper import RobotType
+from .benchmark_layout import CHECKPOINT_DWELL_SECONDS, CHECKPOINT_RADIUS_M, UAV_RADIUS_M, WORKER_RADIUS_M
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.50
@@ -24,6 +25,8 @@ class LLMPlanner():
 
         # read prompt from txt
         self.prompt_plan_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/prompt_plan.txt")
+        self.prompt_plan_initial_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/prompt_plan_initial.txt")
+        self.prompt_plan_replan_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/prompt_plan_replan.txt")
         self.prompt_probe_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/prompt_probe.txt")
         self.guides_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/guides.txt")
         self.plan_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/plan_examples.txt")
@@ -38,13 +41,21 @@ class LLMPlanner():
 
         with open(self.plan_examples_path, "r") as f:
             self.plan_examples = f.read()
+        with open(self.prompt_plan_initial_path, "r") as f:
+            self.prompt_plan_initial = f.read()
+        with open(self.prompt_plan_replan_path, "r") as f:
+            self.prompt_plan_replan = f.read()
         self.prompt_langgraph_decomposition = (
             "You are TypeFly LangGraph Task Decomposer.\n"
             "Return checkpoint IDs only, as a JSON array, in execution order.\n"
             "Rules:\n"
             "1) Only use IDs from allowed checkpoints.\n"
-            "2) Prefer single-zone checkpoints that match the task.\n"
-            "3) Do not output explanation.\n"
+            "2) Prefer safer + shorter + smoother order from current UAV position.\n"
+            "3) Do not mechanically follow A1->A2->A3->A4.\n"
+            "4) If a checkpoint is temporarily risky due to worker proximity, defer it.\n"
+            "5) Do not output explanation.\n"
+            "Shared authoritative mission/geometry/safety context:\n"
+            "{shared_context_block}\n"
             "Task: {task_description}\n"
             "Allowed checkpoints: {allowed_checkpoints}\n"
             "Active zones: {active_zones}\n"
@@ -109,9 +120,13 @@ class LLMPlanner():
             "next_subgoal default is null.\n"
             "Rules:\n"
             "- Decide mode from latest runtime state; do not mechanically repeat previous mode.\n"
+            "- action may be a short MiniSpec segment (1~4 statements), not only one skill call.\n"
+            "- Evaluate risk using geometry + probability jointly (UAV/worker positions + radii + collision probability), not a single hard threshold.\n"
+            "- If probability is low but geometry is too close, still treat as risky.\n"
+            "- Match avoidance amplitude to risk severity: high risk -> larger conservative detour; low-but-suspicious risk -> small preventive detour.\n"
             "- mode-action alignment is strict:\n"
-            "  - If mode = recovery: action MUST be a recovery-style repositioning step (move_forward/move_backward/move_left/move_right/turn_cw/turn_ccw or equivalent); action MUST NOT be go_checkpoint(current_subgoal).\n"
-            "  - If mode = approach: action should normally be go_checkpoint(current_subgoal); only deviate when immediate safety requires a brief non-go_checkpoint micro-step.\n"
+            "  - If mode = recovery: action MUST start with one or more recovery-style repositioning steps; do not start with go_checkpoint(current_subgoal).\n"
+            "  - If mode = approach: prioritize mission progress and may include short supporting moves before/after go_checkpoint(current_subgoal).\n"
             "  - If mode = skip_current_subgoal: action should progress toward the newly chosen checkpoint, and next_subgoal MUST be provided and MUST differ from current_subgoal.\n"
             "  - If mode = replan: this means strategy-level change (route/order/tactic redesign), not just one-step local recovery.\n"
             "- Recovery cadence must be explicit:\n"
@@ -137,15 +152,18 @@ class LLMPlanner():
             "- Output format strictness:\n"
             "  - reason: one short concrete sentence.\n"
             "  - strategy_summary: one short concrete sentence.\n"
-            "  - action: exactly one short MiniSpec statement ending with ';'.\n"
+            "  - action: a short MiniSpec segment (1~4 statements), each statement ending with ';'.\n"
             "  - why_action_matches_mode: one short sentence explicitly proving action and mode are consistent.\n"
-            "Executable action grammar (must match exactly one statement):\n"
+            "Executable action grammar (each statement must match one of the following):\n"
             "- move_forward(0.1~2.0); move_backward(0.1~2.0); move_left(0.1~2.0); move_right(0.1~2.0);\n"
             "- turn_cw(5~90); turn_ccw(5~90); delay(0.1~2.0); go_checkpoint(\"A1\"); log(\"short_text\");\n"
             "Alias normalization allowed by system: move_back->move_backward, hold/wait/reobserve->delay.\n"
             "Output examples (format + semantics):\n"
-            "{{\"mode\":\"approach\",\"reason\":\"Risk is moderate and path is usable.\",\"strategy_summary\":\"Resume mission progress toward current checkpoint.\",\"action\":\"go_checkpoint(\\\"A2\\\");\",\"next_subgoal\":null,\"why_action_matches_mode\":\"Approach mode should prioritize direct progress to the current subgoal.\"}}\n"
-            "{{\"mode\":\"recovery\",\"reason\":\"Immediate collision risk near A2 is high.\",\"strategy_summary\":\"Create lateral spacing before re-observing risk.\",\"action\":\"move_left(0.8);\",\"next_subgoal\":null,\"why_action_matches_mode\":\"Recovery mode uses one short de-risking reposition step instead of direct checkpoint approach.\"}}\n"
+            "{{\"mode\":\"approach\",\"reason\":\"Risk is low and geometry is clear toward A2.\",\"strategy_summary\":\"Use efficient progress with minimal detour.\",\"action\":\"go_checkpoint(\\\"A2\\\");delay(0.5);\",\"next_subgoal\":null,\"why_action_matches_mode\":\"Approach mode advances mission while keeping short observation cadence.\"}}\n"
+            "{{\"mode\":\"recovery\",\"reason\":\"Risk near worker_2 is high and geometry is too close.\",\"strategy_summary\":\"Take a conservative multi-step detour before resuming.\",\"action\":\"move_left(0.9);move_backward(0.6);turn_cw(20);delay(0.4);\",\"next_subgoal\":null,\"why_action_matches_mode\":\"Recovery mode applies larger avoidance when risk and proximity are both high.\"}}\n"
+            "{{\"mode\":\"recovery\",\"reason\":\"Potential conflict is mild but worth early avoidance.\",\"strategy_summary\":\"Apply a small preventive sidestep then re-observe.\",\"action\":\"move_right(0.3);turn_ccw(10);delay(0.3);\",\"next_subgoal\":null,\"why_action_matches_mode\":\"Recovery mode can use small-amplitude avoidance for low but suspicious risk.\"}}\n"
+            "Shared authoritative mission/geometry/safety context:\n"
+            "{shared_context_block}\n"
             "Task: {task_description}\n"
             "Current mode: {current_mode}\n"
             "Current subgoal: {current_subgoal}\n"
@@ -186,7 +204,11 @@ class LLMPlanner():
             "- You may reprioritize checkpoints when current subgoal is temporarily high-risk or blocked.\n"
             "- Reprioritization must be temporary and mission-oriented.\n"
             "- Prioritize safe + efficient ordering; do not keep a fixed lexical checkpoint order.\n"
+            "- Use geometry + probability jointly in reflection: UAV/worker/checkpoint positions and radii with collision risk.\n"
+            "- Explicitly encode whether risk was high-conservative-detour case or low-risk-small-avoidance case.\n"
             "- Keep every field concise.\n"
+            "Shared authoritative mission/geometry/safety context:\n"
+            "{shared_context_block}\n"
             "Task: {task_description}\n"
             "Current subgoal: {current_subgoal}\n"
             "Route decision from evaluator: {route_decision}\n"
@@ -224,14 +246,20 @@ class LLMPlanner():
         except Exception:
             return "(n/a)"
 
-    def _build_runtime_context_block(self, safety_context: Optional[SafetyContext]) -> str:
-        snapshot = {}
-        if self.controller is not None and hasattr(self.controller, "get_live_ui_snapshot"):
-            try:
-                snapshot = self.controller.get_live_ui_snapshot() or {}
-            except Exception:
-                snapshot = {}
-
+    def _build_runtime_context_block(
+        self,
+        safety_context: Optional[SafetyContext],
+        *,
+        snapshot: Optional[dict] = None,
+        skill_catalog_text: Optional[str] = None,
+    ) -> str:
+        if snapshot is None:
+            snapshot = {}
+            if self.controller is not None and hasattr(self.controller, "get_live_ui_snapshot"):
+                try:
+                    snapshot = self.controller.get_live_ui_snapshot() or {}
+                except Exception:
+                    snapshot = {}
         drone_pos = snapshot.get("drone_est_bias_corrected") or snapshot.get("drone_est") or snapshot.get("drone_gt")
         workers = list(snapshot.get("workers") or [])
         workers_sorted = sorted(workers, key=lambda row: str(row.get("id", "")))
@@ -249,6 +277,12 @@ class LLMPlanner():
                 worker_lines.append(f"- {label} bias-corrected estimated position: (n/a)")
 
         current_collision_probability = 0.0 if safety_context is None else float(safety_context.current_collision_probability)
+        per_worker_probs = []
+        if safety_context is not None:
+            for row in (getattr(safety_context, "per_worker_collision_probabilities", []) or []):
+                worker_id = str(row.get("id", "unknown"))
+                p_val = float(row.get("collision_probability", 0.0))
+                per_worker_probs.append(f"{worker_id}:{p_val:.6f}")
         dominant_worker = "n/a"
         if safety_context is not None:
             dominant_worker = str(getattr(safety_context, "dominant_threat_id", "n/a") or "n/a")
@@ -271,19 +305,50 @@ class LLMPlanner():
         if not checkpoint_lines:
             checkpoint_lines.append("- (n/a)")
 
+        shared_rules_block = (
+            "Authoritative geometry/safety/task rules:\n"
+            "- Plan using bias-corrected positions.\n"
+            "- UAV is modeled as a circle.\n"
+            "- Each worker is modeled as a circle.\n"
+            "- Each checkpoint is modeled as a circle.\n"
+            f"- UAV radius: {float(UAV_RADIUS_M):.2f} m.\n"
+            f"- Worker radius: {float(WORKER_RADIUS_M):.2f} m.\n"
+            f"- Checkpoint radius: {float(CHECKPOINT_RADIUS_M):.2f} m.\n"
+            f"- Checkpoint completion requires UAV true position to stay continuously inside checkpoint radius for {float(CHECKPOINT_DWELL_SECONDS):.1f} seconds.\n"
+            "- Leaving before dwell threshold resets the dwell timer.\n"
+            "- Zone completion requires all active checkpoints in that zone to be completed.\n"
+            "- Completed checkpoints must not be redone.\n"
+            "- Balance safety and efficiency jointly.\n"
+            "- Do not use fixed lexical order such as A1->A2->A3->A4.\n"
+            "- Efficiency-first when collision risk is low and geometric clearance is sufficient.\n"
+            "- Safety-first when risk is high or geometry is close, even if probability is low.\n"
+            "- Avoidance amplitude must match severity: high-risk -> larger conservative detour; low-but-suspicious -> small preventive detour.\n"
+        )
+        skill_block = ""
+        if skill_catalog_text:
+            skill_block = (
+                "Skill policy:\n"
+                "- You may only use listed skills. Do not invent new skills.\n"
+                "Allowed skills:\n"
+                f"{skill_catalog_text}\n"
+            )
         return (
-            "UAV state:\n"
+            skill_block
+            + "UAV state:\n"
             f"- UAV bias-corrected estimated position: {self._fmt_xyz(drone_pos)}\n"
             "Workers state:\n"
             + "\n".join(worker_lines)
             + "\n"
             f"- dominant risky worker: {dominant_worker}\n"
             f"- current collision probability: {current_collision_probability:.6f}\n"
+            f"- per-worker collision probability: {per_worker_probs if per_worker_probs else ['(n/a)']}\n"
             "Mission objective:\n"
             f"- active zones: {active_zone_ids if active_zone_ids else ['(n/a)']}\n"
             f"- active checkpoints: {active_checkpoint_ids if active_checkpoint_ids else ['(n/a)']}\n"
             "Active checkpoint coordinates (x, y):\n"
             + "\n".join(checkpoint_lines)
+            + "\n"
+            + shared_rules_block
         )
 
     def _extract_completed_checkpoints_from_history(self, execution_history) -> list[str]:
@@ -326,6 +391,14 @@ class LLMPlanner():
             current_target = str(current_target).upper()
         if not current_target:
             current_target = "(n/a)" if not remaining else remaining[0]
+        mission_progress = {
+            "current_target": current_target,
+            "in_radius": progress.get("in_radius"),
+            "dwell_seconds": progress.get("dwell_seconds"),
+            "required_dwell_seconds": progress.get("required_dwell_seconds"),
+            "dwell_satisfied": progress.get("dwell_satisfied"),
+            "completed": completed,
+        }
         dominant_worker = "n/a"
         if safety_context is not None:
             dominant_worker = str(getattr(safety_context, "dominant_threat_id", "n/a") or "n/a")
@@ -338,6 +411,8 @@ class LLMPlanner():
             "Replan runtime history (this call is replan, not a fresh task):\n"
             f"- original user task: {task_description}\n"
             f"- previous plan: {previous_plan_text}\n"
+            f"- execution history: {execution_history if execution_history is not None else '(n/a)'}\n"
+            f"- mission progress snapshot: {mission_progress}\n"
             f"- completed checkpoints: {completed if completed else ['(none_detected)']}\n"
             f"- remaining checkpoints: {remaining if remaining else ['(none)']}\n"
             f"- current target checkpoint: {current_target}\n"
@@ -388,16 +463,26 @@ class LLMPlanner():
                 )
 
         full_scene = f"{scene_description}\n{location_info}".strip()
-        runtime_context_block = self._build_runtime_context_block(safety_context)
         snapshot = {}
         if self.controller is not None and hasattr(self.controller, "get_live_ui_snapshot"):
             try:
                 snapshot = self.controller.get_live_ui_snapshot() or {}
             except Exception:
                 snapshot = {}
+        runtime_context_block = self._build_runtime_context_block(
+            safety_context,
+            snapshot=snapshot,
+            skill_catalog_text=str(self.low_level_skillset),
+        )
         objective = dict(snapshot.get("active_objective_set") or {})
         active_checkpoint_ids = [str(v) for v in objective.get("active_checkpoint_ids", [])]
         benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
+        current_collision_probability = 0.0 if safety_context is None else float(safety_context.current_collision_probability)
+        has_continuation_context = bool(previous_plan or execution_history or benchmark_progress.get("completed"))
+        is_replan_call = bool(
+            current_collision_probability >= float(COLLISION_PROBABILITY_REPLAN_THRESHOLD)
+            and has_continuation_context
+        )
         replan_history_block = self._build_replan_history_block(
             task_description=task_description,
             previous_plan=previous_plan,
@@ -406,17 +491,21 @@ class LLMPlanner():
             active_checkpoint_ids=active_checkpoint_ids,
             benchmark_progress=benchmark_progress,
         )
-
-        prompt = self.prompt_plan.format(
+        prompt_template = (self.prompt_plan_replan if is_replan_call else self.prompt_plan_initial)
+        execution_history_block = (execution_history if is_replan_call else None)
+        mission_progress_block = (benchmark_progress if is_replan_call else None)
+        prompt = prompt_template.format(
             system_skill_description_low=self.low_level_skillset,
             guides=self.guides,
             plan_examples=self.plan_examples,
             error_message=error_message,
             scene_description=full_scene,
             task_description=task_description,
-            execution_history=execution_history,
             runtime_context=runtime_context_block,
             replan_history_block=replan_history_block,
+            execution_history=execution_history_block,
+            mission_progress=mission_progress_block,
+            previous_plan=previous_plan if is_replan_call else None,
         )
         dump_prompt = str(os.getenv("TYPEFLY_DUMP_LLM_PROMPT", "1")).strip().lower() not in {"0", "false", "no"}
         if dump_prompt:
@@ -430,7 +519,7 @@ class LLMPlanner():
                 print_debug(f"[P-PROMPT-DUMP] failed to write prompt: {exc}")
         print_t(f"[P] Planning request: {task_description}")
         print_debug(
-            f"[P-PROMPT-PATHS] prompt_plan={self.prompt_plan_path} guides={self.guides_path} examples={self.plan_examples_path}"
+            f"[P-PROMPT-PATHS] prompt_plan={(self.prompt_plan_replan_path if is_replan_call else self.prompt_plan_initial_path)} guides={self.guides_path} examples={self.plan_examples_path}"
         )
         print_debug(f"[P-RUNTIME-CONTEXT]\n{runtime_context_block}")
         if replan_history_block:
@@ -484,10 +573,20 @@ class LLMPlanner():
         active_checkpoint_ids: list[str],
         active_zone_ids: list[str],
     ) -> list[str]:
+        snapshot = self.controller.get_live_ui_snapshot() if (self.controller is not None and hasattr(self.controller, "get_live_ui_snapshot")) else {}
+        safety_context = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
+        shared_context_block = self._build_runtime_context_block(
+            safety_context,
+            snapshot=(snapshot if isinstance(snapshot, dict) else {}),
+            skill_catalog_text=(
+                "move_forward, move_backward, move_left, move_right, turn_cw, turn_ccw, delay, go_checkpoint, log"
+            ),
+        )
         prompt = self.prompt_langgraph_decomposition.format(
             task_description=str(task_description or ""),
             allowed_checkpoints=[str(v).upper() for v in list(active_checkpoint_ids or [])],
             active_zones=[str(v) for v in list(active_zone_ids or [])],
+            shared_context_block=shared_context_block,
         )
         raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
         parsed: list[str] = []
@@ -580,6 +679,15 @@ class LLMPlanner():
         subgoal_attempt_history: dict[str, list[str]],
         recent_history: list[dict],
     ) -> dict:
+        snapshot = self.controller.get_live_ui_snapshot() if (self.controller is not None and hasattr(self.controller, "get_live_ui_snapshot")) else {}
+        safety_context = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
+        shared_context_block = self._build_runtime_context_block(
+            safety_context,
+            snapshot=(snapshot if isinstance(snapshot, dict) else {}),
+            skill_catalog_text=(
+                "move_forward, move_backward, move_left, move_right, turn_cw, turn_ccw, delay, go_checkpoint, log"
+            ),
+        )
         prompt = self.prompt_langgraph_reflection.format(
             task_description=str(task_description or ""),
             current_subgoal=str(current_subgoal or "None"),
@@ -599,6 +707,7 @@ class LLMPlanner():
             blocked_workers_by_subgoal=str(dict(blocked_workers_by_subgoal or {})),
             subgoal_attempt_history=str(dict(subgoal_attempt_history or {})),
             recent_history=str(list(recent_history or [])[-6:]),
+            shared_context_block=shared_context_block,
         )
         raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
         parsed = self._safe_json_object(raw)
@@ -652,6 +761,15 @@ class LLMPlanner():
         dwell_required_seconds: float = 2.0,
         dwell_satisfied: bool = False,
     ) -> dict:
+        snapshot = self.controller.get_live_ui_snapshot() if (self.controller is not None and hasattr(self.controller, "get_live_ui_snapshot")) else {}
+        safety_context = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
+        shared_context_block = self._build_runtime_context_block(
+            safety_context,
+            snapshot=(snapshot if isinstance(snapshot, dict) else {}),
+            skill_catalog_text=(
+                "move_forward, move_backward, move_left, move_right, turn_cw, turn_ccw, delay, go_checkpoint, log"
+            ),
+        )
         prompt = self.prompt_langgraph_mode_action.format(
             task_description=str(task_description or ""),
             current_mode=str(current_mode or "approach"),
@@ -681,6 +799,7 @@ class LLMPlanner():
             stall_count=int(stall_count),
             repeated_action_count=int(repeated_action_count),
             recent_history=str(list(recent_history or [])[-4:]),
+            shared_context_block=shared_context_block,
         )
         raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
         parsed = self._safe_json_object(raw)
@@ -709,7 +828,7 @@ class LLMPlanner():
             retry_prompt = (
                 prompt
                 + "\n\nYour previous action was invalid/unparseable for MiniSpec."
-                + " Return JSON only. Keep same intent, but rewrite action as exactly one valid MiniSpec statement."
+                + " Return JSON only. Keep same intent, but rewrite action as a short valid MiniSpec segment (1~4 statements)."
             )
             retry_raw = str(self.llm.request(retry_prompt, self.model_name, stream=False) or "").strip()
             retry_parsed = self._safe_json_object(retry_raw)
@@ -807,53 +926,38 @@ class LLMPlanner():
             return ""
         text = re.sub(r"\s+", " ", text)
         commands = []
-        patterns = [
-            r'go_checkpoint\(\s*[\'"]?([A-Za-z]\d+)[\'"]?\s*\)\s*;?',
-            r'move_forward\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
-            r'move_backward\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
-            r'move_back\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
-            r'move_left\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
-            r'move_right\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
-            r'turn_cw\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
-            r'turn_ccw\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
-            r'turn_right\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
-            r'turn_left\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
-            r'delay\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
-            r'hold\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
-            r'wait\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
-            r'reobserve\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)\s*;?',
-            r'log\(\s*[\'"]([^\'"]{1,60})[\'"]\s*\)\s*;?',
-        ]
-        for pattern in patterns:
-            for match in re.finditer(pattern, text):
-                token = match.group(0)
-                token = token.strip()
-                if token.startswith("go_checkpoint"):
-                    cid = match.group(1).upper()
-                    commands.append(f'go_checkpoint("{cid}");')
-                elif token.startswith("log("):
-                    safe = re.sub(r"[^a-zA-Z0-9 _-]", "", match.group(1))[:60]
-                    commands.append(f'log("{safe}");')
-                else:
-                    name = token.split("(", 1)[0]
-                    alias = {
-                        "move_back": "move_backward",
-                        "turn_right": "turn_cw",
-                        "turn_left": "turn_ccw",
-                        "hold": "delay",
-                        "wait": "delay",
-                        "reobserve": "delay",
-                    }
-                    name = alias.get(name, name)
-                    value = float(match.group(1))
-                    if name.startswith("turn_"):
-                        commands.append(f"{name}({int(value)});")
-                    else:
-                        commands.append(f"{name}({value:.1f});")
-                if len(commands) >= 2:
-                    break
-            if len(commands) >= 2:
+        alias = {
+            "move_back": "move_backward",
+            "turn_right": "turn_cw",
+            "turn_left": "turn_ccw",
+            "hold": "delay",
+            "wait": "delay",
+            "reobserve": "delay",
+        }
+        parts = [p.strip() for p in text.split(";") if p.strip()]
+        for part in parts:
+            if len(commands) >= 4:
                 break
+            m = re.fullmatch(r'go_checkpoint\(\s*[\'"]?([A-Za-z]\d+)[\'"]?\s*\)', part)
+            if m:
+                commands.append(f'go_checkpoint("{m.group(1).upper()}");')
+                continue
+            m = re.fullmatch(r'log\(\s*[\'"]([^\'"]{1,60})[\'"]\s*\)', part)
+            if m:
+                safe = re.sub(r"[^a-zA-Z0-9 _-]", "", m.group(1))[:60]
+                commands.append(f'log("{safe}");')
+                continue
+            m = re.fullmatch(r'([a-zA-Z_]+)\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)', part)
+            if not m:
+                continue
+            name = alias.get(m.group(1), m.group(1))
+            if name not in {"move_forward", "move_backward", "move_left", "move_right", "turn_cw", "turn_ccw", "delay"}:
+                continue
+            value = float(m.group(2))
+            if name.startswith("turn_"):
+                commands.append(f"{name}({int(value)});")
+            else:
+                commands.append(f"{name}({value:.1f});")
         if not commands:
             lower = text.lower()
             number_match = re.search(r"([0-9]+(?:\.[0-9]+)?)", lower)
