@@ -817,6 +817,9 @@ class LLMController():
         checkpoint = BENCHMARK_CHECKPOINTS_BY_ID.get(checkpoint_key)
         if checkpoint is None:
             raise ValueError(f"Unknown checkpoint_id `{checkpoint_id}`")
+        # Ensure dwell/completion tracking follows the actual commanded checkpoint,
+        # instead of falling back to lexical benchmark order.
+        self.set_benchmark_progress_focus_checkpoint(checkpoint_key)
 
         max_step_m = 1.0
         min_axis_step_m = 0.12
@@ -1020,13 +1023,21 @@ class LLMController():
     def _should_trigger_auto_replan(self, current_p: float, source: str) -> bool:
         current_p = float(current_p)
         if self.auto_replan_protection_remaining > 0:
-            print_debug(
-                "[REPLAN_DEBUG] "
-                f"auto_replan_suppressed p={current_p:.6f} reason=protection_window "
-                f"remaining_statements={self.auto_replan_protection_remaining} source={source}",
-                env_var="TYPEFLY_VERBOSE_DEBUG",
-            )
-            return False
+            if str(source) == "go_checkpoint_loop" and current_p >= COLLISION_PROBABILITY_REPLAN_THRESHOLD:
+                print_debug(
+                    "[REPLAN_DEBUG] "
+                    f"protection_window_bypassed_for_gc p={current_p:.6f} "
+                    f"remaining_statements={self.auto_replan_protection_remaining} source={source}",
+                    env_var="TYPEFLY_VERBOSE_DEBUG",
+                )
+            else:
+                print_debug(
+                    "[REPLAN_DEBUG] "
+                    f"auto_replan_suppressed p={current_p:.6f} reason=protection_window "
+                    f"remaining_statements={self.auto_replan_protection_remaining} source={source}",
+                    env_var="TYPEFLY_VERBOSE_DEBUG",
+                )
+                return False
 
         if not self.auto_replan_armed:
             if current_p <= COLLISION_PROBABILITY_REARM_THRESHOLD:
@@ -1380,9 +1391,11 @@ class LLMController():
                 self.execution_time = time.time()
                 self.execution_mode = "Executing"
                 self.auto_replan_protection_remaining = int(AUTO_REPLAN_PROTECTION_STATEMENTS)
+                self.auto_replan_armed = True
                 print_t(
                     "[REPLAN_DEBUG] "
-                    f"protection_window_active remaining_statements={self.auto_replan_protection_remaining}"
+                    f"protection_window_active remaining_statements={self.auto_replan_protection_remaining} "
+                    f"auto_replan_armed={self.auto_replan_armed}"
                 )
                 ret_val = self.execute_minispec(self.current_plan)
                 execution_success = True
