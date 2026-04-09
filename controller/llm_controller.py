@@ -904,8 +904,6 @@ class LLMController():
         )
 
         max_step_m = 1.0
-        min_axis_step_m = 0.12
-        no_progress_limit = 3
         heading_align_far_deg = 14.0
         heading_align_near_deg = 7.0
         max_turn_step_deg = 28
@@ -923,7 +921,6 @@ class LLMController():
         reached = False
         final_dist = None
         best_dist = float("inf")
-        no_progress_count = 0
         stop_reason = "max_iterations"
 
         for idx in range(max_iterations):
@@ -992,17 +989,8 @@ class LLMController():
             else:
                 if dist_control + 0.02 < best_dist:
                     best_dist = dist_control
-                    no_progress_count = 0
-                else:
-                    no_progress_count += 1
-                if no_progress_count >= no_progress_limit:
-                    stop_reason = "no_progress_fail_safe"
-                    break
 
                 local_step_cap = 0.25 if dist_control < 0.35 else max_step_m
-                if abs(body_forward) < min_axis_step_m and abs(body_right) < min_axis_step_m:
-                    stop_reason = "tiny_residual_vector"
-                    break
 
                 desired_yaw = math.atan2(dy_w, dx_w)
                 yaw_error = (desired_yaw - yaw + math.pi) % (2.0 * math.pi) - math.pi
@@ -1057,8 +1045,12 @@ class LLMController():
             f"event=gc_end checkpoint={checkpoint.id} reached={reached} stop_reason={stop_reason}",
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
-        # If not arrived, request replan so downstream dwell steps are not executed blindly.
-        return summary, (not reached)
+        should_request_replan = bool(
+            str(stop_reason).startswith("collision_probability_high")
+            or str(stop_reason).startswith("agent_heartbeat_replan")
+        )
+        # Keep gc non-replan on pure kinematic convergence limits (e.g. max_iterations).
+        return summary, should_request_replan
 
     def append_message(self, message: str):
         if self.message_queue is not None:

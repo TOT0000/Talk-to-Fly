@@ -32,3 +32,10 @@ def test_ui_mode_switch_options_exist():
     assert 'MODE_TYPEFLY_THRESHOLD_REPLAN' in source
     assert 'MODE_AGENT_HEARTBEAT_SOFT' in source
     assert 'MODE_AGENT_HEARTBEAT_HARDGATE' in source
+
+
+def test_gc_no_longer_replans_on_no_progress_tiny_residual_or_max_iterations():
+    source = Path('controller/llm_controller.py').read_text(encoding='utf-8')
+    assert 'no_progress_fail_safe' not in source
+    assert 'tiny_residual_vector' not in source
+    assert 'return summary, should_request_replan' in source
