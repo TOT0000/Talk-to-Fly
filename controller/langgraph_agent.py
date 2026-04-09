@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import time
 from typing import Any, Literal, TypedDict
 
@@ -350,7 +351,11 @@ class LangGraphOrchestrationRunner:
         if subgoal is None and remaining:
             subgoal = remaining[0]
         if subgoal is None:
+            if hasattr(self.controller, "set_benchmark_progress_focus_checkpoint"):
+                self.controller.set_benchmark_progress_focus_checkpoint(None)
             return {"last_plan_text": "", "last_action_text": "", "route_decision": "end"}
+        if hasattr(self.controller, "set_benchmark_progress_focus_checkpoint"):
+            self.controller.set_benchmark_progress_focus_checkpoint(str(subgoal).upper())
         subgoal_phase = str(state.get("subgoal_phase", "APPROACH_SUBGOAL"))
         # In agent mode, completion/verify handling is observation-driven and delegated to LLM.
         if False and subgoal_phase in {"COMPLETE_SUBGOAL", "VERIFY_COMPLETE"}:
@@ -449,11 +454,11 @@ class LangGraphOrchestrationRunner:
         trace_events = list(decision_trace.get("events") or [])
         if not plan:
             if mode == "skip_current_subgoal":
-                plan = "delay(0.5);"
+                plan = "d(0.5);"
             elif mode == "replan":
-                plan = "log(\"request_replan\");"
+                plan = "lo('request_replan');"
             else:
-                plan = "log(\"empty_action_from_decision\");"
+                plan = "lo('empty_action_from_decision');"
             trace_events.append("planner_empty_action_fallback")
         action_target = self._extract_checkpoint_target(plan)
         if action_target is not None:
@@ -548,7 +553,7 @@ class LangGraphOrchestrationRunner:
                 "last_error": None if ok else str(event.get("reason", event_type)),
             }
         try:
-            ret = self.controller.execute_minispec(plan, silent=True, allow_auto_interrupt=False)
+            ret = self.controller.execute_minispec(plan, silent=True, allow_auto_interrupt=True)
             ok = True
             recoverable = False
             if isinstance(ret, tuple) and len(ret) >= 2:
@@ -1170,20 +1175,16 @@ class LangGraphOrchestrationRunner:
 
     def _extract_checkpoint_target(self, action_text: str) -> str | None:
         text = str(action_text or "")
-        marker = 'go_checkpoint("'
-        if marker not in text:
+        m = re.search(r"(?:go_checkpoint|gc)\(\s*['\"]?([A-Za-z]\d+)['\"]?\s*\)", text)
+        if not m:
             return None
-        start = text.find(marker) + len(marker)
-        end = text.find('")', start)
-        if end <= start:
-            return None
-        return text[start:end].strip().upper()
+        return str(m.group(1)).strip().upper()
 
     def _action_signature(self, action_text: str) -> str:
         text = str(action_text or "").strip().lower()
         if not text:
             return ""
-        if text.startswith("go_checkpoint("):
+        if text.startswith("go_checkpoint(") or text.startswith("gc("):
             return "go_checkpoint"
         if "(" in text:
             return text.split("(", 1)[0].strip()
