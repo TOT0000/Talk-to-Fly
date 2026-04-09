@@ -34,6 +34,8 @@ class LLMPlanner():
         self.agent_decomposition_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_decomposition_examples.txt")
         self.agent_mode_action_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_mode_action_examples.txt")
         self.agent_reflection_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_reflection_examples.txt")
+        self.agent_heartbeat_soft_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_heartbeat_soft_examples.txt")
+        self.agent_heartbeat_hardgate_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_heartbeat_hardgate_examples.txt")
         with open(self.prompt_plan_path, "r") as f:
             self.prompt_plan = f.read()
 
@@ -53,6 +55,10 @@ class LLMPlanner():
             self.agent_mode_action_examples = f.read()
         with open(self.agent_reflection_examples_path, "r") as f:
             self.agent_reflection_examples = f.read()
+        with open(self.agent_heartbeat_soft_examples_path, "r") as f:
+            self.agent_heartbeat_soft_examples = f.read()
+        with open(self.agent_heartbeat_hardgate_examples_path, "r") as f:
+            self.agent_heartbeat_hardgate_examples = f.read()
         with open(self.prompt_plan_initial_path, "r") as f:
             self.prompt_plan_initial = f.read()
         with open(self.prompt_plan_replan_path, "r") as f:
@@ -600,6 +606,11 @@ class LLMPlanner():
             if hard_gate
             else "You may choose continue or full_replan_plan based on your judgment."
         )
+        heartbeat_examples = (
+            self.agent_heartbeat_hardgate_examples
+            if hard_gate
+            else self.agent_heartbeat_soft_examples
+        )
         prompt = (
             "You are heartbeat monitor for UAV planning.\n"
             "Return strict JSON with keys: response, reason, plan.\n"
@@ -607,6 +618,8 @@ class LLMPlanner():
             "If response=continue, set plan to empty string.\n"
             f"{hard_gate_rule}\n"
             "Use same skill abbreviations as TypeFly plans.\n"
+            "Agent heartbeat examples:\n"
+            f"{heartbeat_examples}\n"
             f"Task: {task_description}\n"
             f"Completed checkpoints: {completed}\n"
             f"Unfinished checkpoints: {[cid for cid in active if cid not in completed]}\n"
