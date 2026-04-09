@@ -40,10 +40,14 @@ from .baseline_scenes import (
     evaluate_path_clear,
     get_task_point,
     normalize_baseline_scene_id,
+    worker_mode_summary_log,
 )
 from .safety_envelope import build_safety_envelope
 from .benchmark_layout import (
     CHECKPOINT_DWELL_SECONDS,
+    FULL_REPLAN_LIMIT,
+    AGENT_HEARTBEAT_INTERVAL_SECONDS,
+    TYPEFLY_REPLAN_THRESHOLD,
     BENCHMARK_CHECKPOINT_ORDER,
     BENCHMARK_CHECKPOINTS_BY_ID,
     BENCHMARK_CHECKPOINTS,
@@ -52,11 +56,22 @@ from .benchmark_layout import (
 from .langgraph_agent import LangGraphOrchestrationRunner
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = 0.50
-COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.50
-COLLISION_PROBABILITY_REARM_THRESHOLD = 0.50
+COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = TYPEFLY_REPLAN_THRESHOLD
+COLLISION_PROBABILITY_REPLAN_THRESHOLD = TYPEFLY_REPLAN_THRESHOLD
+COLLISION_PROBABILITY_REARM_THRESHOLD = TYPEFLY_REPLAN_THRESHOLD
 AUTO_REPLAN_PROTECTION_STATEMENTS = 2
 COLLISION_RISK_WORKER_IDS = ("worker_1", "worker_2", "worker_3")
+
+MODE_TYPEFLY_ONESHOT = "typefly-oneshot"
+MODE_TYPEFLY_THRESHOLD_REPLAN = "typefly-threshold-replan"
+MODE_AGENT_HEARTBEAT_SOFT = "agent-heartbeat-soft"
+MODE_AGENT_HEARTBEAT_HARDGATE = "agent-heartbeat-hardgate"
+SUPPORTED_FRAMEWORK_MODES = {
+    MODE_TYPEFLY_ONESHOT,
+    MODE_TYPEFLY_THRESHOLD_REPLAN,
+    MODE_AGENT_HEARTBEAT_SOFT,
+    MODE_AGENT_HEARTBEAT_HARDGATE,
+}
 
 class LLMController():
     def __init__(self, robot_type, virtual_queue, use_http=False, message_queue: Optional[queue.Queue]=None, enable_video=False, state_provider: Optional[StateProvider]=None):
@@ -165,7 +180,7 @@ class LLMController():
         self.baseline_scene_state = None
         self.latest_baseline_decision = None
         self.execution_mode = "Waiting"
-        self.framework_mode = "typefly_baseline"
+        self.framework_mode = MODE_TYPEFLY_ONESHOT
         self.active_objective_set = self._default_active_objective_set()
         self.latest_benchmark_progress = {
             "completed": [],
@@ -199,6 +214,11 @@ class LLMController():
         self.manual_worker_localization_state: dict[str, dict] = {}
         self.auto_replan_armed = True
         self.auto_replan_protection_remaining = 0
+        self.replan_limit = int(FULL_REPLAN_LIMIT)
+        self.current_task_description = ""
+        self.last_heartbeat_ts = 0.0
+        self._pending_heartbeat_replan_plan: Optional[str] = None
+        self._pending_heartbeat_reason: str = ""
         self.langgraph_runner = LangGraphOrchestrationRunner(self)
 
         # PX4_SIM optional managed user-position publisher lifecycle
@@ -921,6 +941,10 @@ class LLMController():
             progress_target_match = bool(runtime_target == checkpoint.id)
             safety_context = snapshot.get("safety_context")
             current_p = 0.0 if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
+            if self._maybe_run_agent_heartbeat():
+                stop_reason = f"agent_heartbeat_replan({self._pending_heartbeat_reason or 'llm'})"
+                print_t(f"[QUEUE] clearing remaining statements due to replan")
+                break
             if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
                 print_t(
                     "[TYPEFLY-INTERRUPT] "
@@ -1096,7 +1120,51 @@ class LLMController():
                 env_var="TYPEFLY_VERBOSE_DEBUG",
             )
 
+    def _normalize_framework_mode(self, framework_mode: str) -> str:
+        normalized = str(framework_mode or MODE_TYPEFLY_ONESHOT).strip().lower()
+        return normalized if normalized in SUPPORTED_FRAMEWORK_MODES else MODE_TYPEFLY_ONESHOT
+
+    def _is_agent_heartbeat_mode(self) -> bool:
+        return self.framework_mode in {MODE_AGENT_HEARTBEAT_SOFT, MODE_AGENT_HEARTBEAT_HARDGATE}
+
+    def _is_threshold_replan_mode(self) -> bool:
+        return self.framework_mode == MODE_TYPEFLY_THRESHOLD_REPLAN
+
+    def _maybe_run_agent_heartbeat(self, force: bool = False) -> bool:
+        if not self._is_agent_heartbeat_mode():
+            return False
+        if self._pending_heartbeat_replan_plan:
+            return True
+        now = time.time()
+        if (not force) and (now - float(self.last_heartbeat_ts) < float(AGENT_HEARTBEAT_INTERVAL_SECONDS)):
+            return False
+        self.last_heartbeat_ts = now
+        if getattr(self, "_replan_attempts", 0) >= int(self.replan_limit):
+            print_t(f"[REPLAN-COUNT] current={self._replan_attempts} limit={self.replan_limit}")
+            return False
+        snapshot = self.get_live_ui_snapshot() or {}
+        response = self.planner.plan_agent_heartbeat(
+            task_description=self.current_task_description,
+            snapshot=snapshot,
+            execution_history=self.execution_history,
+            current_plan=self.current_plan,
+            hard_gate=(self.framework_mode == MODE_AGENT_HEARTBEAT_HARDGATE),
+        )
+        response_type = str(response.get("response", "continue"))
+        reason = str(response.get("reason", ""))
+        if response_type == "full_replan_plan":
+            plan_text = self._sanitize_minispec_plan(response.get("plan", ""))
+            if plan_text:
+                self._pending_heartbeat_replan_plan = plan_text
+                self._pending_heartbeat_reason = reason
+                print_t(f"[AGENT-HEARTBEAT] response=replan plan={plan_text}")
+                return True
+        print_t(f"[AGENT-HEARTBEAT] response=continue reason={reason}")
+        return False
+
     def _should_trigger_auto_replan(self, current_p: float, source: str) -> bool:
+        if not self._is_threshold_replan_mode():
+            return False
         current_p = float(current_p)
         if self.auto_replan_protection_remaining > 0:
             if str(source) == "go_checkpoint_loop" and current_p >= COLLISION_PROBABILITY_REPLAN_THRESHOLD:
@@ -1157,7 +1225,7 @@ class LLMController():
     def execute_minispec(self, minispec: str, silent: bool = False, allow_auto_interrupt: bool = True):
         statement_count = len([segment for segment in str(minispec or "").split(";") if str(segment).strip()])
         print_t(
-            "[TYPEFLY-PLAN-QUEUE] "
+            "[PLAN-QUEUE] "
             f"enqueued replan statements count={statement_count} program={str(minispec or '').strip()}"
         )
         self._benchmark_plan_checkpoint_sequence = self._extract_checkpoint_sequence_from_plan(minispec)
@@ -1192,6 +1260,11 @@ class LLMController():
         return None
 
     def _should_abort_current_execution_for_replan(self) -> Tuple[bool, str]:
+        if self._maybe_run_agent_heartbeat():
+            print_t("[QUEUE] clearing remaining statements due to replan")
+            return True, f"agent_heartbeat_replan:{self._pending_heartbeat_reason or 'llm'}"
+        if not self._is_threshold_replan_mode():
+            return False, ""
         snapshot = self.get_live_ui_snapshot()
         if not isinstance(snapshot, dict):
             return False, ""
@@ -1340,14 +1413,14 @@ class LLMController():
         self._sim_user_publisher_proc = None
         self._owns_sim_user_publisher = False
 
-    def execute_task_description(self, task_description: str, framework_mode: str = "typefly_baseline"):
+    def execute_task_description(self, task_description: str, framework_mode: str = MODE_TYPEFLY_ONESHOT):
         if self.controller_wait_takeoff:
             self.append_message("[Warning] Controller is waiting for takeoff...")
             return
-        selected_framework = str(framework_mode or "typefly_baseline").strip().lower()
-        if selected_framework not in {"typefly_baseline", "langgraph_agent"}:
-            selected_framework = "typefly_baseline"
+        selected_framework = self._normalize_framework_mode(framework_mode)
         self.framework_mode = selected_framework
+        self.current_task_description = str(task_description or "")
+        print_t(f"[MODE] selected={selected_framework}")
         self.execution_mode = "Planning"
         self.active_objective_set = self._resolve_active_objective_set(task_description)
         self._reset_benchmark_progress_tracking()
@@ -1365,9 +1438,13 @@ class LLMController():
         monitor_stop = threading.Event()
         monitor_thread = None
         replan_attempts = 0
-        max_replan_attempts = 5
+        max_replan_attempts = int(self.replan_limit)
+        self._replan_attempts = 0
         self.auto_replan_armed = True
         self.auto_replan_protection_remaining = 0
+        self.last_heartbeat_ts = 0.0
+        self._pending_heartbeat_replan_plan = None
+        self._pending_heartbeat_reason = ""
         def _run_monitor():
             while not monitor_stop.is_set():
                 try:
@@ -1377,58 +1454,6 @@ class LLMController():
                 monitor_stop.wait(0.2)
         monitor_thread = threading.Thread(target=_run_monitor, daemon=True)
         monitor_thread.start()
-        if selected_framework == "langgraph_agent":
-            try:
-                self.execution_mode = "LangGraph Running"
-                agent_state = self.langgraph_runner.run_task(
-                    task_description=task_description,
-                    task_id=task_id,
-                    active_objective_set=self.active_objective_set,
-                )
-                self.execution_history = list(agent_state.get("execution_history", []))
-                self.current_plan = str(agent_state.get("last_plan_text", ""))
-                self.task_run_logger.update_plan_info(self.current_plan, generation_success=bool(self.current_plan))
-                mission_status = str(agent_state.get("mission_status", "running"))
-                execution_success = mission_status == "completed"
-                self.task_run_logger.update_execution_info(
-                    execution_success=execution_success,
-                    failure_reason=None if execution_success else str(agent_state.get("last_error", "langgraph_mission_incomplete")),
-                    task_completed=execution_success,
-                )
-                self.execution_mode = "Completed" if execution_success else "Yielding"
-                self.task_run_logger.consume_runtime_snapshot(self.get_live_ui_snapshot())
-                self.task_run_logger.end_run(run_status="completed" if execution_success else "exception")
-                monitor_stop.set()
-                if monitor_thread is not None:
-                    monitor_thread.join(timeout=1.0)
-                self.append_message("\n[Task ended]")
-                self.append_message("end")
-                self.current_plan = None
-                self.execution_history = None
-                self.execution_mode = "Waiting"
-                self.framework_mode = "typefly_baseline"
-                return
-            except Exception as e:
-                self.execution_mode = "Yielding"
-                error_message = f"[C] Error: {e}"
-                print_t(error_message)
-                self.append_message(error_message)
-                self.task_run_logger.update_execution_info(
-                    execution_success=False,
-                    failure_reason=str(e),
-                    task_completed=False,
-                )
-                self.task_run_logger.end_run(run_status="exception", failure_reason=str(e))
-                monitor_stop.set()
-                if monitor_thread is not None:
-                    monitor_thread.join(timeout=1.0)
-                self.append_message("\n[Task ended]")
-                self.append_message("end")
-                self.current_plan = None
-                self.execution_history = None
-                self.execution_mode = "Waiting"
-                self.framework_mode = "typefly_baseline"
-                return
         while True:
             location_info = self._format_planner_location_info()
             runtime_snapshot = self.get_live_ui_snapshot()
@@ -1460,21 +1485,30 @@ class LLMController():
                 else:
                     previous_plan = self.current_plan
                     self.execution_mode = "Planning"
-                    if replan_attempts > 0:
-                        print_t("[TYPEFLY-REPLAN] invoking LLM replan with continuation context")
-                    self.current_plan = self.planner.plan(
-                        task_description=task_description,
-                        scene_description=scene_description,
-                        location_info=location_info,
-                        execution_history=self.execution_history,
-                        safety_context=safety_context,
-                        previous_plan=previous_plan,
-                    )
-                    llm_called = True
-                    final_plan_source = "llm"
+                    planning_stage = ("initial" if replan_attempts == 0 else "replan")
+                    if self._pending_heartbeat_replan_plan:
+                        self.current_plan = self._pending_heartbeat_replan_plan
+                        self._pending_heartbeat_replan_plan = None
+                        self._pending_heartbeat_reason = ""
+                        llm_called = False
+                        final_plan_source = "agent_heartbeat"
+                    else:
+                        self.current_plan = self.planner.plan(
+                            task_description=task_description,
+                            scene_description=scene_description,
+                            location_info=location_info,
+                            execution_history=self.execution_history,
+                            safety_context=safety_context,
+                            previous_plan=previous_plan,
+                            planning_stage=planning_stage,
+                        )
+                        llm_called = True
+                        final_plan_source = "llm"
                 self.current_plan = self._sanitize_minispec_plan(self.current_plan)
-                if replan_attempts > 0:
-                    print_t(f"[TYPEFLY-REPLAN] llm_response={self.current_plan}")
+                if replan_attempts == 0:
+                    print_t(f"[PLAN-INITIAL] llm_response={self.current_plan}")
+                else:
+                    print_t(f"[FULL-REPLAN] llm_response={self.current_plan}")
                 self.latest_safety_context = safety_context
                 self.task_run_logger.update_plan_info(self.current_plan, generation_success=True)
                 debug_info = {
@@ -1497,7 +1531,7 @@ class LLMController():
                 )
 
                 self.append_message(f'[Plan]: \\\\')
-                print_t(f"[TYPEFLY-PLAN-DISPLAY] showing replan program {self.current_plan}")
+                print_t(f"[PLAN-DISPLAY] {self.current_plan}")
                 self.execution_time = time.time()
                 self.execution_mode = "Executing"
                 self.auto_replan_protection_remaining = int(AUTO_REPLAN_PROTECTION_STATEMENTS)
@@ -1507,7 +1541,9 @@ class LLMController():
                     f"protection_window_active remaining_statements={self.auto_replan_protection_remaining} "
                     f"auto_replan_armed={self.auto_replan_armed}"
                 )
-                ret_val = self.execute_minispec(self.current_plan)
+                print_t(f"[PLAN-QUEUE] {self.current_plan}")
+                allow_auto_interrupt = selected_framework != MODE_TYPEFLY_ONESHOT
+                ret_val = self.execute_minispec(self.current_plan, allow_auto_interrupt=allow_auto_interrupt)
                 execution_success = True
                 task_completed = True
                 if isinstance(ret_val, tuple) and len(ret_val) >= 2:
@@ -1520,13 +1556,19 @@ class LLMController():
                     elif "High-level skill" in replan_value:
                         replan_source = "high_level_skill_failure"
                     print_debug(f"[REPLAN_DEBUG] source={replan_source} ret_val={replan_value}", env_var="TYPEFLY_VERBOSE_DEBUG")
+                    if selected_framework == MODE_TYPEFLY_ONESHOT:
+                        raise RuntimeError("TypeFly-OneShot does not permit replan.")
                     replan_attempts += 1
+                    self._replan_attempts = replan_attempts
+                    print_t(f"[FULL-REPLAN] mode={selected_framework} count={replan_attempts}")
+                    print_t(f"[REPLAN-COUNT] current={replan_attempts} limit={max_replan_attempts}")
                     self.task_run_logger.update_execution_info(
                         execution_success=False,
                         failure_reason="replan_requested",
                         task_completed=False,
                     )
                     if replan_attempts > max_replan_attempts:
+                        print_t(f"[REPLAN-COUNT] current={replan_attempts} limit={max_replan_attempts}")
                         raise RuntimeError(f"Exceeded max replan attempts ({max_replan_attempts})")
                     self.append_message(f"[LOG] Replan requested, attempt={replan_attempts}")
                     self.execution_mode = "Planning"
@@ -1548,8 +1590,11 @@ class LLMController():
                     f"ret_replan={bool(getattr(ret_val, 'replan', False))}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
-                if (not plan_completed) or (active_ids and (not zone_completed)):
+                if selected_framework != MODE_TYPEFLY_ONESHOT and ((not plan_completed) or (active_ids and (not zone_completed))):
                     replan_attempts += 1
+                    self._replan_attempts = replan_attempts
+                    print_t(f"[FULL-REPLAN] mode={selected_framework} count={replan_attempts}")
+                    print_t(f"[REPLAN-COUNT] current={replan_attempts} limit={max_replan_attempts}")
                     if replan_attempts > max_replan_attempts:
                         raise RuntimeError(
                             "Task end check failed: plan/objective completion mismatch "
@@ -1595,7 +1640,7 @@ class LLMController():
         self.current_plan = None
         self.execution_history = None
         self.execution_mode = "Waiting"
-        self.framework_mode = "typefly_baseline"
+        self.framework_mode = MODE_TYPEFLY_ONESHOT
 
     def get_active_scenario_name(self) -> str:
         return self.scenario_manager.selected_name()
@@ -1609,6 +1654,7 @@ class LLMController():
 
     def apply_baseline_scene(self):
         scene = self.get_baseline_scene()
+        print_t(worker_mode_summary_log())
         provider = getattr(self, "state_provider", None)
         drone = getattr(self, "drone", None)
         repositioned = False
@@ -2068,7 +2114,7 @@ class LLMController():
             "candidate_targets": candidate_targets,
             "candidate_path_summaries": candidate_path_summaries,
             "baseline_decision": self.latest_baseline_decision,
-            "framework_name": ("TypeFly baseline" if self.framework_mode == "typefly_baseline" else "LangGraph agent"),
+            "framework_name": str(self.framework_mode),
             "mode_name": self.get_active_scenario_name(),
             "execution_mode": self.execution_mode,
             "active_objective_set": dict(self.active_objective_set),
