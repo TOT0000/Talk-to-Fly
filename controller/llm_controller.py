@@ -817,6 +817,9 @@ class LLMController():
         checkpoint = BENCHMARK_CHECKPOINTS_BY_ID.get(checkpoint_key)
         if checkpoint is None:
             raise ValueError(f"Unknown checkpoint_id `{checkpoint_id}`")
+        # Ensure dwell/completion tracking follows the actual commanded checkpoint,
+        # instead of falling back to lexical benchmark order.
+        self.set_benchmark_progress_focus_checkpoint(checkpoint_key)
 
         max_step_m = 1.0
         min_axis_step_m = 0.12
@@ -856,9 +859,10 @@ class LLMController():
             progress_target_match = bool(runtime_target == checkpoint.id)
             safety_context = snapshot.get("safety_context")
             current_p = 0.0 if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
-            if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
-                stop_reason = f"collision_probability_high({current_p:.3f})"
-                break
+            if self.framework_mode != "langgraph_agent":
+                if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
+                    stop_reason = f"collision_probability_high({current_p:.3f})"
+                    break
 
             dx_w = float(checkpoint.x) - float(control_pos[0])
             dy_w = float(checkpoint.y) - float(control_pos[1])
@@ -874,7 +878,9 @@ class LLMController():
             if true_pos is None:
                 stop_condition = bool(completion_state or in_progress_radius or in_radius_by_control)
             else:
-                stop_condition = bool(completion_state or (in_radius_by_true and in_progress_radius))
+                # Do not require progress-target synchronization to stop at the commanded checkpoint.
+                # If true position is already in checkpoint radius, gc should be considered reached.
+                stop_condition = bool(completion_state or in_radius_by_true or in_progress_radius)
 
             body_forward = math.cos(yaw) * dx_w + math.sin(yaw) * dy_w
             body_right = -math.sin(yaw) * dx_w + math.cos(yaw) * dy_w
@@ -885,7 +891,7 @@ class LLMController():
                 reached = True
                 if completion_state:
                     stop_reason = "completion_state"
-                elif in_progress_radius and in_radius_by_true:
+                elif in_radius_by_true and in_progress_radius:
                     stop_reason = "true_radius+progress_in_radius"
                 elif in_progress_radius:
                     stop_reason = "progress_in_radius"
@@ -1020,13 +1026,21 @@ class LLMController():
     def _should_trigger_auto_replan(self, current_p: float, source: str) -> bool:
         current_p = float(current_p)
         if self.auto_replan_protection_remaining > 0:
-            print_debug(
-                "[REPLAN_DEBUG] "
-                f"auto_replan_suppressed p={current_p:.6f} reason=protection_window "
-                f"remaining_statements={self.auto_replan_protection_remaining} source={source}",
-                env_var="TYPEFLY_VERBOSE_DEBUG",
-            )
-            return False
+            if str(source) == "go_checkpoint_loop" and current_p >= COLLISION_PROBABILITY_REPLAN_THRESHOLD:
+                print_debug(
+                    "[REPLAN_DEBUG] "
+                    f"protection_window_bypassed_for_gc p={current_p:.6f} "
+                    f"remaining_statements={self.auto_replan_protection_remaining} source={source}",
+                    env_var="TYPEFLY_VERBOSE_DEBUG",
+                )
+            else:
+                print_debug(
+                    "[REPLAN_DEBUG] "
+                    f"auto_replan_suppressed p={current_p:.6f} reason=protection_window "
+                    f"remaining_statements={self.auto_replan_protection_remaining} source={source}",
+                    env_var="TYPEFLY_VERBOSE_DEBUG",
+                )
+                return False
 
         if not self.auto_replan_armed:
             if current_p <= COLLISION_PROBABILITY_REARM_THRESHOLD:
@@ -1068,6 +1082,9 @@ class LLMController():
         return image
     
     def execute_minispec(self, minispec: str, silent: bool = False, allow_auto_interrupt: bool = True):
+        focus_checkpoint = self._extract_first_checkpoint_from_plan(minispec)
+        if focus_checkpoint is not None:
+            self.set_benchmark_progress_focus_checkpoint(focus_checkpoint)
         interpreter = MiniSpecInterpreter(
             None if silent else self.message_queue,
             should_abort=(self._should_abort_current_execution_for_replan if allow_auto_interrupt else None),
@@ -1079,6 +1096,16 @@ class LLMController():
         if hasattr(ret_val, "value") and isinstance(ret_val.value, str) and ret_val.value.startswith("MiniSpec execution error"):
             raise RuntimeError(ret_val.value)
         return ret_val
+
+    def _extract_first_checkpoint_from_plan(self, minispec: str) -> Optional[str]:
+        text = str(minispec or "")
+        m = re.search(r"(?:gc|go_checkpoint)\(\s*['\"]?\s*([A-Za-z]\d+)\s*['\"]?\s*\)", text)
+        if not m:
+            return None
+        checkpoint_id = str(m.group(1)).upper()
+        if checkpoint_id in BENCHMARK_CHECKPOINTS_BY_ID:
+            return checkpoint_id
+        return None
 
     def _should_abort_current_execution_for_replan(self) -> Tuple[bool, str]:
         snapshot = self.get_live_ui_snapshot()
@@ -1380,9 +1407,11 @@ class LLMController():
                 self.execution_time = time.time()
                 self.execution_mode = "Executing"
                 self.auto_replan_protection_remaining = int(AUTO_REPLAN_PROTECTION_STATEMENTS)
+                self.auto_replan_armed = True
                 print_t(
                     "[REPLAN_DEBUG] "
-                    f"protection_window_active remaining_statements={self.auto_replan_protection_remaining}"
+                    f"protection_window_active remaining_statements={self.auto_replan_protection_remaining} "
+                    f"auto_replan_armed={self.auto_replan_armed}"
                 )
                 ret_val = self.execute_minispec(self.current_plan)
                 execution_success = True
