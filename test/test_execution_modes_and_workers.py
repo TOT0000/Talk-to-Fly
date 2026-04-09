@@ -39,3 +39,16 @@ def test_gc_no_longer_replans_on_no_progress_tiny_residual_or_max_iterations():
     assert 'no_progress_fail_safe' not in source
     assert 'tiny_residual_vector' not in source
     assert 'return summary, should_request_replan' in source
+
+
+def test_llm_wrapper_provider_model_mapping_and_logs_exist():
+    source = Path('controller/llm_wrapper.py').read_text(encoding='utf-8')
+    assert 'OPENAI_DEFAULT_MODEL' in source
+    assert 'GEMINI_DEFAULT_MODEL' in source
+    assert 'LMSTUDIO_DEFAULT_MODEL' in source
+    assert 'if self.provider == "gemini" and selected_model.lower().startswith("gpt-")' in source
+    assert 'elif self.provider == "openai" and selected_model.lower().startswith("gemini-")' in source
+    assert '[LLM] provider=' in source
+    assert '[LLM] base_url=' in source
+    assert '[LLM] model_name=' in source
+    assert '[LLM] key_source=' in source
