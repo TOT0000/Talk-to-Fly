@@ -1625,8 +1625,6 @@ class LLMController():
                     self.append_message(
                         f"[LOG] [TYPEFLY-POSTCHECK-REPLAN] invoking automatic replan for unfinished checkpoints: {remaining_active}"
                     )
-                    self.execution_mode = "Planning"
-                    continue
             except Exception as e:
                 self.execution_mode = "Yielding"
                 error_message = f"[C] Error: {e}"
