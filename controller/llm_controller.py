@@ -921,15 +921,14 @@ class LLMController():
             progress_target_match = bool(runtime_target == checkpoint.id)
             safety_context = snapshot.get("safety_context")
             current_p = 0.0 if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
-            if self.framework_mode != "langgraph_agent":
-                if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
-                    print_t(
-                        "[TYPEFLY-INTERRUPT] "
-                        f"collision_probability={current_p:.6f} > {COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}, "
-                        "aborting current execution"
-                    )
-                    stop_reason = f"collision_probability_high({current_p:.3f})"
-                    break
+            if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
+                print_t(
+                    "[TYPEFLY-INTERRUPT] "
+                    f"collision_probability={current_p:.6f} > {COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}, "
+                    "aborting current execution"
+                )
+                stop_reason = f"collision_probability_high({current_p:.3f})"
+                break
 
             dx_w = float(checkpoint.x) - float(control_pos[0])
             dy_w = float(checkpoint.y) - float(control_pos[1])
@@ -1193,11 +1192,6 @@ class LLMController():
         return None
 
     def _should_abort_current_execution_for_replan(self) -> Tuple[bool, str]:
-        # In Agent Mode (LangGraph), disable collision-probability hard-threshold
-        # auto-interrupt behavior. Agent decisions should rely on geometry + risk
-        # reasoning in the planner, not a fixed 0.50 trigger in controller runtime.
-        if str(getattr(self, "framework_mode", "")).strip().lower() == "langgraph_agent":
-            return False, ""
         snapshot = self.get_live_ui_snapshot()
         if not isinstance(snapshot, dict):
             return False, ""
