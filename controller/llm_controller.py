@@ -1582,22 +1582,11 @@ class LLMController():
                     f"ret_replan={bool(getattr(ret_val, 'replan', False))}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
-                if selected_framework != MODE_TYPEFLY_ONESHOT and ((not plan_completed) or (active_ids and (not zone_completed))):
-                    replan_attempts += 1
-                    self._replan_attempts = replan_attempts
-                    print_t(f"[FULL-REPLAN] mode={selected_framework} count={replan_attempts}")
-                    print_t(f"[REPLAN-COUNT] current={replan_attempts} limit={max_replan_attempts}")
-                    if replan_attempts > max_replan_attempts:
-                        raise RuntimeError(
-                            "Task end check failed: plan/objective completion mismatch "
-                            f"(missing={missing_from_plan}, zone_completed={zone_completed})"
-                        )
+                if (not plan_completed) or (active_ids and (not zone_completed)):
                     self.append_message(
-                        f"[LOG] Completion mismatch detected, replan attempt={replan_attempts}, "
+                        f"[LOG] Completion mismatch detected (auto-replan disabled), "
                         f"missing={missing_from_plan if missing_from_plan else '[]'}"
                     )
-                    self.execution_mode = "Planning"
-                    continue
             except Exception as e:
                 self.execution_mode = "Yielding"
                 error_message = f"[C] Error: {e}"
