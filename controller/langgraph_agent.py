@@ -61,8 +61,6 @@ class AgentState(TypedDict, total=False):
     route_decision: RouteDecision
     last_progress_signature: str
     last_subgoal_distance_m: float | None
-    no_progress_steps: int
-    repeated_action_count: int
     subgoal_phase: str
     subgoal_reached: bool
     arrived_but_not_completed: bool
@@ -153,8 +151,6 @@ class LangGraphOrchestrationRunner:
             "route_decision": "continue",
             "last_progress_signature": "",
             "last_subgoal_distance_m": None,
-            "no_progress_steps": 0,
-            "repeated_action_count": 0,
             "subgoal_phase": "APPROACH_SUBGOAL",
             "subgoal_reached": False,
             "arrived_but_not_completed": False,
@@ -408,8 +404,6 @@ class LangGraphOrchestrationRunner:
             }
 
         collision_risk = float(state.get("current_collision_risk", 0.0))
-        no_progress_steps = int(state.get("no_progress_steps", 0))
-        repeated_action_count = int(state.get("repeated_action_count", 0))
         last_action = str(state.get("last_action_text", "")).strip()
         recovery_mode = bool(current_mode == "recovery")
         decision = self.controller.planner.decide_langgraph_mode_and_action(
@@ -423,8 +417,6 @@ class LangGraphOrchestrationRunner:
             worker_states_summary=list(state.get("worker_states", [])),
             last_action=last_action,
             last_result=str((state.get("last_action_result") or {}).get("message", "")),
-            stall_count=no_progress_steps,
-            repeated_action_count=repeated_action_count,
             recent_history=list(state.get("execution_history", [])),
             recovery_mode=recovery_mode,
             recovery_reason=(None if state.get("recovery_reason") is None else str(state.get("recovery_reason"))),
@@ -681,8 +673,6 @@ class LangGraphOrchestrationRunner:
         completed = set(str(v).upper() for v in state.get("completed_checkpoint_ids", []))
         completed.update(completed_from_progress)
         remaining = [cid for cid in remaining if str(cid).upper() not in completed]
-        no_progress_steps = int(state.get("no_progress_steps", 0))
-        repeated_action_count = int(state.get("repeated_action_count", 0))
         arrived_but_not_completed = bool(state.get("arrived_but_not_completed", False))
         arrived_wait_cycles = int(state.get("arrived_wait_cycles", 0))
         in_radius = False
@@ -811,8 +801,6 @@ class LangGraphOrchestrationRunner:
             waiting_on_completion = False
             waiting_checkpoint_id = None
             completion_monitor_status = "completed"
-            repeated_action_count = 0
-            no_progress_steps = 0
         elif phase == "VERIFY_COMPLETE" and subgoal is not None and str(subgoal).upper() not in completed:
             if arrived_but_not_completed and effective_in_radius and not dwell_satisfied:
                 phase = "COMPLETE_SUBGOAL"
@@ -822,8 +810,6 @@ class LangGraphOrchestrationRunner:
                 self._emit_agent_message(
                     f"[RESULT] dwell in progress: {str(subgoal).upper()} ({dwell_seconds:.2f} / {required_dwell_seconds:.2f} s)"
                 )
-                no_progress_steps = 0
-                repeated_action_count = 0
             elif arrived_but_not_completed and (not effective_in_radius):
                 phase = "APPROACH_SUBGOAL"
                 reached_flag = False
@@ -855,14 +841,6 @@ class LangGraphOrchestrationRunner:
                     f"[RESULT] verify incomplete for {str(subgoal).upper()}, re-approach subgoal."
                 )
         progress_signature = f"{subgoal}:{','.join(remaining)}"
-        prev_signature = str(state.get("last_progress_signature", ""))
-        if len(history) >= 2 and str(history[-1].get("plan", "")) == str(history[-2].get("plan", "")):
-            repeated_action_count += 1
-        else:
-            repeated_action_count = 0
-        if arrived_but_not_completed:
-            no_progress_steps = 0
-            repeated_action_count = 0
         last_subgoal_distance = state.get("last_subgoal_distance_m")
         if subgoal in remaining:
             snapshot = state.get("latest_snapshot") or {}
@@ -874,46 +852,7 @@ class LangGraphOrchestrationRunner:
             checkpoint = BENCHMARK_CHECKPOINTS_BY_ID.get(str(subgoal))
             if checkpoint is not None and drone_xy is not None:
                 distance_m = math.hypot(drone_xy[0] - float(checkpoint.x), drone_xy[1] - float(checkpoint.y))
-                previous_distance = state.get("last_subgoal_distance_m")
-                if previous_distance is not None and (float(previous_distance) - float(distance_m)) < 0.05:
-                    no_progress_steps += 1
-                else:
-                    no_progress_steps = 0
-                progress_signature = f"{subgoal}:{','.join(remaining)}"
-                if progress_signature == prev_signature:
-                    no_progress_steps += 1
                 last_subgoal_distance = float(distance_m)
-                if (not arrived_but_not_completed) and repeated_action_count >= 2 and no_progress_steps >= 2:
-                    self._emit_agent_message("[EVENT] planning_stalled_observation")
-                    return {
-                        "route_decision": "continue",
-                        "mission_status": "running",
-                        "agent_step_count": step_count,
-                        "replan_count": replan_count,
-                        "execution_history": history,
-                        "last_subgoal_distance_m": last_subgoal_distance,
-                        "no_progress_steps": no_progress_steps,
-                        "repeated_action_count": repeated_action_count,
-                        "last_progress_signature": progress_signature,
-                        "subgoal_phase": phase,
-                        "subgoal_reached": reached_flag,
-                        "arrived_but_not_completed": arrived_but_not_completed,
-                        "arrived_wait_cycles": arrived_wait_cycles,
-                        "is_current_subgoal_completed": bool(subgoal is not None and str(subgoal).upper() in completed),
-                        "is_current_subgoal_in_radius": bool(effective_in_radius),
-                        "current_subgoal_dwell_seconds": float(dwell_seconds),
-                        "required_dwell_seconds": float(required_dwell_seconds),
-                        "dwell_satisfied": bool(dwell_satisfied),
-                        "waiting_on_checkpoint_completion": bool(waiting_on_completion),
-                        "waiting_checkpoint_id": waiting_checkpoint_id,
-                        "last_progress_event": (None if progress_event is None else dict(progress_event)),
-                        "completion_monitor_status": completion_monitor_status,
-                        "recovery_mode": bool(recovery_mode),
-                        "recovery_reason": (None if recovery_reason is None else str(recovery_reason)),
-                        "recovery_entry_risk": (None if recovery_entry_risk is None else float(recovery_entry_risk)),
-                        "recovery_last_risk": float(recovery_last_risk),
-                        "recovery_just_exited": bool(recovery_just_exited),
-                    }
 
         if not remaining:
             current_incomplete = bool(
@@ -963,8 +902,6 @@ class LangGraphOrchestrationRunner:
                 "completion_monitor_status": completion_monitor_status,
                 "last_progress_signature": progress_signature,
                 "last_subgoal_distance_m": last_subgoal_distance,
-                "no_progress_steps": no_progress_steps,
-                "repeated_action_count": repeated_action_count,
                 "recovery_mode": bool(recovery_mode),
                 "recovery_reason": (None if recovery_reason is None else str(recovery_reason)),
                 "recovery_entry_risk": (None if recovery_entry_risk is None else float(recovery_entry_risk)),
@@ -1001,8 +938,6 @@ class LangGraphOrchestrationRunner:
                 "completion_monitor_status": completion_monitor_status,
                 "last_progress_signature": progress_signature,
                 "last_subgoal_distance_m": last_subgoal_distance,
-                "no_progress_steps": no_progress_steps,
-                "repeated_action_count": repeated_action_count,
                 "recovery_mode": bool(recovery_mode),
                 "recovery_reason": (None if recovery_reason is None else str(recovery_reason)),
                 "recovery_entry_risk": (None if recovery_entry_risk is None else float(recovery_entry_risk)),
@@ -1039,8 +974,6 @@ class LangGraphOrchestrationRunner:
             "completion_monitor_status": completion_monitor_status,
             "last_progress_signature": progress_signature,
             "last_subgoal_distance_m": last_subgoal_distance,
-            "no_progress_steps": no_progress_steps,
-            "repeated_action_count": repeated_action_count,
             "recovery_mode": bool(recovery_mode),
             "recovery_reason": (None if recovery_reason is None else str(recovery_reason)),
             "recovery_entry_risk": (None if recovery_entry_risk is None else float(recovery_entry_risk)),

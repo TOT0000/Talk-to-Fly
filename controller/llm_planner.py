@@ -122,8 +122,6 @@ class LLMPlanner():
             "Worker states summary: {worker_states_summary}\n"
             "Last action: {last_action}\n"
             "Last result: {last_result}\n"
-            "Stall count: {stall_count}\n"
-            "Repeated action count: {repeated_action_count}\n"
             "Recent execution history: {recent_history}\n"
             "Return action statements only, no explanation."
         )
@@ -187,8 +185,6 @@ class LLMPlanner():
             "Recent recovery hypothesis: {recovery_hypothesis}\n"
             "Blocked workers for current subgoal: {blocked_workers_for_subgoal}\n"
             "Attempt history for current subgoal: {subgoal_attempts}\n"
-            "Stall count: {stall_count}\n"
-            "Repeated action count: {repeated_action_count}\n"
             "Recent execution history: {recent_history}\n"
             "Agent mode+action examples:\n"
             "{agent_mode_action_examples}\n"
@@ -670,8 +666,6 @@ class LLMPlanner():
         worker_states_summary: list[dict],
         last_action: str,
         last_result: str,
-        stall_count: int,
-        repeated_action_count: int,
         recent_history: list[dict],
         recovery_mode: bool = False,
         recovery_reason: str | None = None,
@@ -707,8 +701,6 @@ class LLMPlanner():
             worker_states_summary=str(list(worker_states_summary or [])[:3]),
             last_action=str(last_action or ""),
             last_result=str(last_result or ""),
-            stall_count=int(stall_count),
-            repeated_action_count=int(repeated_action_count),
             recent_history=str(list(recent_history or [])[-4:]),
             shared_opening_block=self._build_shared_opening_block(),
             shared_runtime_context_block=shared_runtime_context_block,
@@ -802,8 +794,6 @@ class LLMPlanner():
         worker_states_summary: list[dict],
         last_action: str,
         last_result: str,
-        stall_count: int,
-        repeated_action_count: int,
         recent_history: list[dict],
         recovery_mode: bool = False,
         recovery_reason: str | None = None,
@@ -855,8 +845,6 @@ class LLMPlanner():
             recovery_hypothesis=str(recovery_hypothesis or "none"),
             blocked_workers_for_subgoal=str(list(blocked_workers_for_subgoal or [])),
             subgoal_attempts=str(list(subgoal_attempts or [])),
-            stall_count=int(stall_count),
-            repeated_action_count=int(repeated_action_count),
             recent_history=str(list(recent_history or [])[-4:]),
             shared_opening_block=self._build_shared_opening_block(),
             shared_runtime_context_block=shared_runtime_context_block,
@@ -915,8 +903,6 @@ class LLMPlanner():
             else:
                 if mode == "recovery":
                     action = "tc(15);"
-                    if int(repeated_action_count) % 2 == 1:
-                        action = "tu(15);"
                     events.append("fallback_proxy_recovery_action")
                 else:
                     action = "d(0.4);"

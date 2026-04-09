@@ -921,10 +921,14 @@ class LLMController():
             progress_target_match = bool(runtime_target == checkpoint.id)
             safety_context = snapshot.get("safety_context")
             current_p = 0.0 if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
-            if self.framework_mode != "langgraph_agent":
-                if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
-                    stop_reason = f"collision_probability_high({current_p:.3f})"
-                    break
+            if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
+                print_t(
+                    "[TYPEFLY-INTERRUPT] "
+                    f"collision_probability={current_p:.6f} > {COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}, "
+                    "aborting current execution"
+                )
+                stop_reason = f"collision_probability_high({current_p:.3f})"
+                break
 
             dx_w = float(checkpoint.x) - float(control_pos[0])
             dy_w = float(checkpoint.y) - float(control_pos[1])
@@ -1151,6 +1155,11 @@ class LLMController():
         return image
     
     def execute_minispec(self, minispec: str, silent: bool = False, allow_auto_interrupt: bool = True):
+        statement_count = len([segment for segment in str(minispec or "").split(";") if str(segment).strip()])
+        print_t(
+            "[TYPEFLY-PLAN-QUEUE] "
+            f"enqueued replan statements count={statement_count} program={str(minispec or '').strip()}"
+        )
         self._benchmark_plan_checkpoint_sequence = self._extract_checkpoint_sequence_from_plan(minispec)
         print_debug(
             "[BENCHMARK-PLAN-PARSE] "
@@ -1183,11 +1192,6 @@ class LLMController():
         return None
 
     def _should_abort_current_execution_for_replan(self) -> Tuple[bool, str]:
-        # In Agent Mode (LangGraph), disable collision-probability hard-threshold
-        # auto-interrupt behavior. Agent decisions should rely on geometry + risk
-        # reasoning in the planner, not a fixed 0.50 trigger in controller runtime.
-        if str(getattr(self, "framework_mode", "")).strip().lower() == "langgraph_agent":
-            return False, ""
         snapshot = self.get_live_ui_snapshot()
         if not isinstance(snapshot, dict):
             return False, ""
@@ -1204,6 +1208,11 @@ class LLMController():
         if should_abort:
             dominant = str(getattr(safety_context, "dominant_threat_id", "unknown"))
             ui_p_text = "n/a" if ui_p is None else f"{float(ui_p):.6f}"
+            print_t(
+                "[TYPEFLY-INTERRUPT] "
+                f"collision_probability={current_p:.6f} > {COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}, "
+                "aborting current execution"
+            )
             print_t(
                 "[REPLAN_DEBUG] "
                 f"source=collision_threshold "
@@ -1451,6 +1460,8 @@ class LLMController():
                 else:
                     previous_plan = self.current_plan
                     self.execution_mode = "Planning"
+                    if replan_attempts > 0:
+                        print_t("[TYPEFLY-REPLAN] invoking LLM replan with continuation context")
                     self.current_plan = self.planner.plan(
                         task_description=task_description,
                         scene_description=scene_description,
@@ -1462,6 +1473,8 @@ class LLMController():
                     llm_called = True
                     final_plan_source = "llm"
                 self.current_plan = self._sanitize_minispec_plan(self.current_plan)
+                if replan_attempts > 0:
+                    print_t(f"[TYPEFLY-REPLAN] llm_response={self.current_plan}")
                 self.latest_safety_context = safety_context
                 self.task_run_logger.update_plan_info(self.current_plan, generation_success=True)
                 debug_info = {
@@ -1484,6 +1497,7 @@ class LLMController():
                 )
 
                 self.append_message(f'[Plan]: \\\\')
+                print_t(f"[TYPEFLY-PLAN-DISPLAY] showing replan program {self.current_plan}")
                 self.execution_time = time.time()
                 self.execution_mode = "Executing"
                 self.auto_replan_protection_remaining = int(AUTO_REPLAN_PROTECTION_STATEMENTS)
