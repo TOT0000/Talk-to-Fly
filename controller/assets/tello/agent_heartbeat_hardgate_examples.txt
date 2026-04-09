@@ -53,3 +53,17 @@ Current executing plan: lo('initial efficiency-first route');gc('A2');d(2.0);gc(
 Queue progress: next checkpoint is A2
 Execution history: A4 completed successfully
 Response(JSON): {"response":"full_replan_plan","reason":"Because the collision probability is above 0.5, continue is not allowed under hard gate mode.","plan":"lo('hardgate threshold replan near worker_1');ml(0.5);tu(15);gc('A1');d(2.0);gc('A2');d(2.0);gc('A3');d(2.0);"}
+
+Example H5 (HardGate heartbeat: infer execution anomaly and replan all remaining unfinished checkpoints)
+Task: Complete zone_A search.
+Completed checkpoints: ["A4"]
+Unfinished checkpoints: ["A2","A1","A3"]
+UAV position: (4.2, 8.6, 1.2)
+UAV heading: 14.0 deg
+Worker positions: worker_1=(4.5,9.1), worker_2=(0.9,7.2), worker_3=(5.8,11.1)
+current_collision_probability: 0.270
+dominant risky worker: worker_1
+Current executing plan: lo('initial efficiency-first route');gc('A2');d(2.0);gc('A4');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Queue progress: A4 has already been completed, but the earlier checkpoint A2 is still unfinished
+Execution history: A2 approach likely failed or was interrupted, then A4 was completed
+Response(JSON): {"response":"full_replan_plan","reason":"The current progress indicates an execution anomaly, so all remaining unfinished checkpoints must be replanned coherently.","plan":"lo('hardgate anomaly-aware replan after A2 interruption');ml(0.5);tu(12);gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);"}

@@ -23,6 +23,13 @@ def test_hardgate_prompt_has_extra_hard_gate_rule():
     assert 'You may choose continue or full_replan_plan based on your judgment.' in PLANNER_SOURCE
 
 
+def test_heartbeat_prompt_contains_geometry_and_anomaly_policy():
+    assert 'Your decision must not rely on collision probability alone.' in PLANNER_SOURCE
+    assert '- geometric closeness between UAV and workers' in PLANNER_SOURCE
+    assert 'if an earlier checkpoint in the original plan is still unfinished while a later checkpoint has already been completed' in PLANNER_SOURCE
+    assert 'plan must include all relevant remaining unfinished checkpoints' in PLANNER_SOURCE
+
+
 def test_heartbeat_prompt_output_format_unchanged():
     assert 'Return strict JSON with keys: response, reason, plan.' in PLANNER_SOURCE
     assert 'response must be one of: continue, full_replan_plan.' in PLANNER_SOURCE
@@ -31,6 +38,15 @@ def test_heartbeat_prompt_output_format_unchanged():
 
 def test_examples_files_are_real_and_nonempty_and_referenced():
     assert 'Example S1 (Soft heartbeat: continue current plan under low risk)' in SOFT_EXAMPLES
+    assert 'Example S5 (Soft heartbeat: infer execution anomaly from original plan order and completed checkpoints)' in SOFT_EXAMPLES
     assert 'Example H1 (HardGate heartbeat: below threshold, continue)' in HARD_EXAMPLES
+    assert 'Example H5 (HardGate heartbeat: infer execution anomaly and replan all remaining unfinished checkpoints)' in HARD_EXAMPLES
     assert 'Agent heartbeat examples:' in PLANNER_SOURCE
-    assert '{heartbeat_examples}' in PLANNER_SOURCE
+    assert '{agent_heartbeat_examples}' in PLANNER_SOURCE
+
+
+def test_heartbeat_parser_has_fenced_and_embedded_json_fallback_paths():
+    assert '_parse_heartbeat_response_json' in PLANNER_SOURCE
+    assert "```(?:json)?\\s*(.*?)\\s*```" in PLANNER_SOURCE
+    assert 'start = text.find("{")' in PLANNER_SOURCE
+    assert 'end = text.rfind("}")' in PLANNER_SOURCE

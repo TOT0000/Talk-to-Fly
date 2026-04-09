@@ -219,6 +219,7 @@ class LLMController():
         self.last_heartbeat_ts = 0.0
         self._pending_heartbeat_replan_plan: Optional[str] = None
         self._pending_heartbeat_reason: str = ""
+        self._replan_response_history: list[dict] = []
         self.langgraph_runner = LangGraphOrchestrationRunner(self)
 
         # PX4_SIM optional managed user-position publisher lifecycle
@@ -267,6 +268,48 @@ class LLMController():
 
     def set_benchmark_progress_focus_checkpoint(self, checkpoint_id: Optional[str]):
         self._benchmark_focus_checkpoint_id = (None if checkpoint_id is None else str(checkpoint_id).upper())
+
+    def _record_replan_response(
+        self,
+        *,
+        source: str,
+        reason: str,
+        plan_text: str,
+        raw_response: Optional[str] = None,
+    ):
+        plan = str(plan_text or "").strip()
+        if not plan:
+            return
+        self._replan_response_history.append(
+            {
+                "ts": float(time.time()),
+                "source": str(source),
+                "reason": str(reason or ""),
+                "plan": plan,
+                "raw_response": str(raw_response or ""),
+            }
+        )
+        if len(self._replan_response_history) > 20:
+            self._replan_response_history = self._replan_response_history[-20:]
+
+    def _build_execution_history_for_llm(self):
+        history = self.execution_history
+        if history is None:
+            base_text = "(n/a)"
+        elif isinstance(history, list):
+            base_text = ";".join(str(v) for v in history)
+        else:
+            base_text = str(history)
+        if not self._replan_response_history:
+            return base_text
+        replan_lines = [
+            "replan_response_history:"
+        ]
+        for idx, item in enumerate(self._replan_response_history, start=1):
+            replan_lines.append(
+                f"- #{idx} source={item.get('source')} reason={item.get('reason')} plan={item.get('plan')}"
+            )
+        return f"{base_text}\n" + "\n".join(replan_lines)
 
     def _extract_checkpoint_sequence_from_plan(self, minispec: str) -> list[str]:
         text = str(minispec or "")
@@ -1138,10 +1181,13 @@ class LLMController():
         response = self.planner.plan_agent_heartbeat(
             task_description=self.current_task_description,
             snapshot=snapshot,
-            execution_history=self.execution_history,
+            execution_history=self._build_execution_history_for_llm(),
             current_plan=self.current_plan,
             hard_gate=(self.framework_mode == MODE_AGENT_HEARTBEAT_HARDGATE),
         )
+        raw_response = str(response.get("raw_response", "") or "").strip()
+        if raw_response:
+            self.append_message(f"[AGENT-HEARTBEAT-RAW] {raw_response}")
         response_type = str(response.get("response", "continue"))
         reason = str(response.get("reason", ""))
         if response_type == "full_replan_plan":
@@ -1149,7 +1195,17 @@ class LLMController():
             if plan_text:
                 self._pending_heartbeat_replan_plan = plan_text
                 self._pending_heartbeat_reason = reason
+                self._record_replan_response(
+                    source="agent_heartbeat_full_replan_response",
+                    reason=reason,
+                    plan_text=plan_text,
+                    raw_response=raw_response,
+                )
                 print_t(f"[AGENT-HEARTBEAT] response=replan plan={plan_text}")
+                self.append_message(
+                    f"[AGENT-HEARTBEAT-REPLAN] reason={reason if reason else 'n/a'}"
+                )
+                self.append_message(f"[AGENT-HEARTBEAT-REPLAN-PLAN] {plan_text}")
                 return True
         print_t(f"[AGENT-HEARTBEAT] response=continue reason={reason}")
         return False
@@ -1437,6 +1493,7 @@ class LLMController():
         self.last_heartbeat_ts = 0.0
         self._pending_heartbeat_replan_plan = None
         self._pending_heartbeat_reason = ""
+        self._replan_response_history = []
         def _run_monitor():
             while not monitor_stop.is_set():
                 try:
@@ -1489,7 +1546,7 @@ class LLMController():
                             task_description=task_description,
                             scene_description=scene_description,
                             location_info=location_info,
-                            execution_history=self.execution_history,
+                            execution_history=self._build_execution_history_for_llm(),
                             safety_context=safety_context,
                             previous_plan=previous_plan,
                             planning_stage=planning_stage,
@@ -1497,6 +1554,12 @@ class LLMController():
                         llm_called = True
                         final_plan_source = "llm"
                 self.current_plan = self._sanitize_minispec_plan(self.current_plan)
+                if replan_attempts > 0 and llm_called:
+                    self._record_replan_response(
+                        source="typefly_llm_full_replan_response",
+                        reason=f"planning_stage={planning_stage}",
+                        plan_text=self.current_plan,
+                    )
                 if replan_attempts == 0:
                     print_t(f"[PLAN-INITIAL] llm_response={self.current_plan}")
                 else:
@@ -1552,6 +1615,11 @@ class LLMController():
                         raise RuntimeError("TypeFly-OneShot does not permit replan.")
                     replan_attempts += 1
                     self._replan_attempts = replan_attempts
+                    if replan_source == "collision_threshold_callback":
+                        print_t(
+                            f"[TYPEFLY-INTERRUPT-REPLAN] triggered by collision_probability > "
+                            f"{COLLISION_PROBABILITY_REPLAN_THRESHOLD:.1f}"
+                        )
                     print_t(f"[FULL-REPLAN] mode={selected_framework} count={replan_attempts}")
                     print_t(f"[REPLAN-COUNT] current={replan_attempts} limit={max_replan_attempts}")
                     self.task_run_logger.update_execution_info(
@@ -1582,19 +1650,43 @@ class LLMController():
                     f"ret_replan={bool(getattr(ret_val, 'replan', False))}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
-                if selected_framework != MODE_TYPEFLY_ONESHOT and ((not plan_completed) or (active_ids and (not zone_completed))):
+                if (not plan_completed) or (active_ids and (not zone_completed)):
+                    self.append_message(
+                        f"[LOG] Completion mismatch detected (auto-replan disabled), "
+                        f"missing={missing_from_plan if missing_from_plan else '[]'}"
+                    )
+                remaining_active = sorted(cid for cid in active_ids if cid not in completed_set)
+                if selected_framework == MODE_TYPEFLY_THRESHOLD_REPLAN and remaining_active:
+                    print_t(
+                        "[TYPEFLY-POSTCHECK] "
+                        f"queue finished but remaining checkpoints exist: {remaining_active}"
+                    )
+                    self.append_message(
+                        f"[LOG] [TYPEFLY-POSTCHECK] queue finished but remaining checkpoints exist: {remaining_active}"
+                    )
+                    if replan_attempts >= max_replan_attempts:
+                        print_t(f"[REPLAN-COUNT] current={replan_attempts} limit={max_replan_attempts}")
+                        print_t("[TYPEFLY-POSTCHECK-REPLAN] skip auto replan because replan cap reached")
+                        raise RuntimeError(
+                            "Post-check auto replan blocked by replan cap with remaining checkpoints: "
+                            f"{remaining_active}"
+                        )
+                    print_t(
+                        "[TYPEFLY-POSTCHECK-REPLAN] "
+                        f"remaining checkpoints after previous replan: {remaining_active}"
+                    )
+                    print_t("[TYPEFLY-POSTCHECK-REPLAN] invoking automatic replan for unfinished checkpoints")
                     replan_attempts += 1
                     self._replan_attempts = replan_attempts
                     print_t(f"[FULL-REPLAN] mode={selected_framework} count={replan_attempts}")
                     print_t(f"[REPLAN-COUNT] current={replan_attempts} limit={max_replan_attempts}")
-                    if replan_attempts > max_replan_attempts:
-                        raise RuntimeError(
-                            "Task end check failed: plan/objective completion mismatch "
-                            f"(missing={missing_from_plan}, zone_completed={zone_completed})"
-                        )
+                    self.task_run_logger.update_execution_info(
+                        execution_success=False,
+                        failure_reason="post_queue_unfinished_checkpoints_auto_replan",
+                        task_completed=False,
+                    )
                     self.append_message(
-                        f"[LOG] Completion mismatch detected, replan attempt={replan_attempts}, "
-                        f"missing={missing_from_plan if missing_from_plan else '[]'}"
+                        f"[LOG] [TYPEFLY-POSTCHECK-REPLAN] invoking automatic replan for unfinished checkpoints: {remaining_active}"
                     )
                     self.execution_mode = "Planning"
                     continue
