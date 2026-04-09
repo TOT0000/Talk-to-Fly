@@ -606,20 +606,41 @@ class LLMPlanner():
             if hard_gate
             else "You may choose continue or full_replan_plan based on your judgment."
         )
-        heartbeat_examples = (
+        agent_heartbeat_examples = (
             self.agent_heartbeat_hardgate_examples
             if hard_gate
             else self.agent_heartbeat_soft_examples
         )
         prompt = (
-            "You are heartbeat monitor for UAV planning.\n"
+            "You are heartbeat monitor for UAV planning.\n\n"
             "Return strict JSON with keys: response, reason, plan.\n"
             "response must be one of: continue, full_replan_plan.\n"
-            "If response=continue, set plan to empty string.\n"
-            f"{hard_gate_rule}\n"
-            "Use same skill abbreviations as TypeFly plans.\n"
-            "Agent heartbeat examples:\n"
-            f"{heartbeat_examples}\n"
+            "If response=continue, set plan to empty string.\n\n"
+            f"{hard_gate_rule}\n\n"
+            "Use the same skill abbreviations as TypeFly plans.\n\n"
+            "Your decision must not rely on collision probability alone.\n"
+            "You must jointly consider:\n"
+            "- current_collision_probability\n"
+            "- UAV position and heading\n"
+            "- worker positions\n"
+            "- geometric closeness between UAV and workers\n"
+            "- whether the current approach corridor is likely to pass too close to a worker\n"
+            "- original plan ordering\n"
+            "- completed checkpoints\n"
+            "- unfinished checkpoints\n"
+            "- current queue progress\n"
+            "- execution history\n\n"
+            "Replan policy:\n"
+            "1. If the current plan is still safe and usable, return continue.\n"
+            "2. If collision probability is high, you should return full_replan_plan.\n"
+            "3. Even if collision probability is not high, if the UAV is geometrically too close to a worker, or if the current corridor is likely to create a risky close pass, you may still return full_replan_plan.\n"
+            "4. When replanning, you may first use low-level motion or turning actions (mf / mb / ml / mr / tc / tu / d) to create spacing from the risky worker, and then continue planning the remaining unfinished checkpoints.\n"
+            "5. The size of the detour must balance safety and efficiency:\n"
+            "   - if risk is high or geometry is very close, use a larger and more conservative detour\n"
+            "   - if risk is not high but preventive avoidance is still useful, use a smaller detour\n"
+            "6. Normally, the remaining unfinished checkpoints should continue in a way that is consistent with the original plan order whenever reasonable.\n"
+            "7. However, if an earlier checkpoint in the original plan is still unfinished while a later checkpoint has already been completed, you should infer that execution likely failed, was interrupted, or was skipped around that checkpoint. In that case, you should reconsider all remaining unfinished checkpoints together and produce a new coherent full replan plan instead of blindly following the old queue.\n"
+            "8. When returning full_replan_plan, plan must include all relevant remaining unfinished checkpoints that still need to be completed, not only the immediately next one.\n\n"
             f"Task: {task_description}\n"
             f"Completed checkpoints: {completed}\n"
             f"Unfinished checkpoints: {[cid for cid in active if cid not in completed]}\n"
@@ -630,7 +651,9 @@ class LLMPlanner():
             f"dominant risky worker: {dominant_worker}\n"
             f"Current executing plan: {current_plan}\n"
             f"Queue progress: {benchmark_progress}\n"
-            f"Execution history: {execution_history}\n"
+            f"Execution history: {execution_history}\n\n"
+            "Agent heartbeat examples:\n"
+            f"{agent_heartbeat_examples}\n\n"
             "Return JSON only."
         )
         raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
