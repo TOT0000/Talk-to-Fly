@@ -1,4 +1,4 @@
-import os, ast, re, json
+import os, ast, re, json, math
 from typing import Optional
 
 from .safety_context import SafetyContext
@@ -29,7 +29,11 @@ class LLMPlanner():
         self.prompt_plan_replan_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/prompt_plan_replan.txt")
         self.prompt_probe_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/prompt_probe.txt")
         self.guides_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/guides.txt")
-        self.plan_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/plan_examples.txt")
+        self.typefly_initial_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/typefly_initial_examples.txt")
+        self.typefly_replan_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/typefly_replan_examples.txt")
+        self.agent_decomposition_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_decomposition_examples.txt")
+        self.agent_mode_action_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_mode_action_examples.txt")
+        self.agent_reflection_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_reflection_examples.txt")
         with open(self.prompt_plan_path, "r") as f:
             self.prompt_plan = f.read()
 
@@ -39,56 +43,67 @@ class LLMPlanner():
         with open(self.guides_path, "r") as f:
             self.guides = f.read()
 
-        with open(self.plan_examples_path, "r") as f:
-            self.plan_examples = f.read()
+        with open(self.typefly_initial_examples_path, "r") as f:
+            self.typefly_initial_examples = f.read()
+        with open(self.typefly_replan_examples_path, "r") as f:
+            self.typefly_replan_examples = f.read()
+        with open(self.agent_decomposition_examples_path, "r") as f:
+            self.agent_decomposition_examples = f.read()
+        with open(self.agent_mode_action_examples_path, "r") as f:
+            self.agent_mode_action_examples = f.read()
+        with open(self.agent_reflection_examples_path, "r") as f:
+            self.agent_reflection_examples = f.read()
         with open(self.prompt_plan_initial_path, "r") as f:
             self.prompt_plan_initial = f.read()
         with open(self.prompt_plan_replan_path, "r") as f:
             self.prompt_plan_replan = f.read()
         self.prompt_langgraph_decomposition = (
-            "You are TypeFly LangGraph Task Decomposer.\n"
-            "Return checkpoint IDs only, as a JSON array, in execution order.\n"
-            "Rules:\n"
-            "1) Only use IDs from allowed checkpoints.\n"
-            "2) Prefer safer + shorter + smoother order from current UAV position.\n"
-            "3) Do not mechanically follow A1->A2->A3->A4.\n"
-            "4) If a checkpoint is temporarily risky due to worker proximity, defer it.\n"
-            "5) Do not output explanation.\n"
-            "Shared authoritative mission/geometry/safety context:\n"
-            "{shared_context_block}\n"
+            "{shared_opening_block}\n\n"
+            "{shared_runtime_context_block}\n\n"
+            "You are the Agent Task Decomposer. This stage does NOT generate a full MiniSpec program.\n"
+            "It only outputs a checkpoint visiting order for unfinished checkpoints.\n"
+            "Output JSON array only (checkpoint IDs in order), with no explanation.\n"
+            "Ordering rules:\n"
+            "- Sort unfinished checkpoints by safety + efficiency jointly.\n"
+            "- Safety depends on UAV position, UAV heading, worker positions, UAV/worker/checkpoint radii, checkpoint geometry, and collision probabilities.\n"
+            "- Efficiency depends on whether approach from current UAV position + heading is smooth and avoids unnecessary detours.\n"
+            "- Do not use fixed lexical order like A1->A2->A3->A4.\n"
+            "- If a checkpoint is temporarily unfavorable (e.g., behind a worker, too close to a worker, or inefficient from current heading), defer it.\n"
             "Task: {task_description}\n"
             "Allowed checkpoints: {allowed_checkpoints}\n"
-            "Active zones: {active_zones}\n"
+            "Active zones: {active_zones}\n\n"
+            "Agent decomposition examples:\n"
+            "{agent_decomposition_examples}\n\n"
             "Output JSON array only."
         )
         self.prompt_langgraph_step = (
-            "You are TypeFly LangGraph Step Planner.\n"
-            "You are NOT planning a full mission. You are deciding only the NEXT step.\n"
-            "Output one action or a very short action segment (max 2 statements), each ending with ';'.\n"
-            "Allowed actions: move_forward(distance); move_backward(distance); move_left(distance); move_right(distance); "
-            "turn_cw(degrees); turn_ccw(degrees); delay(seconds); go_checkpoint(\"ID\"); log(\"text\");\n"
+            "{shared_opening_block}\n\n"
+            "{shared_runtime_context_block}\n\n"
+            "You are the Agent Step Planner. You are NOT planning a full mission. You are deciding only the NEXT step.\n"
+            "Output one action or a very short action segment, each statement ending with ';'.\n"
+            "Allowed actions (abbreviation form only):\n"
+            "gc('ID'); mf(value); mb(value); ml(value); mr(value); tc(value); tu(value); d(value); lo('text');\n"
             "Hard constraints:\n"
             "- Do not output multi-checkpoint full plans.\n"
             "- current_subgoal is the primary mission target for this step.\n"
             "- If the same action was already executed and no progress improved, avoid repeating it.\n"
-            "- If risk is high, you may temporarily choose conservative avoidance/recovery action.\n"
+            "- If the current situation appears risky, you may temporarily choose conservative avoidance or recovery action.\n"
             "- Avoidance is temporary, not a new mission objective.\n"
             "- Recovery mode is controlled by system state; follow it explicitly.\n"
             "- If recovery_mode is true, prioritize conservative recovery movement and re-observation over direct checkpoint approach.\n"
-            "- If recovery_mode is false (or recovery just exited because risk <= 0.2), prioritize go_checkpoint(current_subgoal).\n"
-            "- If current_subgoal risk is high, do not blindly rush go_checkpoint(current_subgoal).\n"
+            "- If recovery_mode is false, prioritize safe mission progress toward current_subgoal.\n"
+            "- If current_subgoal appears risky, do not blindly rush gc(current_subgoal).\n"
             "- Recovery should be step-by-step: after each recovery step, re-observe latest risk/state before deciding the next step.\n"
-            "- During each re-observation, explicitly check current collision risk.\n"
-            "- If current collision risk drops below 0.2, prioritize returning to go_checkpoint(current_subgoal).\n"
-            "- When you judge immediate risk has improved to a safe level, return to go_checkpoint(current_subgoal).\n"
-            "- If risk is still high after re-observation, choose another conservative recovery step and re-observe again.\n"
+            "- During each re-observation, explicitly reassess current collision risk and geometry.\n"
+            "- When you judge that immediate risk has improved to a safe level, return to checkpoint progress.\n"
+            "- If risk still appears high after re-observation, choose another conservative recovery step and re-observe again.\n"
             "- Recovery goal is to leave danger and then resume current_subgoal, not endless wandering.\n"
-            "- If stalled/no-progress, switch to a different conservative strategy.\n"
+            "- If stalled or no-progress, switch to a different conservative strategy.\n"
             "- Use strategy memory to avoid repeating known failed approach patterns for this subgoal.\n"
-            "- Avoid long turn/move loops without objective progress.\n"
-            "- reached checkpoint area is NOT completed checkpoint.\n"
-            "- Completion is determined only by official completion_state/progress.\n"
-            "- If reached but not completed, prioritize finishing current_subgoal (hold/re-approach/micro-adjust), not jumping to next checkpoint.\n"
+            "- Avoid long turn or move loops without objective progress.\n"
+            "- Reaching checkpoint area is NOT the same as completing checkpoint.\n"
+            "- Completion is determined only by official completion_state and progress.\n"
+            "- If reached but not completed, prioritize finishing current_subgoal (for example hold, re-approach, or micro-adjust), not jumping to the next checkpoint.\n"
             "Task: {task_description}\n"
             "Current subgoal: {current_subgoal}\n"
             "Remaining checkpoints: {remaining_checkpoints}\n"
@@ -113,57 +128,46 @@ class LLMPlanner():
             "Return action statements only, no explanation."
         )
         self.prompt_langgraph_mode_action = (
-            "You are TypeFly LangGraph Mode+Action Decision Agent.\n"
-            "Decide BOTH the mode and the next action for this single step.\n"
+            "{shared_opening_block}\n\n"
+            "{shared_runtime_context_block}\n\n"
+            "You are the Agent Mode+Action Decision module.\n"
+            "This stage does NOT create a full mission plan from zero. It decides only the next short action segment.\n"
+            "Decide BOTH the mode and action for this step.\n"
             "Output JSON only with keys: mode, reason, strategy_summary, action, next_subgoal, why_action_matches_mode.\n"
             "mode must be one of: approach, recovery, replan, skip_current_subgoal.\n"
             "next_subgoal default is null.\n"
             "Rules:\n"
             "- Decide mode from latest runtime state; do not mechanically repeat previous mode.\n"
             "- action may be a short MiniSpec segment (1~4 statements), not only one skill call.\n"
-            "- Evaluate risk using geometry + probability jointly (UAV/worker positions + radii + collision probability), not a single hard threshold.\n"
+            "- Danger judgment cannot rely on a single hard threshold.\n"
+            "- Evaluate risk using geometry + probability jointly (collision probability + UAV heading + UAV-worker geometry + radii + immediate approach corridor).\n"
             "- If probability is low but geometry is too close, still treat as risky.\n"
             "- Match avoidance amplitude to risk severity: high risk -> larger conservative detour; low-but-suspicious risk -> small preventive detour.\n"
+            "- gc() is convenient but path details are not fully controllable; if direct gc() looks unsafe, use heading-aware low-level shaping first.\n"
             "- mode-action alignment is strict:\n"
-            "  - If mode = recovery: action MUST start with one or more recovery-style repositioning steps; do not start with go_checkpoint(current_subgoal).\n"
-            "  - If mode = approach: prioritize mission progress and may include short supporting moves before/after go_checkpoint(current_subgoal).\n"
+            "  - If mode = recovery: action MUST start with one or more recovery-style repositioning steps; do not start with gc(current_subgoal).\n"
+            "  - If mode = approach: prioritize mission progress and may include short supporting moves before/after gc(current_subgoal).\n"
             "  - If mode = skip_current_subgoal: action should progress toward the newly chosen checkpoint, and next_subgoal MUST be provided and MUST differ from current_subgoal.\n"
             "  - If mode = replan: this means strategy-level change (route/order/tactic redesign), not just one-step local recovery.\n"
-            "- Recovery cadence must be explicit:\n"
-            "  - When risk toward current_subgoal is high, DO NOT immediately output go_checkpoint(current_subgoal).\n"
-            "  - First output one short move/turn recovery step to detour around workers, increase spacing, or change approach geometry.\n"
-            "  - After EACH recovery step, re-observe latest state/risk before deciding next step.\n"
-            "  - Return to approach/go_checkpoint(current_subgoal) only when updated state indicates it is safe to resume mission progress.\n"
             "- Distinguish skip_current_subgoal vs replan:\n"
             "  - skip_current_subgoal: temporary checkpoint switch within remaining checkpoints; must nominate a different next_subgoal now.\n"
             "  - replan: requires broader strategy update (e.g., resequencing or route strategy change), beyond a temporary one-step detour.\n"
-            "- Checkpoint ordering is dynamic, not fixed:\n"
-            "  - Do NOT mechanically follow A1->A2->A3->A4.\n"
-            "  - Choose next_subgoal by balancing safety and efficiency using current drone position, worker layout, and local risk.\n"
-            "  - If current_subgoal is temporarily high-risk/inefficient, prefer skip_current_subgoal with a safer and shorter next_subgoal.\n"
-            "- next_subgoal rules:\n"
-            "  - Use null by default.\n"
-            "  - Fill next_subgoal only when actually switching checkpoint target (especially skip_current_subgoal).\n"
-            "  - Do NOT set next_subgoal equal to current_subgoal unless there is an explicit target-switch reason.\n"
-            "- Consistency rules:\n"
-            "  - reason must directly explain the chosen mode+action and must be consistent with referenced checkpoint IDs.\n"
-            "  - Do not mention checkpoint A in reason while action targets checkpoint B.\n"
-            "  - Avoid repeating known failed approach patterns.\n"
+            "- Checkpoint ordering is dynamic, not fixed: never follow A1->A2->A3->A4 mechanically.\n"
+            "- If current_subgoal is temporarily high-risk/inefficient, prefer skip_current_subgoal with a safer and shorter next_subgoal.\n"
+            "- If action intends to complete a checkpoint in this step, include d(2.0).\n"
+            "- Mode semantics:\n"
+            "  - approach: efficient progress toward checkpoint objective under acceptable geometry.\n"
+            "  - recovery: local risk-reduction maneuver before resuming approach.\n"
+            "  - replan: broader strategy-level change (ordering/tactic redesign).\n"
+            "  - skip_current_subgoal: temporary target switch to a safer or more efficient unfinished checkpoint.\n"
             "- Output format strictness:\n"
             "  - reason: one short concrete sentence.\n"
             "  - strategy_summary: one short concrete sentence.\n"
             "  - action: a short MiniSpec segment (1~4 statements), each statement ending with ';'.\n"
             "  - why_action_matches_mode: one short sentence explicitly proving action and mode are consistent.\n"
-            "Executable action grammar (each statement must match one of the following):\n"
-            "- move_forward(0.1~2.0); move_backward(0.1~2.0); move_left(0.1~2.0); move_right(0.1~2.0);\n"
-            "- turn_cw(5~90); turn_ccw(5~90); delay(0.1~2.0); go_checkpoint(\"A1\"); log(\"short_text\");\n"
-            "Alias normalization allowed by system: move_back->move_backward, hold/wait/reobserve->delay.\n"
-            "Output examples (format + semantics):\n"
-            "{{\"mode\":\"approach\",\"reason\":\"Risk is low and geometry is clear toward A2.\",\"strategy_summary\":\"Use efficient progress with minimal detour.\",\"action\":\"go_checkpoint(\\\"A2\\\");delay(0.5);\",\"next_subgoal\":null,\"why_action_matches_mode\":\"Approach mode advances mission while keeping short observation cadence.\"}}\n"
-            "{{\"mode\":\"recovery\",\"reason\":\"Risk near worker_2 is high and geometry is too close.\",\"strategy_summary\":\"Take a conservative multi-step detour before resuming.\",\"action\":\"move_left(0.9);move_backward(0.6);turn_cw(20);delay(0.4);\",\"next_subgoal\":null,\"why_action_matches_mode\":\"Recovery mode applies larger avoidance when risk and proximity are both high.\"}}\n"
-            "{{\"mode\":\"recovery\",\"reason\":\"Potential conflict is mild but worth early avoidance.\",\"strategy_summary\":\"Apply a small preventive sidestep then re-observe.\",\"action\":\"move_right(0.3);turn_ccw(10);delay(0.3);\",\"next_subgoal\":null,\"why_action_matches_mode\":\"Recovery mode can use small-amplitude avoidance for low but suspicious risk.\"}}\n"
-            "Shared authoritative mission/geometry/safety context:\n"
-            "{shared_context_block}\n"
+            "Executable action grammar (abbreviation form required):\n"
+            "- mf(value); mb(value); ml(value); mr(value);\n"
+            "- tc(value); tu(value); d(value); gc('A1'); lo('short_text');\n"
             "Task: {task_description}\n"
             "Current mode: {current_mode}\n"
             "Current subgoal: {current_subgoal}\n"
@@ -186,10 +190,15 @@ class LLMPlanner():
             "Stall count: {stall_count}\n"
             "Repeated action count: {repeated_action_count}\n"
             "Recent execution history: {recent_history}\n"
+            "Agent mode+action examples:\n"
+            "{agent_mode_action_examples}\n"
             "Output JSON only."
         )
         self.prompt_langgraph_reflection = (
-            "You are TypeFly LangGraph Strategy Reflector.\n"
+            "{shared_opening_block}\n\n"
+            "{shared_runtime_context_block}\n\n"
+            "You are the Agent Strategy Reflector.\n"
+            "This stage does NOT output control actions; it reflects on the previous step and updates strategy memory.\n"
             "Analyze last step outcome and decide strategy-level correction.\n"
             "Return JSON only with keys:\n"
             "- failure_reason: short string\n"
@@ -204,11 +213,10 @@ class LLMPlanner():
             "- You may reprioritize checkpoints when current subgoal is temporarily high-risk or blocked.\n"
             "- Reprioritization must be temporary and mission-oriented.\n"
             "- Prioritize safe + efficient ordering; do not keep a fixed lexical checkpoint order.\n"
-            "- Use geometry + probability jointly in reflection: UAV/worker/checkpoint positions and radii with collision risk.\n"
+            "- Consider collision probability, UAV heading, worker geometry, checkpoint geometry, and whether recent motion formed a safe and efficient approach corridor.\n"
+            "- If current subgoal is temporarily unsafe, geometrically awkward, or heading-inefficient, suggest reprioritizing unfinished checkpoints.\n"
             "- Explicitly encode whether risk was high-conservative-detour case or low-risk-small-avoidance case.\n"
             "- Keep every field concise.\n"
-            "Shared authoritative mission/geometry/safety context:\n"
-            "{shared_context_block}\n"
             "Task: {task_description}\n"
             "Current subgoal: {current_subgoal}\n"
             "Route decision from evaluator: {route_decision}\n"
@@ -227,9 +235,10 @@ class LLMPlanner():
             "Blocked workers by subgoal: {blocked_workers_by_subgoal}\n"
             "Subgoal attempt history: {subgoal_attempt_history}\n"
             "Recent execution history: {recent_history}\n"
+            "Agent reflection examples:\n"
+            "{agent_reflection_examples}\n"
             "Output JSON only."
         )
-
     def set_model(self, model_name):
         self.model_name = model_name
 
@@ -246,12 +255,44 @@ class LLMPlanner():
         except Exception:
             return "(n/a)"
 
-    def _build_runtime_context_block(
+    def _build_shared_opening_block(self) -> str:
+        return (
+            "You are an autonomous UAV mission planning and control agent operating in a structured benchmark scene that may be divided into multiple zones such as zone_A, zone_B, and zone_C. "
+            "Each zone contains multiple checkpoints that define the search coverage required in that zone. "
+            "The environment contains one UAV and three workers, and workers may be static or moving. "
+            "Your job is to use only the provided skills to control the UAV and complete one or more zone-search tasks.\n\n"
+            "A checkpoint is not completed merely because the UAV passes nearby. "
+            f"A checkpoint is completed only when the UAV true position stays continuously inside that checkpoint radius for {float(CHECKPOINT_DWELL_SECONDS):.1f} seconds. "
+            f"If the UAV leaves the checkpoint region before the full {float(CHECKPOINT_DWELL_SECONDS):.1f} seconds are accumulated, the dwell timer resets. "
+            "A zone is completed only when all active checkpoints in that zone are completed. "
+            "Completed checkpoints must never be redone.\n\n"
+            "Your planning must always balance safety and efficiency. Safety means that the UAV must not collide with any worker. "
+            "To help you reason about safety, you are given UAV position, UAV heading, worker positions, geometry sizes, and collision probability information. "
+            "You must use geometry and collision probability jointly. Do not rely on probability alone. "
+            "Even when collision probability is low, if the UAV is geometrically too close to a worker after considering both sizes, you must still treat the situation as risky.\n\n"
+            "Efficiency means minimizing unnecessary detours and mission completion time while maintaining zero collisions. "
+            "You can improve efficiency by choosing a smoother and shorter checkpoint order from the current UAV position and heading. "
+            "You must not mechanically follow a fixed lexical order such as A1 -> A2 -> A3 -> A4. "
+            "Instead, you should choose the order that is safer, smoother, and more efficient for the current geometry.\n\n"
+            "The available movement skills include low-level body-frame actions such as forward, backward, left, right, and turning, as well as checkpoint navigation through gc(). "
+            "Low-level movement and turning are not only for emergencies. "
+            "You may also use them proactively to shape a safer and more controllable approach corridor toward a checkpoint. "
+            "This matters because gc() is convenient but does not expose detailed path control. "
+            "In practice, gc() usually aligns toward the target checkpoint and moves approximately straight. "
+            "Therefore, if direct gc() appears risky because of worker geometry, you may first use heading-aware low-level motion and turning to create a safer approach, and then continue toward the checkpoint.\n\n"
+            "When choosing an avoidance maneuver, always consider UAV heading explicitly. "
+            "The body-frame motions mf, mb, ml, and mr are all defined relative to the current UAV heading. "
+            "Therefore, the correct way to detour around a worker depends not only on positions, but also on current heading. "
+            "If the risk appears mild but suspicious, a small preventive detour may be enough. "
+            "If the risk appears severe or geometry is very close, you should prefer a larger and more conservative detour. "
+            "The overall goal is to complete the mission with no collisions while keeping mission time as low as possible."
+        )
+
+    def _build_shared_runtime_context_block(
         self,
         safety_context: Optional[SafetyContext],
         *,
         snapshot: Optional[dict] = None,
-        skill_catalog_text: Optional[str] = None,
     ) -> str:
         if snapshot is None:
             snapshot = {}
@@ -261,6 +302,7 @@ class LLMPlanner():
                 except Exception:
                     snapshot = {}
         drone_pos = snapshot.get("drone_est_bias_corrected") or snapshot.get("drone_est") or snapshot.get("drone_gt")
+        drone_yaw_deg = math.degrees(float(snapshot.get("drone_yaw_rad") or 0.0))
         workers = list(snapshot.get("workers") or [])
         workers_sorted = sorted(workers, key=lambda row: str(row.get("id", "")))
         worker_lines = []
@@ -282,7 +324,7 @@ class LLMPlanner():
             for row in (getattr(safety_context, "per_worker_collision_probabilities", []) or []):
                 worker_id = str(row.get("id", "unknown"))
                 p_val = float(row.get("collision_probability", 0.0))
-                per_worker_probs.append(f"{worker_id}:{p_val:.6f}")
+                per_worker_probs.append((worker_id, p_val))
         dominant_worker = "n/a"
         if safety_context is not None:
             dominant_worker = str(getattr(safety_context, "dominant_threat_id", "n/a") or "n/a")
@@ -305,50 +347,53 @@ class LLMPlanner():
         if not checkpoint_lines:
             checkpoint_lines.append("- (n/a)")
 
-        shared_rules_block = (
-            "Authoritative geometry/safety/task rules:\n"
-            "- Plan using bias-corrected positions.\n"
-            "- UAV is modeled as a circle.\n"
-            "- Each worker is modeled as a circle.\n"
-            "- Each checkpoint is modeled as a circle.\n"
-            f"- UAV radius: {float(UAV_RADIUS_M):.2f} m.\n"
-            f"- Worker radius: {float(WORKER_RADIUS_M):.2f} m.\n"
-            f"- Checkpoint radius: {float(CHECKPOINT_RADIUS_M):.2f} m.\n"
-            f"- Checkpoint completion requires UAV true position to stay continuously inside checkpoint radius for {float(CHECKPOINT_DWELL_SECONDS):.1f} seconds.\n"
-            "- Leaving before dwell threshold resets the dwell timer.\n"
-            "- Zone completion requires all active checkpoints in that zone to be completed.\n"
-            "- Completed checkpoints must not be redone.\n"
-            "- Balance safety and efficiency jointly.\n"
-            "- Do not use fixed lexical order such as A1->A2->A3->A4.\n"
-            "- Efficiency-first when collision risk is low and geometric clearance is sufficient.\n"
-            "- Safety-first when risk is high or geometry is close, even if probability is low.\n"
-            "- Avoidance amplitude must match severity: high-risk -> larger conservative detour; low-but-suspicious -> small preventive detour.\n"
+        worker_radii_block = "\n".join(
+            [f"- worker_{idx + 1}: {float(WORKER_RADIUS_M):.2f} m" for idx in range(3)]
         )
-        skill_block = ""
-        if skill_catalog_text:
-            skill_block = (
-                "Skill policy:\n"
-                "- You may only use listed skills. Do not invent new skills.\n"
-                "Allowed skills:\n"
-                f"{skill_catalog_text}\n"
-            )
+        per_worker_collision_probabilities_block = "\n".join(
+            [f"- {wid}: {prob:.6f}" for wid, prob in per_worker_probs]
+        ) if per_worker_probs else "- (n/a)"
+
         return (
-            skill_block
-            + "UAV state:\n"
+            "Shared runtime context (identical skill availability for TypeFly mode and Agent mode):\n"
+            "\n"
+            "Skills (abbreviation required in outputs and examples):\n"
+            "- gc = go_checkpoint\n"
+            "- mf = move_forward\n"
+            "- mb = move_backward\n"
+            "- ml = move_left\n"
+            "- mr = move_right\n"
+            "- tc = turn_cw\n"
+            "- tu = turn_ccw\n"
+            "- d = delay\n"
+            "- lo = log\n"
+            "- TypeFly mode and Agent mode must use exactly the same available skills listed above.\n"
+            "- Use only listed skills; do not invent new skills.\n"
+            "- Runtime may accept full-name aliases for compatibility, but prompt/example/output style must use abbreviations.\n"
+            "UAV state:\n"
             f"- UAV bias-corrected estimated position: {self._fmt_xyz(drone_pos)}\n"
+            f"- UAV heading / yaw (deg): {drone_yaw_deg:.2f}\n"
             "Workers state:\n"
             + "\n".join(worker_lines)
             + "\n"
-            f"- dominant risky worker: {dominant_worker}\n"
-            f"- current collision probability: {current_collision_probability:.6f}\n"
-            f"- per-worker collision probability: {per_worker_probs if per_worker_probs else ['(n/a)']}\n"
-            "Mission objective:\n"
+            "\n"
+            "Mission structure:\n"
             f"- active zones: {active_zone_ids if active_zone_ids else ['(n/a)']}\n"
             f"- active checkpoints: {active_checkpoint_ids if active_checkpoint_ids else ['(n/a)']}\n"
-            "Active checkpoint coordinates (x, y):\n"
+            "- checkpoint coordinates:\n"
             + "\n".join(checkpoint_lines)
             + "\n"
-            + shared_rules_block
+            "Geometry information:\n"
+            f"- UAV radius: {float(UAV_RADIUS_M):.2f} m\n"
+            "- worker radii:\n"
+            f"{worker_radii_block}\n"
+            f"- checkpoint radius: {float(CHECKPOINT_RADIUS_M):.2f} m\n"
+            "\n"
+            "Risk context:\n"
+            f"- current collision probability: {current_collision_probability:.6f}\n"
+            "- per-worker collision probabilities:\n"
+            f"{per_worker_collision_probabilities_block}\n"
+            f"- dominant risky worker: {dominant_worker}\n"
         )
 
     def _extract_completed_checkpoints_from_history(self, execution_history) -> list[str]:
@@ -469,10 +514,10 @@ class LLMPlanner():
                 snapshot = self.controller.get_live_ui_snapshot() or {}
             except Exception:
                 snapshot = {}
-        runtime_context_block = self._build_runtime_context_block(
+        shared_opening_block = self._build_shared_opening_block()
+        shared_runtime_context_block = self._build_shared_runtime_context_block(
             safety_context,
             snapshot=snapshot,
-            skill_catalog_text=str(self.low_level_skillset),
         )
         objective = dict(snapshot.get("active_objective_set") or {})
         active_checkpoint_ids = [str(v) for v in objective.get("active_checkpoint_ids", [])]
@@ -497,15 +542,20 @@ class LLMPlanner():
         prompt = prompt_template.format(
             system_skill_description_low=self.low_level_skillset,
             guides=self.guides,
-            plan_examples=self.plan_examples,
+            typefly_initial_examples=self.typefly_initial_examples,
+            typefly_replan_examples=self.typefly_replan_examples,
             error_message=error_message,
             scene_description=full_scene,
             task_description=task_description,
-            runtime_context=runtime_context_block,
+            shared_opening_block=shared_opening_block,
+            shared_runtime_context_block=shared_runtime_context_block,
             replan_history_block=replan_history_block,
             execution_history=execution_history_block,
             mission_progress=mission_progress_block,
             previous_plan=previous_plan if is_replan_call else None,
+            completed_checkpoints=self._extract_completed_checkpoints_from_history(execution_history_block) if is_replan_call else [],
+            remaining_checkpoints=[cid for cid in active_checkpoint_ids if cid not in self._extract_completed_checkpoints_from_history(execution_history_block)] if is_replan_call else active_checkpoint_ids,
+            current_target_checkpoint=(benchmark_progress.get("current_target") if isinstance(benchmark_progress, dict) else None),
         )
         dump_prompt = str(os.getenv("TYPEFLY_DUMP_LLM_PROMPT", "1")).strip().lower() not in {"0", "false", "no"}
         if dump_prompt:
@@ -519,9 +569,15 @@ class LLMPlanner():
                 print_debug(f"[P-PROMPT-DUMP] failed to write prompt: {exc}")
         print_t(f"[P] Planning request: {task_description}")
         print_debug(
-            f"[P-PROMPT-PATHS] prompt_plan={(self.prompt_plan_replan_path if is_replan_call else self.prompt_plan_initial_path)} guides={self.guides_path} examples={self.plan_examples_path}"
+            f"[P-PROMPT-PATHS] prompt_plan={(self.prompt_plan_replan_path if is_replan_call else self.prompt_plan_initial_path)} "
+            f"guides={self.guides_path} "
+            f"typefly_initial_examples={self.typefly_initial_examples_path} "
+            f"typefly_replan_examples={self.typefly_replan_examples_path} "
+            f"agent_decomposition_examples={self.agent_decomposition_examples_path} "
+            f"agent_mode_action_examples={self.agent_mode_action_examples_path} "
+            f"agent_reflection_examples={self.agent_reflection_examples_path}"
         )
-        print_debug(f"[P-RUNTIME-CONTEXT]\n{runtime_context_block}")
+        print_debug(f"[P-RUNTIME-CONTEXT]\n{shared_runtime_context_block}")
         if replan_history_block:
             print_debug(f"[P-REPLAN-HISTORY]\n{replan_history_block}")
         print_debug(f"[P] Full prompt debug log: {chat_log_path}")
@@ -575,18 +631,17 @@ class LLMPlanner():
     ) -> list[str]:
         snapshot = self.controller.get_live_ui_snapshot() if (self.controller is not None and hasattr(self.controller, "get_live_ui_snapshot")) else {}
         safety_context = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
-        shared_context_block = self._build_runtime_context_block(
+        shared_runtime_context_block = self._build_shared_runtime_context_block(
             safety_context,
             snapshot=(snapshot if isinstance(snapshot, dict) else {}),
-            skill_catalog_text=(
-                "move_forward, move_backward, move_left, move_right, turn_cw, turn_ccw, delay, go_checkpoint, log"
-            ),
         )
         prompt = self.prompt_langgraph_decomposition.format(
             task_description=str(task_description or ""),
             allowed_checkpoints=[str(v).upper() for v in list(active_checkpoint_ids or [])],
             active_zones=[str(v) for v in list(active_zone_ids or [])],
-            shared_context_block=shared_context_block,
+            shared_opening_block=self._build_shared_opening_block(),
+            shared_runtime_context_block=shared_runtime_context_block,
+            agent_decomposition_examples=self.agent_decomposition_examples,
         )
         raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
         parsed: list[str] = []
@@ -627,6 +682,12 @@ class LLMPlanner():
         blocked_workers_for_subgoal: list[str] | None = None,
         subgoal_attempts: list[str] | None = None,
     ) -> str:
+        snapshot = self.controller.get_live_ui_snapshot() if (self.controller is not None and hasattr(self.controller, "get_live_ui_snapshot")) else {}
+        safety_context = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
+        shared_runtime_context_block = self._build_shared_runtime_context_block(
+            safety_context,
+            snapshot=(snapshot if isinstance(snapshot, dict) else {}),
+        )
         prompt = self.prompt_langgraph_step.format(
             task_description=str(task_description or ""),
             current_subgoal=str(current_subgoal or "None"),
@@ -649,14 +710,16 @@ class LLMPlanner():
             stall_count=int(stall_count),
             repeated_action_count=int(repeated_action_count),
             recent_history=str(list(recent_history or [])[-4:]),
+            shared_opening_block=self._build_shared_opening_block(),
+            shared_runtime_context_block=shared_runtime_context_block,
         )
         raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
         action = self._sanitize_langgraph_action(raw)
         if action:
             return action
         if current_subgoal:
-            return f'go_checkpoint("{str(current_subgoal).upper()}");'
-        return "delay(1.0);"
+            return f"gc('{str(current_subgoal).upper()}');"
+        return "d(1.0);"
 
     def reflect_langgraph_strategy(
         self,
@@ -681,12 +744,9 @@ class LLMPlanner():
     ) -> dict:
         snapshot = self.controller.get_live_ui_snapshot() if (self.controller is not None and hasattr(self.controller, "get_live_ui_snapshot")) else {}
         safety_context = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
-        shared_context_block = self._build_runtime_context_block(
+        shared_runtime_context_block = self._build_shared_runtime_context_block(
             safety_context,
             snapshot=(snapshot if isinstance(snapshot, dict) else {}),
-            skill_catalog_text=(
-                "move_forward, move_backward, move_left, move_right, turn_cw, turn_ccw, delay, go_checkpoint, log"
-            ),
         )
         prompt = self.prompt_langgraph_reflection.format(
             task_description=str(task_description or ""),
@@ -707,7 +767,9 @@ class LLMPlanner():
             blocked_workers_by_subgoal=str(dict(blocked_workers_by_subgoal or {})),
             subgoal_attempt_history=str(dict(subgoal_attempt_history or {})),
             recent_history=str(list(recent_history or [])[-6:]),
-            shared_context_block=shared_context_block,
+            shared_opening_block=self._build_shared_opening_block(),
+            shared_runtime_context_block=shared_runtime_context_block,
+            agent_reflection_examples=self.agent_reflection_examples,
         )
         raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
         parsed = self._safe_json_object(raw)
@@ -763,12 +825,9 @@ class LLMPlanner():
     ) -> dict:
         snapshot = self.controller.get_live_ui_snapshot() if (self.controller is not None and hasattr(self.controller, "get_live_ui_snapshot")) else {}
         safety_context = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
-        shared_context_block = self._build_runtime_context_block(
+        shared_runtime_context_block = self._build_shared_runtime_context_block(
             safety_context,
             snapshot=(snapshot if isinstance(snapshot, dict) else {}),
-            skill_catalog_text=(
-                "move_forward, move_backward, move_left, move_right, turn_cw, turn_ccw, delay, go_checkpoint, log"
-            ),
         )
         prompt = self.prompt_langgraph_mode_action.format(
             task_description=str(task_description or ""),
@@ -799,7 +858,9 @@ class LLMPlanner():
             stall_count=int(stall_count),
             repeated_action_count=int(repeated_action_count),
             recent_history=str(list(recent_history or [])[-4:]),
-            shared_context_block=shared_context_block,
+            shared_opening_block=self._build_shared_opening_block(),
+            shared_runtime_context_block=shared_runtime_context_block,
+            agent_mode_action_examples=self.agent_mode_action_examples,
         )
         raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
         parsed = self._safe_json_object(raw)
@@ -853,12 +914,12 @@ class LLMPlanner():
                 raw_action = retry_action_raw
             else:
                 if mode == "recovery":
-                    action = "turn_cw(15);"
+                    action = "tc(15);"
                     if int(repeated_action_count) % 2 == 1:
-                        action = "turn_ccw(15);"
+                        action = "tu(15);"
                     events.append("fallback_proxy_recovery_action")
                 else:
-                    action = "delay(0.4);"
+                    action = "d(0.4);"
                     events.append("fallback_proxy_safe_delay")
                 sanitized_payload["action"] = action
                 sanitized_payload["why_action_matches_mode"] = (
@@ -927,6 +988,15 @@ class LLMPlanner():
         text = re.sub(r"\s+", " ", text)
         commands = []
         alias = {
+            "gc": "go_checkpoint",
+            "mf": "move_forward",
+            "mb": "move_backward",
+            "ml": "move_left",
+            "mr": "move_right",
+            "tc": "turn_cw",
+            "tu": "turn_ccw",
+            "d": "delay",
+            "lo": "log",
             "move_back": "move_backward",
             "turn_right": "turn_cw",
             "turn_left": "turn_ccw",
@@ -934,18 +1004,29 @@ class LLMPlanner():
             "wait": "delay",
             "reobserve": "delay",
         }
+        abbr_out = {
+            "go_checkpoint": "gc",
+            "move_forward": "mf",
+            "move_backward": "mb",
+            "move_left": "ml",
+            "move_right": "mr",
+            "turn_cw": "tc",
+            "turn_ccw": "tu",
+            "delay": "d",
+            "log": "lo",
+        }
         parts = [p.strip() for p in text.split(";") if p.strip()]
         for part in parts:
             if len(commands) >= 4:
                 break
-            m = re.fullmatch(r'go_checkpoint\(\s*[\'"]?([A-Za-z]\d+)[\'"]?\s*\)', part)
+            m = re.fullmatch(r'(?:go_checkpoint|gc)\(\s*[\'"]?([A-Za-z]\d+)[\'"]?\s*\)', part)
             if m:
-                commands.append(f'go_checkpoint("{m.group(1).upper()}");')
+                commands.append(f"gc('{m.group(1).upper()}');")
                 continue
-            m = re.fullmatch(r'log\(\s*[\'"]([^\'"]{1,60})[\'"]\s*\)', part)
+            m = re.fullmatch(r'(?:log|lo)\(\s*[\'"]([^\'"]{1,60})[\'"]\s*\)', part)
             if m:
                 safe = re.sub(r"[^a-zA-Z0-9 _-]", "", m.group(1))[:60]
-                commands.append(f'log("{safe}");')
+                commands.append(f"lo('{safe}');")
                 continue
             m = re.fullmatch(r'([a-zA-Z_]+)\(\s*([0-9]+(?:\.[0-9]+)?)\s*\)', part)
             if not m:
@@ -955,25 +1036,25 @@ class LLMPlanner():
                 continue
             value = float(m.group(2))
             if name.startswith("turn_"):
-                commands.append(f"{name}({int(value)});")
+                commands.append(f"{abbr_out[name]}({int(value)});")
             else:
-                commands.append(f"{name}({value:.1f});")
+                commands.append(f"{abbr_out[name]}({value:.1f});")
         if not commands:
             lower = text.lower()
             number_match = re.search(r"([0-9]+(?:\.[0-9]+)?)", lower)
             value = 0.6 if number_match is None else float(number_match.group(1))
             if "move left" in lower:
-                commands.append(f"move_left({value:.1f});")
+                commands.append(f"ml({value:.1f});")
             elif "move right" in lower:
-                commands.append(f"move_right({value:.1f});")
+                commands.append(f"mr({value:.1f});")
             elif "move back" in lower or "backward" in lower:
-                commands.append(f"move_backward({value:.1f});")
+                commands.append(f"mb({value:.1f});")
             elif "move forward" in lower:
-                commands.append(f"move_forward({value:.1f});")
+                commands.append(f"mf({value:.1f});")
             elif "turn left" in lower or "ccw" in lower:
-                commands.append(f"turn_ccw({int(max(5.0, value))});")
+                commands.append(f"tu({int(max(5.0, value))});")
             elif "turn right" in lower or "cw" in lower:
-                commands.append(f"turn_cw({int(max(5.0, value))});")
+                commands.append(f"tc({int(max(5.0, value))});")
             elif "hold" in lower or "wait" in lower or "reobserve" in lower:
-                commands.append("delay(0.5);")
+                commands.append("d(0.5);")
         return "".join(commands)
