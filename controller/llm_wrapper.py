@@ -4,13 +4,16 @@ from openai import Stream, ChatCompletion
 
 from .utils import print_debug
 
-LM_STUDIO_BASE_URL = os.environ.get("LM_STUDIO_BASE_URL", "http://localhost:1234/v1")
-LM_STUDIO_MODEL = os.environ.get("LM_STUDIO_MODEL", "google/gemma-3-4b")
+GEMINI_BASE_URL = os.environ.get(
+    "GEMINI_BASE_URL",
+    "https://generativelanguage.googleapis.com/v1beta/openai/",
+)
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 # Keep legacy aliases for compatibility with existing callers/UI toggles.
-GPT3 = LM_STUDIO_MODEL
-GPT4 = LM_STUDIO_MODEL
-LLAMA3 = "meta-llama/Meta-Llama-3-8B-Instruct"
+GPT3 = GEMINI_MODEL
+GPT4 = GEMINI_MODEL
+LLAMA3 = GEMINI_MODEL
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 chat_log_path = os.path.join(CURRENT_DIR, "assets/chat_log.txt")
@@ -19,12 +22,12 @@ class LLMWrapper:
     def __init__(self, temperature=0.0):
         self.temperature = temperature
         self.client = openai.OpenAI(
-            base_url=LM_STUDIO_BASE_URL,
-            api_key="lm-studio",
+            api_key=os.environ.get("GEMINI_API_KEY"),
+            base_url=GEMINI_BASE_URL,
         )
 
-    def request(self, prompt, model_name=LM_STUDIO_MODEL, stream=False) -> str | Stream[ChatCompletion.ChatCompletionChunk]:
-        selected_model = str(model_name or LM_STUDIO_MODEL)
+    def request(self, prompt, model_name=GEMINI_MODEL, stream=False) -> str | Stream[ChatCompletion.ChatCompletionChunk]:
+        selected_model = str(model_name or GEMINI_MODEL)
 
         with open(chat_log_path, "a") as f:
             f.write(prompt + "\n---\n")
