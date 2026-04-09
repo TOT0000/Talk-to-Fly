@@ -173,6 +173,7 @@ class LLMController():
         }
         self._benchmark_completed: set[str] = set()
         self._benchmark_active_enter_ts: Optional[float] = None
+        self._benchmark_active_enter_ts_by_checkpoint: dict[str, float] = {}
         self._benchmark_last_update_ts: Optional[float] = None
         self._benchmark_last_distance_m: Optional[float] = None
         self._benchmark_prev_target: Optional[str] = None
@@ -181,6 +182,8 @@ class LLMController():
         self._benchmark_prev_dwell_bucket: int = 0
         self._benchmark_prev_completed_ids: set[str] = set()
         self._benchmark_focus_checkpoint_id: Optional[str] = None
+        self._benchmark_plan_checkpoint_sequence: list[str] = []
+        self._benchmark_executed_gc_sequence: list[str] = []
         self._progress_event_cv = threading.Condition()
         self._progress_event_seq = 0
         self._progress_event_queue = deque(maxlen=256)
@@ -212,6 +215,7 @@ class LLMController():
     def _reset_benchmark_progress_tracking(self):
         self._benchmark_completed = set()
         self._benchmark_active_enter_ts = None
+        self._benchmark_active_enter_ts_by_checkpoint = {}
         self._benchmark_last_update_ts = None
         self._benchmark_last_distance_m = None
         self._benchmark_prev_target = None
@@ -220,6 +224,8 @@ class LLMController():
         self._benchmark_prev_dwell_bucket = 0
         self._benchmark_prev_completed_ids = set()
         self._benchmark_focus_checkpoint_id = None
+        self._benchmark_plan_checkpoint_sequence = []
+        self._benchmark_executed_gc_sequence = []
         with self._progress_event_cv:
             self._progress_event_queue.clear()
             self._progress_event_seq = 0
@@ -241,6 +247,28 @@ class LLMController():
 
     def set_benchmark_progress_focus_checkpoint(self, checkpoint_id: Optional[str]):
         self._benchmark_focus_checkpoint_id = (None if checkpoint_id is None else str(checkpoint_id).upper())
+
+    def _extract_checkpoint_sequence_from_plan(self, minispec: str) -> list[str]:
+        text = str(minispec or "")
+        found = re.findall(r"(?:gc|go_checkpoint)\(\s*['\"]?\s*([A-Za-z]\d+)\s*['\"]?\s*\)", text)
+        seq = []
+        for cid in found:
+            cp = str(cid).upper()
+            if cp in BENCHMARK_CHECKPOINTS_BY_ID:
+                seq.append(cp)
+        return seq
+
+    def _resolve_progress_target(self, active_ids: set[str]) -> Optional[str]:
+        focus_checkpoint = (None if self._benchmark_focus_checkpoint_id is None else str(self._benchmark_focus_checkpoint_id).upper())
+        if focus_checkpoint is not None and focus_checkpoint in active_ids and focus_checkpoint not in self._benchmark_completed:
+            return focus_checkpoint
+        for cid in self._benchmark_plan_checkpoint_sequence:
+            if cid in active_ids and cid not in self._benchmark_completed:
+                return cid
+        for cid in self._benchmark_executed_gc_sequence:
+            if cid in active_ids and cid not in self._benchmark_completed:
+                return cid
+        return next((cid for cid in BENCHMARK_CHECKPOINT_ORDER if cid in active_ids and cid not in self._benchmark_completed), None)
 
     def _emit_progress_event(
         self,
@@ -395,18 +423,14 @@ class LLMController():
             return
 
         active_ids = set(str(v).upper() for v in self.active_objective_set.get("active_checkpoint_ids", []))
-        order = [str(v).upper() for v in BENCHMARK_CHECKPOINT_ORDER]
         self._benchmark_completed = set(cid for cid in self._benchmark_completed if cid in active_ids)
-        focus_checkpoint = (None if self._benchmark_focus_checkpoint_id is None else str(self._benchmark_focus_checkpoint_id).upper())
-        if focus_checkpoint is not None and focus_checkpoint not in self._benchmark_completed:
-            current_target = focus_checkpoint
-        else:
-            current_target = next((cid for cid in order if cid in active_ids and cid not in self._benchmark_completed), None)
+        current_target = self._resolve_progress_target(active_ids)
         now = time.time()
         self._benchmark_last_update_ts = now
 
         if current_target is None:
             self._benchmark_active_enter_ts = None
+            self._benchmark_active_enter_ts_by_checkpoint = {}
             self._benchmark_last_distance_m = None
             self._benchmark_prev_target = None
             self._benchmark_prev_in_radius = False
@@ -434,15 +458,34 @@ class LLMController():
         self._benchmark_last_distance_m = float(distance_m)
         in_radius = bool(distance_m <= float(cp.radius_m))
         dwell_seconds = 0.0
+        target_enter_ts = self._benchmark_active_enter_ts_by_checkpoint.get(current_target)
         if in_radius:
-            if self._benchmark_active_enter_ts is None:
-                self._benchmark_active_enter_ts = now
-            dwell_seconds = max(0.0, now - float(self._benchmark_active_enter_ts))
+            if target_enter_ts is None:
+                target_enter_ts = now
+                self._benchmark_active_enter_ts_by_checkpoint[current_target] = target_enter_ts
+                print_debug(
+                    "[BENCHMARK-DWELL] "
+                    f"checkpoint={current_target} event=dwell_start ts={target_enter_ts:.6f}",
+                    env_var="TYPEFLY_VERBOSE_DEBUG",
+                )
+            dwell_seconds = max(0.0, now - float(target_enter_ts))
             if dwell_seconds >= float(CHECKPOINT_DWELL_SECONDS):
                 self._benchmark_completed.add(str(current_target).upper())
-                self._benchmark_active_enter_ts = None
+                self._benchmark_active_enter_ts_by_checkpoint.pop(current_target, None)
+                print_debug(
+                    "[BENCHMARK-DWELL] "
+                    f"checkpoint={current_target} event=dwell_complete dwell={dwell_seconds:.3f}",
+                    env_var="TYPEFLY_VERBOSE_DEBUG",
+                )
         else:
-            self._benchmark_active_enter_ts = None
+            if target_enter_ts is not None:
+                print_debug(
+                    "[BENCHMARK-DWELL] "
+                    f"checkpoint={current_target} event=dwell_reset dwell={max(0.0, now - float(target_enter_ts)):.3f}",
+                    env_var="TYPEFLY_VERBOSE_DEBUG",
+                )
+            self._benchmark_active_enter_ts_by_checkpoint.pop(current_target, None)
+        self._benchmark_active_enter_ts = self._benchmark_active_enter_ts_by_checkpoint.get(current_target)
 
         dwell_satisfied = bool(dwell_seconds >= float(CHECKPOINT_DWELL_SECONDS))
         completed = bool(active_ids) and all(cid in self._benchmark_completed for cid in active_ids)
@@ -460,6 +503,14 @@ class LLMController():
             drone_true_position=drone_gt,
             checkpoint_center=checkpoint_center,
             tick_ts=now,
+        )
+        print_debug(
+            "[BENCHMARK-PROGRESS-TARGET] "
+            f"focus={self._benchmark_focus_checkpoint_id} "
+            f"plan_sequence={self._benchmark_plan_checkpoint_sequence} "
+            f"executed_gc={self._benchmark_executed_gc_sequence} "
+            f"current_target={current_target}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
         )
         current_completed_ids = set(str(v).upper() for v in self.latest_benchmark_progress.get("completed", []))
         required_dwell = float(CHECKPOINT_DWELL_SECONDS)
@@ -542,6 +593,11 @@ class LLMController():
                 completed=True,
                 timestamp=now,
                 reason="added_to_completed_set",
+            )
+            print_debug(
+                "[BENCHMARK-COMPLETION] "
+                f"checkpoint={cid} completed=True completed_set={sorted(current_completed_ids)}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
             )
         self._benchmark_prev_target = str(current_target).upper()
         self._benchmark_prev_in_radius = bool(in_radius)
@@ -820,6 +876,12 @@ class LLMController():
         # Ensure dwell/completion tracking follows the actual commanded checkpoint,
         # instead of falling back to lexical benchmark order.
         self.set_benchmark_progress_focus_checkpoint(checkpoint_key)
+        self._benchmark_executed_gc_sequence.append(checkpoint_key)
+        print_debug(
+            "[BENCHMARK-EXECUTOR] "
+            f"event=gc_begin checkpoint={checkpoint_key} executed_gc={self._benchmark_executed_gc_sequence}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
+        )
 
         max_step_m = 1.0
         min_axis_step_m = 0.12
@@ -962,6 +1024,11 @@ class LLMController():
             f"stop_reason={stop_reason}"
         )
         print_t(f"[C] {summary}")
+        print_debug(
+            "[BENCHMARK-EXECUTOR] "
+            f"event=gc_end checkpoint={checkpoint.id} reached={reached} stop_reason={stop_reason}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
+        )
         # If not arrived, request replan so downstream dwell steps are not executed blindly.
         return summary, (not reached)
 
@@ -1006,6 +1073,8 @@ class LLMController():
                 else tuple(float(v) for v in checkpoint_center)
             ),
             "tick_ts": (None if tick_ts is None else float(tick_ts)),
+            "plan_checkpoint_sequence": list(self._benchmark_plan_checkpoint_sequence),
+            "executed_gc_sequence": list(self._benchmark_executed_gc_sequence),
         }
 
     def update_ui_collision_probability(self, current_collision_probability: Optional[float]):
@@ -1082,6 +1151,12 @@ class LLMController():
         return image
     
     def execute_minispec(self, minispec: str, silent: bool = False, allow_auto_interrupt: bool = True):
+        self._benchmark_plan_checkpoint_sequence = self._extract_checkpoint_sequence_from_plan(minispec)
+        print_debug(
+            "[BENCHMARK-PLAN-PARSE] "
+            f"gc_sequence={self._benchmark_plan_checkpoint_sequence}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
+        )
         focus_checkpoint = self._extract_first_checkpoint_from_plan(minispec)
         if focus_checkpoint is not None:
             self.set_benchmark_progress_focus_checkpoint(focus_checkpoint)
@@ -1441,6 +1516,32 @@ class LLMController():
                     execution_success=execution_success,
                     task_completed=task_completed,
                 )
+                completed_set = set(str(v).upper() for v in (self.latest_benchmark_progress.get("completed") or []))
+                planned_sequence = list(self._benchmark_plan_checkpoint_sequence)
+                missing_from_plan = [cid for cid in planned_sequence if cid not in completed_set]
+                active_ids = set(str(v).upper() for v in self.active_objective_set.get("active_checkpoint_ids", []))
+                zone_completed = bool(active_ids) and all(cid in completed_set for cid in active_ids)
+                plan_completed = all(cid in completed_set for cid in planned_sequence) if planned_sequence else True
+                print_debug(
+                    "[TASK-END-CHECK] "
+                    f"plan_sequence={planned_sequence} completed={sorted(completed_set)} "
+                    f"missing_from_plan={missing_from_plan} zone_completed={zone_completed} "
+                    f"ret_replan={bool(getattr(ret_val, 'replan', False))}",
+                    env_var="TYPEFLY_VERBOSE_DEBUG",
+                )
+                if (not plan_completed) or (active_ids and (not zone_completed)):
+                    replan_attempts += 1
+                    if replan_attempts > max_replan_attempts:
+                        raise RuntimeError(
+                            "Task end check failed: plan/objective completion mismatch "
+                            f"(missing={missing_from_plan}, zone_completed={zone_completed})"
+                        )
+                    self.append_message(
+                        f"[LOG] Completion mismatch detected, replan attempt={replan_attempts}, "
+                        f"missing={missing_from_plan if missing_from_plan else '[]'}"
+                    )
+                    self.execution_mode = "Planning"
+                    continue
             except Exception as e:
                 self.execution_mode = "Yielding"
                 error_message = f"[C] Error: {e}"
