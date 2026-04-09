@@ -43,9 +43,9 @@ DEFAULT_PROVIDER = _resolve_default_provider()
 GEMINI_MODEL = _provider_default_model(DEFAULT_PROVIDER)
 
 # Keep legacy aliases for compatibility with existing callers/UI toggles.
-GPT3 = GEMINI_MODEL
-GPT4 = GEMINI_MODEL
-LLAMA3 = GEMINI_MODEL
+GPT3 = MODEL_NAME
+GPT4 = MODEL_NAME
+LLAMA3 = MODEL_NAME
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 chat_log_path = os.path.join(CURRENT_DIR, "assets/chat_log.txt")
