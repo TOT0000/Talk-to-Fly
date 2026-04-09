@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import time
 from typing import Any, Literal, TypedDict
 
@@ -449,11 +450,11 @@ class LangGraphOrchestrationRunner:
         trace_events = list(decision_trace.get("events") or [])
         if not plan:
             if mode == "skip_current_subgoal":
-                plan = "delay(0.5);"
+                plan = "d(0.5);"
             elif mode == "replan":
-                plan = "log(\"request_replan\");"
+                plan = "lo('request_replan');"
             else:
-                plan = "log(\"empty_action_from_decision\");"
+                plan = "lo('empty_action_from_decision');"
             trace_events.append("planner_empty_action_fallback")
         action_target = self._extract_checkpoint_target(plan)
         if action_target is not None:
@@ -1170,20 +1171,16 @@ class LangGraphOrchestrationRunner:
 
     def _extract_checkpoint_target(self, action_text: str) -> str | None:
         text = str(action_text or "")
-        marker = 'go_checkpoint("'
-        if marker not in text:
+        m = re.search(r"(?:go_checkpoint|gc)\(\s*['\"]?([A-Za-z]\d+)['\"]?\s*\)", text)
+        if not m:
             return None
-        start = text.find(marker) + len(marker)
-        end = text.find('")', start)
-        if end <= start:
-            return None
-        return text[start:end].strip().upper()
+        return str(m.group(1)).strip().upper()
 
     def _action_signature(self, action_text: str) -> str:
         text = str(action_text or "").strip().lower()
         if not text:
             return ""
-        if text.startswith("go_checkpoint("):
+        if text.startswith("go_checkpoint(") or text.startswith("gc("):
             return "go_checkpoint"
         if "(" in text:
             return text.split("(", 1)[0].strip()
