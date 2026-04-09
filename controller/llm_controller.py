@@ -1365,7 +1365,7 @@ class LLMController():
         monitor_stop = threading.Event()
         monitor_thread = None
         replan_attempts = 0
-        max_replan_attempts = 3
+        max_replan_attempts = 5
         self.auto_replan_armed = True
         self.auto_replan_protection_remaining = 0
         def _run_monitor():
