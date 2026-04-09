@@ -641,8 +641,8 @@ class MiniSpecInterpreter:
                 if should_abort:
                     dropped_count = self._drain_execution_queue()
                     print_t(
-                        "[TYPEFLY-QUEUE] "
-                        f"clearing remaining statements due to replan trigger, dropped old remaining statements count={dropped_count}"
+                        "[QUEUE] "
+                        f"clearing remaining statements due to replan, dropped old remaining statements count={dropped_count}"
                     )
                     self.timestamp_end_execution = time.time()
                     self.timestamp_start_execution = None
@@ -670,8 +670,8 @@ class MiniSpecInterpreter:
                 if ret_val.replan:
                     dropped_count = self._drain_execution_queue()
                     print_t(
-                        "[TYPEFLY-QUEUE] "
-                        f"clearing remaining statements due to replan trigger, dropped old remaining statements count={dropped_count}"
+                        "[QUEUE] "
+                        f"clearing remaining statements due to replan, dropped old remaining statements count={dropped_count}"
                     )
                     print_t(
                         "[TYPEFLY-INTERRUPT] "
