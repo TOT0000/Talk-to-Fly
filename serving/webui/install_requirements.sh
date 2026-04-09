@@ -19,6 +19,6 @@ for pkg in "${REQUIRED_PKG[@]}"; do
     check_and_install $pkg
 done
 
-if [ -z "${OPENAI_API_KEY}" ]; then
-  echo "WARNNING: OPENAI_API_KEY is not set"
+if [ -z "${GEMINI_API_KEY}" ] && [ -z "${GOOGLE_API_KEY}" ]; then
+  echo "WARNNING: GEMINI_API_KEY / GOOGLE_API_KEY is not set"
 fi
