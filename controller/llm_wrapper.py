@@ -8,7 +8,8 @@ GEMINI_BASE_URL = os.environ.get(
     "GEMINI_BASE_URL",
     "https://generativelanguage.googleapis.com/v1beta/openai/",
 )
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+DEFAULT_MODEL = os.environ.get("TYPEFLY_DEFAULT_MODEL", "gpt-4o")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", DEFAULT_MODEL)
 
 # Keep legacy aliases for compatibility with existing callers/UI toggles.
 GPT3 = GEMINI_MODEL

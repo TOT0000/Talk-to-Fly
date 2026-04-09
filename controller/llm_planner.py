@@ -34,6 +34,8 @@ class LLMPlanner():
         self.agent_decomposition_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_decomposition_examples.txt")
         self.agent_mode_action_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_mode_action_examples.txt")
         self.agent_reflection_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_reflection_examples.txt")
+        self.agent_heartbeat_soft_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_heartbeat_soft_examples.txt")
+        self.agent_heartbeat_hardgate_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_heartbeat_hardgate_examples.txt")
         with open(self.prompt_plan_path, "r") as f:
             self.prompt_plan = f.read()
 
@@ -53,6 +55,10 @@ class LLMPlanner():
             self.agent_mode_action_examples = f.read()
         with open(self.agent_reflection_examples_path, "r") as f:
             self.agent_reflection_examples = f.read()
+        with open(self.agent_heartbeat_soft_examples_path, "r") as f:
+            self.agent_heartbeat_soft_examples = f.read()
+        with open(self.agent_heartbeat_hardgate_examples_path, "r") as f:
+            self.agent_heartbeat_hardgate_examples = f.read()
         with open(self.prompt_plan_initial_path, "r") as f:
             self.prompt_plan_initial = f.read()
         with open(self.prompt_plan_replan_path, "r") as f:
@@ -463,7 +469,7 @@ class LLMPlanner():
             f"  - dominant risky worker = {dominant_worker}"
         )
 
-    def plan(self, task_description: str, scene_description: Optional[str] = None, location_info: Optional[str] = None, error_message: Optional[str] = None, execution_history: Optional[str] = None, safety_context: Optional[SafetyContext] = None, previous_plan: Optional[str] = None):
+    def plan(self, task_description: str, scene_description: Optional[str] = None, location_info: Optional[str] = None, error_message: Optional[str] = None, execution_history: Optional[str] = None, safety_context: Optional[SafetyContext] = None, previous_plan: Optional[str] = None, planning_stage: str = "initial"):
     
         # by default, the task_description is an action
         if not task_description.startswith("["):
@@ -519,11 +525,7 @@ class LLMPlanner():
         active_checkpoint_ids = [str(v) for v in objective.get("active_checkpoint_ids", [])]
         benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
         current_collision_probability = 0.0 if safety_context is None else float(safety_context.current_collision_probability)
-        has_continuation_context = bool(previous_plan or execution_history or benchmark_progress.get("completed"))
-        is_replan_call = bool(
-            current_collision_probability >= float(COLLISION_PROBABILITY_REPLAN_THRESHOLD)
-            and has_continuation_context
-        )
+        is_replan_call = str(planning_stage or "initial").strip().lower() == "replan"
         replan_history_block = self._build_replan_history_block(
             task_description=task_description,
             previous_plan=previous_plan,
@@ -578,6 +580,72 @@ class LLMPlanner():
             print_debug(f"[P-REPLAN-HISTORY]\n{replan_history_block}")
         print_debug(f"[P] Full prompt debug log: {chat_log_path}")
         return self.llm.request(prompt, self.model_name, stream=False)
+
+    def plan_agent_heartbeat(
+        self,
+        task_description: str,
+        snapshot: dict,
+        execution_history,
+        current_plan: str,
+        hard_gate: bool = False,
+    ) -> dict:
+        safety_context = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
+        collision_probability = 0.0 if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
+        dominant_worker = "n/a" if safety_context is None else str(getattr(safety_context, "dominant_threat_id", "n/a"))
+        benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
+        completed = list(benchmark_progress.get("completed") or [])
+        active = list((snapshot.get("active_objective_set") or {}).get("active_checkpoint_ids", []))
+        workers = []
+        for worker in list(snapshot.get("workers") or []):
+            workers.append({
+                "id": str(worker.get("id")),
+                "xy": tuple(worker.get("ui_xy") or worker.get("gt_xy") or (None, None)),
+            })
+        hard_gate_rule = (
+            "If current_collision_probability > 0.5, you MUST output response=full_replan_plan with a new complete MiniSpec plan."
+            if hard_gate
+            else "You may choose continue or full_replan_plan based on your judgment."
+        )
+        heartbeat_examples = (
+            self.agent_heartbeat_hardgate_examples
+            if hard_gate
+            else self.agent_heartbeat_soft_examples
+        )
+        prompt = (
+            "You are heartbeat monitor for UAV planning.\n"
+            "Return strict JSON with keys: response, reason, plan.\n"
+            "response must be one of: continue, full_replan_plan.\n"
+            "If response=continue, set plan to empty string.\n"
+            f"{hard_gate_rule}\n"
+            "Use same skill abbreviations as TypeFly plans.\n"
+            "Agent heartbeat examples:\n"
+            f"{heartbeat_examples}\n"
+            f"Task: {task_description}\n"
+            f"Completed checkpoints: {completed}\n"
+            f"Unfinished checkpoints: {[cid for cid in active if cid not in completed]}\n"
+            f"UAV position: {snapshot.get('drone_est_bias_corrected') or snapshot.get('drone_est') or snapshot.get('drone_gt')}\n"
+            f"UAV heading: {snapshot.get('drone_yaw_rad')}\n"
+            f"Worker positions: {workers}\n"
+            f"current_collision_probability: {collision_probability:.6f}\n"
+            f"dominant risky worker: {dominant_worker}\n"
+            f"Current executing plan: {current_plan}\n"
+            f"Queue progress: {benchmark_progress}\n"
+            f"Execution history: {execution_history}\n"
+            "Return JSON only."
+        )
+        raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = {"response": "continue", "reason": f"non_json_response:{raw[:120]}", "plan": ""}
+        response = str(parsed.get("response", "continue")).strip().lower()
+        if response not in {"continue", "full_replan_plan"}:
+            response = "continue"
+        return {
+            "response": response,
+            "reason": str(parsed.get("reason", "")).strip(),
+            "plan": str(parsed.get("plan", "")).strip(),
+        }
     
     def probe(self, question: str) -> MiniSpecValueType:
         location_info = None
