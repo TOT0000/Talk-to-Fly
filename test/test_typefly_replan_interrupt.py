@@ -243,3 +243,38 @@ def test_postqueue_auto_replan_not_applied_to_agent_modes(monkeypatch):
     assert len(planner_calls) == 1
     assert len(queued_programs) == 1
     assert not any("TYPEFLY-POSTCHECK-REPLAN" in str(msg) for msg in displayed_messages)
+
+
+def test_agent_heartbeat_replan_response_is_emitted_to_chat():
+    pytest.importorskip("PIL")
+    from controller.llm_controller import LLMController
+
+    controller = LLMController.__new__(LLMController)
+    displayed_messages = []
+
+    controller.framework_mode = "agent-heartbeat-soft"
+    controller._pending_heartbeat_replan_plan = None
+    controller._pending_heartbeat_reason = ""
+    controller.last_heartbeat_ts = 0.0
+    controller.replan_limit = 5
+    controller._replan_attempts = 0
+    controller.current_task_description = "task"
+    controller.execution_history = "history"
+    controller.current_plan = "gc('A1');"
+    controller.append_message = displayed_messages.append
+    controller._sanitize_minispec_plan = lambda raw_plan: str(raw_plan)
+    controller.get_live_ui_snapshot = lambda: {}
+    controller.planner = SimpleNamespace(
+        plan_agent_heartbeat=lambda **kwargs: {
+            "response": "full_replan_plan",
+            "reason": "geometry_risk",
+            "plan": "ml(0.3);gc('A2');d(2.0);",
+        }
+    )
+
+    triggered = controller._maybe_run_agent_heartbeat(force=True)
+
+    assert triggered is True
+    assert controller._pending_heartbeat_replan_plan == "ml(0.3);gc('A2');d(2.0);"
+    assert any(str(msg).startswith("[AGENT-HEARTBEAT-REPLAN]") for msg in displayed_messages)
+    assert any(str(msg).startswith("[AGENT-HEARTBEAT-REPLAN-PLAN]") for msg in displayed_messages)

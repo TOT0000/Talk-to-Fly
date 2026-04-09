@@ -1150,6 +1150,10 @@ class LLMController():
                 self._pending_heartbeat_replan_plan = plan_text
                 self._pending_heartbeat_reason = reason
                 print_t(f"[AGENT-HEARTBEAT] response=replan plan={plan_text}")
+                self.append_message(
+                    f"[AGENT-HEARTBEAT-REPLAN] reason={reason if reason else 'n/a'}"
+                )
+                self.append_message(f"[AGENT-HEARTBEAT-REPLAN-PLAN] {plan_text}")
                 return True
         print_t(f"[AGENT-HEARTBEAT] response=continue reason={reason}")
         return False
