@@ -77,33 +77,33 @@ class LLMPlanner():
             "Output JSON array only."
         )
         self.prompt_langgraph_step = (
-            "You are TypeFly LangGraph Step Planner.\n"
-            "You are NOT planning a full mission. You are deciding only the NEXT step.\n"
-            "Output one action or a very short action segment (max 2 statements), each ending with ';'.\n"
-            "Allowed actions: move_forward(distance); move_backward(distance); move_left(distance); move_right(distance); "
-            "turn_cw(degrees); turn_ccw(degrees); delay(seconds); go_checkpoint(\"ID\"); log(\"text\");\n"
+            "{shared_opening_block}\n\n"
+            "{shared_runtime_context_block}\n\n"
+            "You are the Agent Step Planner. You are NOT planning a full mission. You are deciding only the NEXT step.\n"
+            "Output one action or a very short action segment, each statement ending with ';'.\n"
+            "Allowed actions (abbreviation form only):\n"
+            "gc('ID'); mf(value); mb(value); ml(value); mr(value); tc(value); tu(value); d(value); lo('text');\n"
             "Hard constraints:\n"
             "- Do not output multi-checkpoint full plans.\n"
             "- current_subgoal is the primary mission target for this step.\n"
             "- If the same action was already executed and no progress improved, avoid repeating it.\n"
-            "- If risk is high, you may temporarily choose conservative avoidance/recovery action.\n"
+            "- If the current situation appears risky, you may temporarily choose conservative avoidance or recovery action.\n"
             "- Avoidance is temporary, not a new mission objective.\n"
             "- Recovery mode is controlled by system state; follow it explicitly.\n"
             "- If recovery_mode is true, prioritize conservative recovery movement and re-observation over direct checkpoint approach.\n"
-            "- If recovery_mode is false (or recovery just exited because risk <= 0.2), prioritize go_checkpoint(current_subgoal).\n"
-            "- If current_subgoal risk is high, do not blindly rush go_checkpoint(current_subgoal).\n"
+            "- If recovery_mode is false, prioritize safe mission progress toward current_subgoal.\n"
+            "- If current_subgoal appears risky, do not blindly rush gc(current_subgoal).\n"
             "- Recovery should be step-by-step: after each recovery step, re-observe latest risk/state before deciding the next step.\n"
-            "- During each re-observation, explicitly check current collision risk.\n"
-            "- If current collision risk drops below 0.2, prioritize returning to go_checkpoint(current_subgoal).\n"
-            "- When you judge immediate risk has improved to a safe level, return to go_checkpoint(current_subgoal).\n"
-            "- If risk is still high after re-observation, choose another conservative recovery step and re-observe again.\n"
+            "- During each re-observation, explicitly reassess current collision risk and geometry.\n"
+            "- When you judge that immediate risk has improved to a safe level, return to checkpoint progress.\n"
+            "- If risk still appears high after re-observation, choose another conservative recovery step and re-observe again.\n"
             "- Recovery goal is to leave danger and then resume current_subgoal, not endless wandering.\n"
-            "- If stalled/no-progress, switch to a different conservative strategy.\n"
+            "- If stalled or no-progress, switch to a different conservative strategy.\n"
             "- Use strategy memory to avoid repeating known failed approach patterns for this subgoal.\n"
-            "- Avoid long turn/move loops without objective progress.\n"
-            "- reached checkpoint area is NOT completed checkpoint.\n"
-            "- Completion is determined only by official completion_state/progress.\n"
-            "- If reached but not completed, prioritize finishing current_subgoal (hold/re-approach/micro-adjust), not jumping to next checkpoint.\n"
+            "- Avoid long turn or move loops without objective progress.\n"
+            "- Reaching checkpoint area is NOT the same as completing checkpoint.\n"
+            "- Completion is determined only by official completion_state and progress.\n"
+            "- If reached but not completed, prioritize finishing current_subgoal (for example hold, re-approach, or micro-adjust), not jumping to the next checkpoint.\n"
             "Task: {task_description}\n"
             "Current subgoal: {current_subgoal}\n"
             "Remaining checkpoints: {remaining_checkpoints}\n"
@@ -166,8 +166,8 @@ class LLMPlanner():
             "  - action: a short MiniSpec segment (1~4 statements), each statement ending with ';'.\n"
             "  - why_action_matches_mode: one short sentence explicitly proving action and mode are consistent.\n"
             "Executable action grammar (abbreviation form required):\n"
-            "- mf(0.1~2.0); mb(0.1~2.0); ml(0.1~2.0); mr(0.1~2.0);\n"
-            "- tc(5~90); tu(5~90); d(0.1~2.0); gc('A1'); lo('short_text');\n"
+            "- mf(value); mb(value); ml(value); mr(value);\n"
+            "- tc(value); tu(value); d(value); gc('A1'); lo('short_text');\n"
             "Task: {task_description}\n"
             "Current mode: {current_mode}\n"
             "Current subgoal: {current_subgoal}\n"
@@ -257,19 +257,35 @@ class LLMPlanner():
 
     def _build_shared_opening_block(self) -> str:
         return (
-            "You are an autonomous UAV mission planning and control agent operating in a structured benchmark scene that may be divided into multiple zones (for example zone_A / zone_B / zone_C), where each zone contains multiple checkpoints to search. "
-            "In this world there is one UAV and three workers, and workers may be static or moving. "
-            "Your job is to use only the provided skills to control the UAV and complete one or more zone searches while balancing safety and efficiency at the same time. "
-            f"A checkpoint is completed only when the UAV true position stays inside that checkpoint radius continuously for {float(CHECKPOINT_DWELL_SECONDS):.1f} seconds, and a zone is completed only when all active checkpoints in that zone are completed; completed checkpoints must never be redone. "
-            "Safety means the UAV must not collide with any worker. "
-            "Efficiency means minimizing unnecessary detours and mission time while maintaining zero collisions. "
-            "To evaluate safety you are given UAV/worker positions, UAV heading, object radii, and collision probabilities, but probability alone is insufficient: you must also reason about geometry. "
-            "Even when probability is low, geometrically too-close UAV-worker spacing (considering both sizes) must still be treated as risk. "
-            "The gc() skill is convenient but its intermediate path is not fully controllable; in practice it tends to align to target checkpoint and move approximately straight. "
-            "Therefore low-level skills (mf/mb/ml/mr/tc/tu) are not only for emergencies and may be proactively used to shape safer, more controllable approach corridors. "
-            "If direct gc() appears risky, first adjust with heading-aware low-level movement/turning and then approach the checkpoint. "
-            "Avoidance amplitude must match severity: mild suspicious risk can use small detours, while obvious high risk requires larger conservative detours. "
-            "Because mf/mb/ml/mr are body-frame motions relative to UAV heading, avoidance direction must always account for current heading."
+            "You are an autonomous UAV mission planning and control agent operating in a structured benchmark scene that may be divided into multiple zones such as zone_A, zone_B, and zone_C. "
+            "Each zone contains multiple checkpoints that define the search coverage required in that zone. "
+            "The environment contains one UAV and three workers, and workers may be static or moving. "
+            "Your job is to use only the provided skills to control the UAV and complete one or more zone-search tasks.\n\n"
+            "A checkpoint is not completed merely because the UAV passes nearby. "
+            f"A checkpoint is completed only when the UAV true position stays continuously inside that checkpoint radius for {float(CHECKPOINT_DWELL_SECONDS):.1f} seconds. "
+            f"If the UAV leaves the checkpoint region before the full {float(CHECKPOINT_DWELL_SECONDS):.1f} seconds are accumulated, the dwell timer resets. "
+            "A zone is completed only when all active checkpoints in that zone are completed. "
+            "Completed checkpoints must never be redone.\n\n"
+            "Your planning must always balance safety and efficiency. Safety means that the UAV must not collide with any worker. "
+            "To help you reason about safety, you are given UAV position, UAV heading, worker positions, geometry sizes, and collision probability information. "
+            "You must use geometry and collision probability jointly. Do not rely on probability alone. "
+            "Even when collision probability is low, if the UAV is geometrically too close to a worker after considering both sizes, you must still treat the situation as risky.\n\n"
+            "Efficiency means minimizing unnecessary detours and mission completion time while maintaining zero collisions. "
+            "You can improve efficiency by choosing a smoother and shorter checkpoint order from the current UAV position and heading. "
+            "You must not mechanically follow a fixed lexical order such as A1 -> A2 -> A3 -> A4. "
+            "Instead, you should choose the order that is safer, smoother, and more efficient for the current geometry.\n\n"
+            "The available movement skills include low-level body-frame actions such as forward, backward, left, right, and turning, as well as checkpoint navigation through gc(). "
+            "Low-level movement and turning are not only for emergencies. "
+            "You may also use them proactively to shape a safer and more controllable approach corridor toward a checkpoint. "
+            "This matters because gc() is convenient but does not expose detailed path control. "
+            "In practice, gc() usually aligns toward the target checkpoint and moves approximately straight. "
+            "Therefore, if direct gc() appears risky because of worker geometry, you may first use heading-aware low-level motion and turning to create a safer approach, and then continue toward the checkpoint.\n\n"
+            "When choosing an avoidance maneuver, always consider UAV heading explicitly. "
+            "The body-frame motions mf, mb, ml, and mr are all defined relative to the current UAV heading. "
+            "Therefore, the correct way to detour around a worker depends not only on positions, but also on current heading. "
+            "If the risk appears mild but suspicious, a small preventive detour may be enough. "
+            "If the risk appears severe or geometry is very close, you should prefer a larger and more conservative detour. "
+            "The overall goal is to complete the mission with no collisions while keeping mission time as low as possible."
         )
 
     def _build_shared_runtime_context_block(
@@ -308,7 +324,7 @@ class LLMPlanner():
             for row in (getattr(safety_context, "per_worker_collision_probabilities", []) or []):
                 worker_id = str(row.get("id", "unknown"))
                 p_val = float(row.get("collision_probability", 0.0))
-                per_worker_probs.append(f"{worker_id}:{p_val:.6f}")
+                per_worker_probs.append((worker_id, p_val))
         dominant_worker = "n/a"
         if safety_context is not None:
             dominant_worker = str(getattr(safety_context, "dominant_threat_id", "n/a") or "n/a")
@@ -331,9 +347,17 @@ class LLMPlanner():
         if not checkpoint_lines:
             checkpoint_lines.append("- (n/a)")
 
+        worker_radii_block = "\n".join(
+            [f"- worker_{idx + 1}: {float(WORKER_RADIUS_M):.2f} m" for idx in range(3)]
+        )
+        per_worker_collision_probabilities_block = "\n".join(
+            [f"- {wid}: {prob:.6f}" for wid, prob in per_worker_probs]
+        ) if per_worker_probs else "- (n/a)"
+
         return (
             "Shared runtime context (identical skill availability for TypeFly mode and Agent mode):\n"
-            "Skills (abbreviation required in outputs/examples):\n"
+            "\n"
+            "Skills (abbreviation required in outputs and examples):\n"
             "- gc = go_checkpoint\n"
             "- mf = move_forward\n"
             "- mb = move_backward\n"
@@ -352,19 +376,24 @@ class LLMPlanner():
             "Workers state:\n"
             + "\n".join(worker_lines)
             + "\n"
-            f"- dominant risky worker: {dominant_worker}\n"
-            f"- current collision probability: {current_collision_probability:.6f}\n"
-            f"- per-worker collision probability: {per_worker_probs if per_worker_probs else ['(n/a)']}\n"
+            "\n"
             "Mission structure:\n"
             f"- active zones: {active_zone_ids if active_zone_ids else ['(n/a)']}\n"
             f"- active checkpoints: {active_checkpoint_ids if active_checkpoint_ids else ['(n/a)']}\n"
-            "Active checkpoint coordinates (x, y):\n"
+            "- checkpoint coordinates:\n"
             + "\n".join(checkpoint_lines)
             + "\n"
             "Geometry information:\n"
             f"- UAV radius: {float(UAV_RADIUS_M):.2f} m\n"
-            f"- worker radii: {[float(WORKER_RADIUS_M)] * 3}\n"
+            "- worker radii:\n"
+            f"{worker_radii_block}\n"
             f"- checkpoint radius: {float(CHECKPOINT_RADIUS_M):.2f} m\n"
+            "\n"
+            "Risk context:\n"
+            f"- current collision probability: {current_collision_probability:.6f}\n"
+            "- per-worker collision probabilities:\n"
+            f"{per_worker_collision_probabilities_block}\n"
+            f"- dominant risky worker: {dominant_worker}\n"
         )
 
     def _extract_completed_checkpoints_from_history(self, execution_history) -> list[str]:
@@ -653,6 +682,12 @@ class LLMPlanner():
         blocked_workers_for_subgoal: list[str] | None = None,
         subgoal_attempts: list[str] | None = None,
     ) -> str:
+        snapshot = self.controller.get_live_ui_snapshot() if (self.controller is not None and hasattr(self.controller, "get_live_ui_snapshot")) else {}
+        safety_context = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
+        shared_runtime_context_block = self._build_shared_runtime_context_block(
+            safety_context,
+            snapshot=(snapshot if isinstance(snapshot, dict) else {}),
+        )
         prompt = self.prompt_langgraph_step.format(
             task_description=str(task_description or ""),
             current_subgoal=str(current_subgoal or "None"),
@@ -675,6 +710,8 @@ class LLMPlanner():
             stall_count=int(stall_count),
             repeated_action_count=int(repeated_action_count),
             recent_history=str(list(recent_history or [])[-4:]),
+            shared_opening_block=self._build_shared_opening_block(),
+            shared_runtime_context_block=shared_runtime_context_block,
         )
         raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
         action = self._sanitize_langgraph_action(raw)
