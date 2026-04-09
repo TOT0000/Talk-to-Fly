@@ -351,7 +351,11 @@ class LangGraphOrchestrationRunner:
         if subgoal is None and remaining:
             subgoal = remaining[0]
         if subgoal is None:
+            if hasattr(self.controller, "set_benchmark_progress_focus_checkpoint"):
+                self.controller.set_benchmark_progress_focus_checkpoint(None)
             return {"last_plan_text": "", "last_action_text": "", "route_decision": "end"}
+        if hasattr(self.controller, "set_benchmark_progress_focus_checkpoint"):
+            self.controller.set_benchmark_progress_focus_checkpoint(str(subgoal).upper())
         subgoal_phase = str(state.get("subgoal_phase", "APPROACH_SUBGOAL"))
         # In agent mode, completion/verify handling is observation-driven and delegated to LLM.
         if False and subgoal_phase in {"COMPLETE_SUBGOAL", "VERIFY_COMPLETE"}:

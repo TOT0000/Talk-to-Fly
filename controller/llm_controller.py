@@ -817,6 +817,9 @@ class LLMController():
         checkpoint = BENCHMARK_CHECKPOINTS_BY_ID.get(checkpoint_key)
         if checkpoint is None:
             raise ValueError(f"Unknown checkpoint_id `{checkpoint_id}`")
+        # Ensure dwell/completion tracking follows the actual commanded checkpoint,
+        # instead of falling back to lexical benchmark order.
+        self.set_benchmark_progress_focus_checkpoint(checkpoint_key)
 
         max_step_m = 1.0
         min_axis_step_m = 0.12
