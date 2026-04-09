@@ -11,6 +11,7 @@ from .localization_error_model import LocalizationErrorModel
 from .localization_estimator import IterativeLeastSquaresEstimator3D
 from .state_packet import LocalizedStatePacket
 from .safety_envelope import build_safety_envelope, SafetyEnvelope2D
+from .benchmark_layout import WORKER_DEFAULT_SPEED_MPS
 
 
 @dataclass(frozen=True)
@@ -157,6 +158,11 @@ def _signed_gap_segment_to_ellipse_envelope(
 _BASELINE_ANCHOR_PROVIDER = AnchorGeometryProvider()
 _BASELINE_LOCALIZATION_ERROR_MODEL = LocalizationErrorModel()
 _BASELINE_LOCALIZATION_ESTIMATOR = IterativeLeastSquaresEstimator3D()
+_SCENARIO_WORKER_MODE_SUMMARY = "[SCENARIO] zoneA=patrol zoneB=bottleneck zoneC=cross_traffic speed=0.4"
+
+
+def worker_mode_summary_log() -> str:
+    return _SCENARIO_WORKER_MODE_SUMMARY
 
 
 def _build_localized_packet_from_anchor_pipeline(
@@ -260,20 +266,21 @@ def _scripted_worker_gt_xy(worker_id: str, now_s: float, fallback_xy: Tuple[floa
         # collision-probability pipeline end-to-end.
         return (1.35, 1.0)
     if worker_id == "worker_1":
-        # zone_A crossing loop: rectangle loop.
-        waypoints = [(1.5, 10.5), (5.2, 10.5), (5.2, 7.5), (1.5, 7.5)]
-        return _sample_polyline_loop(waypoints, speed_mps=0.9, t=t)
+        # zone_A patrol loop that repeatedly traverses link corridors between checkpoints.
+        waypoints = [(2.2, 10.0), (3.2, 10.8), (4.4, 9.2), (3.4, 8.0), (2.0, 8.8), (1.8, 9.8)]
+        return _sample_polyline_loop(waypoints, speed_mps=WORKER_DEFAULT_SPEED_MPS, t=t, smooth_turn=True)
     if worker_id == "worker_2":
-        # zone_B loiter pattern with a 3 second hold near B3/B4.
-        return _sample_worker2_loop(t)
+        # zone_B bottleneck shuttle that repeatedly blocks inter-cluster channel.
+        waypoints = [(6.8, 9.2), (8.9, 8.9), (10.8, 9.4), (8.9, 8.9), (6.8, 8.4)]
+        return _sample_polyline_pingpong(waypoints, speed_mps=WORKER_DEFAULT_SPEED_MPS, t=t, smooth_turn=True)
     if worker_id == "worker_3":
-        # zone_C horizontal crossing.
-        waypoints = [(2.0, 3.2), (10.0, 3.2), (2.0, 3.2)]
-        return _sample_polyline_loop(waypoints, speed_mps=0.7, t=t)
+        # zone_C cross-traffic weaving route that cuts through common shortest paths.
+        waypoints = [(1.2, 2.4), (4.0, 4.7), (6.4, 2.0), (8.8, 4.6), (11.0, 2.6), (8.2, 1.2), (5.2, 4.0), (2.4, 1.4)]
+        return _sample_polyline_loop(waypoints, speed_mps=WORKER_DEFAULT_SPEED_MPS, t=t, smooth_turn=True)
     return (float(fallback_xy[0]), float(fallback_xy[1]))
 
 
-def _sample_polyline_loop(waypoints: List[Tuple[float, float]], speed_mps: float, t: float) -> Tuple[float, float]:
+def _sample_polyline_loop(waypoints: List[Tuple[float, float]], speed_mps: float, t: float, smooth_turn: bool = False) -> Tuple[float, float]:
     if len(waypoints) < 2:
         return waypoints[0]
     segments: List[Tuple[Tuple[float, float], Tuple[float, float], float]] = []
@@ -291,38 +298,20 @@ def _sample_polyline_loop(waypoints: List[Tuple[float, float]], speed_mps: float
     for p0, p1, seg_len in segments:
         if dist <= seg_len:
             ratio = dist / seg_len
+            if smooth_turn:
+                ratio = 0.5 - (0.5 * math.cos(math.pi * max(0.0, min(1.0, ratio))))
             return (p0[0] + (p1[0] - p0[0]) * ratio, p0[1] + (p1[1] - p0[1]) * ratio)
         dist -= seg_len
     return segments[-1][1]
 
 
-def _sample_worker2_loop(t: float) -> Tuple[float, float]:
-    p0 = (8.5, 7.8)
-    p1 = (9.0, 8.2)
-    p2 = (8.2, 7.6)
-    speed = 0.6
-    hold_s = 3.0
-    len_01 = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
-    len_12 = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-    len_20 = math.hypot(p0[0] - p2[0], p0[1] - p2[1])
-    t01 = len_01 / speed
-    t12 = len_12 / speed
-    t20 = len_20 / speed
-    period = t01 + hold_s + t12 + t20
-    u = t % period
-    if u <= t01:
-        r = u / max(t01, 1e-6)
-        return (p0[0] + (p1[0] - p0[0]) * r, p0[1] + (p1[1] - p0[1]) * r)
-    u -= t01
-    if u <= hold_s:
-        return p1
-    u -= hold_s
-    if u <= t12:
-        r = u / max(t12, 1e-6)
-        return (p1[0] + (p2[0] - p1[0]) * r, p1[1] + (p2[1] - p1[1]) * r)
-    u -= t12
-    r = u / max(t20, 1e-6)
-    return (p2[0] + (p0[0] - p2[0]) * r, p2[1] + (p0[1] - p2[1]) * r)
+def _sample_polyline_pingpong(waypoints: List[Tuple[float, float]], speed_mps: float, t: float, smooth_turn: bool = False) -> Tuple[float, float]:
+    if len(waypoints) < 2:
+        return waypoints[0]
+    forward = list(waypoints)
+    backward = list(reversed(waypoints[1:-1]))
+    full_path = forward + backward
+    return _sample_polyline_loop(full_path, speed_mps=speed_mps, t=t, smooth_turn=smooth_turn)
 
 
 def _debug_force_close_worker_enabled() -> bool:
