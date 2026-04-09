@@ -4,6 +4,7 @@ import sys, os
 import asyncio
 import io, time
 import math
+import glob
 from collections import deque
 import gradio as gr
 import argparse
@@ -183,6 +184,7 @@ class TypeFly:
                         label="Baseline Scene",
                     )
                     self.baseline_scene_apply_btn = gr.Button("Apply Baseline Scene")
+                    self.reset_system_btn = gr.Button("Reset System (Clear All Records)")
                 with gr.Column(scale=1, min_width=320, elem_classes="user-move-panel"):
                     self.worker_selector = gr.Dropdown(
                         choices=["worker_1", "worker_2", "worker_3"],
@@ -225,6 +227,11 @@ class TypeFly:
             self.baseline_scene_apply_btn.click(
                 fn=self.apply_baseline_scene,
                 inputs=[self.baseline_scene_selector],
+                outputs=[self.scenario_status],
+            )
+            self.reset_system_btn.click(
+                fn=self.reset_system_state,
+                inputs=[],
                 outputs=[self.scenario_status],
             )
             self.framework_mode_selector.change(
@@ -488,6 +495,100 @@ class TypeFly:
         state = self.llm_controller.apply_baseline_scene()
         user_yaw_deg = math.degrees(self.llm_controller.get_user_heading_yaw())
         return f"Baseline scene `{normalized}` applied. drone_init={self._fmt_vec(state.get('drone_initial_pose'))} user={self._fmt_vec(state.get('user_position'))} user_yaw={user_yaw_deg:.1f}deg"
+
+    @staticmethod
+    def _drain_queue(q):
+        if q is None:
+            return
+        while True:
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                break
+
+    def _reset_runtime_records(self):
+        self.position_history = {
+            "drone_gt": deque(maxlen=100),
+            "drone_est": deque(maxlen=100),
+        }
+        self.worker_collision_history = {
+            "worker_1": deque(maxlen=100),
+            "worker_2": deque(maxlen=100),
+            "worker_3": deque(maxlen=100),
+        }
+        self.worker_collision_active = {
+            "worker_1": False,
+            "worker_2": False,
+            "worker_3": False,
+        }
+        self.mission_collision_count = 0
+        self.mission_clock = {
+            "started_at": None,
+            "completed_at": None,
+            "is_running": False,
+            "objective_completed": False,
+        }
+        active_ids = set(self.objective_state.get("active_checkpoint_ids", set()))
+        self.benchmark_progress = {
+            "order": list(BENCHMARK_CHECKPOINT_ORDER),
+            "completed": set(),
+            "active_enter_ts": None,
+            "active_progress": 0.0,
+            "current_target": next(
+                (cid for cid in BENCHMARK_CHECKPOINT_ORDER if cid in active_ids),
+                None,
+            ),
+            "executed_gc_sequence": [],
+        }
+        if hasattr(self, "_last_position_map"):
+            self._last_position_map.clear()
+        if hasattr(self, "_last_print_position_map"):
+            self._last_print_position_map.clear()
+        self._temp_message = ""
+        self._temp_message_expire = 0.0
+        self._drain_queue(self.uwb_queue)
+        self._drain_queue(self.virtual_queue)
+        self._drain_queue(self.message_queue)
+
+    def _reset_persisted_logs(self):
+        logger = getattr(self.llm_controller, "task_run_logger", None)
+        if logger is None:
+            return
+        try:
+            with logger._lock:
+                logger._active = None
+        except Exception:
+            pass
+        for file_path in [
+            getattr(logger, "excel_path", None),
+            getattr(logger, "debug_jsonl_path", None),
+        ]:
+            if not file_path:
+                continue
+            for matched in glob.glob(file_path):
+                try:
+                    os.remove(matched)
+                except FileNotFoundError:
+                    pass
+                except Exception as e:
+                    print_t(f"[WARN] Failed to remove log file `{matched}`: {e}")
+
+    def reset_system_state(self):
+        try:
+            self.llm_controller.current_plan = None
+            self.llm_controller.execution_history = None
+            self.llm_controller.current_task_description = ""
+            self.llm_controller.execution_mode = "Waiting"
+            self.llm_controller.framework_mode = MODE_TYPEFLY_ONESHOT
+            self.llm_controller._pending_heartbeat_replan_plan = None
+            self.llm_controller._pending_heartbeat_reason = ""
+            self.llm_controller._reset_benchmark_progress_tracking()
+            self.llm_controller.apply_baseline_scene()
+            self._reset_runtime_records()
+            self._reset_persisted_logs()
+            return "System reset complete: drone/workers repositioned, runtime progress cleared, and log records deleted."
+        except Exception as e:
+            return f"System reset failed: {e}"
 
     def set_framework_mode(self, framework_mode: str):
         normalized = self.llm_controller._normalize_framework_mode(framework_mode)

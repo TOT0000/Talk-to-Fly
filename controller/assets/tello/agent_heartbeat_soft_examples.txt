@@ -53,3 +53,17 @@ Current executing plan: lo('continuation plan');gc('B4');d(2.0);gc('B2');d(2.0);
 Queue progress: next checkpoint is B4
 Execution history: one earlier approach failed, then worker_2 moved away
 Response(JSON): {"response":"continue","reason":"The worker has moved away and the current continuation plan is acceptable.","plan":""}
+
+Example S5 (Soft heartbeat: infer execution anomaly from original plan order and completed checkpoints)
+Task: Complete zone_A search.
+Completed checkpoints: ["A4"]
+Unfinished checkpoints: ["A2","A1","A3"]
+UAV position: (4.2, 8.6, 1.2)
+UAV heading: 14.0 deg
+Worker positions: worker_1=(4.5,9.1), worker_2=(0.9,7.2), worker_3=(5.8,11.1)
+current_collision_probability: 0.240
+dominant risky worker: worker_1
+Current executing plan: lo('initial efficiency-first route');gc('A2');d(2.0);gc('A4');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Queue progress: A4 has already been completed, but the earlier checkpoint A2 is still unfinished
+Execution history: A2 approach likely failed or was interrupted, then A4 was completed
+Response(JSON): {"response":"full_replan_plan","reason":"The completion order is inconsistent with the original plan, so the remaining unfinished checkpoints should be replanned together.","plan":"lo('heartbeat anomaly-aware replan after A2 interruption');ml(0.4);tu(10);gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);"}
