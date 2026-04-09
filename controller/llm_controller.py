@@ -1142,6 +1142,9 @@ class LLMController():
             current_plan=self.current_plan,
             hard_gate=(self.framework_mode == MODE_AGENT_HEARTBEAT_HARDGATE),
         )
+        raw_response = str(response.get("raw_response", "") or "").strip()
+        if raw_response:
+            self.append_message(f"[AGENT-HEARTBEAT-RAW] {raw_response}")
         response_type = str(response.get("response", "continue"))
         reason = str(response.get("reason", ""))
         if response_type == "full_replan_plan":

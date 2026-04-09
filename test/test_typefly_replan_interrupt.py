@@ -278,3 +278,39 @@ def test_agent_heartbeat_replan_response_is_emitted_to_chat():
     assert controller._pending_heartbeat_replan_plan == "ml(0.3);gc('A2');d(2.0);"
     assert any(str(msg).startswith("[AGENT-HEARTBEAT-REPLAN]") for msg in displayed_messages)
     assert any(str(msg).startswith("[AGENT-HEARTBEAT-REPLAN-PLAN]") for msg in displayed_messages)
+
+
+def test_agent_heartbeat_raw_response_is_emitted_even_when_non_json_continue():
+    pytest.importorskip("PIL")
+    from controller.llm_controller import LLMController
+
+    controller = LLMController.__new__(LLMController)
+    displayed_messages = []
+
+    controller.framework_mode = "agent-heartbeat-soft"
+    controller._pending_heartbeat_replan_plan = None
+    controller._pending_heartbeat_reason = ""
+    controller.last_heartbeat_ts = 0.0
+    controller.replan_limit = 5
+    controller._replan_attempts = 0
+    controller.current_task_description = "task"
+    controller.execution_history = "history"
+    controller.current_plan = "gc('A1');"
+    controller.append_message = displayed_messages.append
+    controller._sanitize_minispec_plan = lambda raw_plan: str(raw_plan)
+    controller.get_live_ui_snapshot = lambda: {}
+    controller.planner = SimpleNamespace(
+        plan_agent_heartbeat=lambda **kwargs: {
+            "response": "continue",
+            "reason": "non_json_response:```json{\"response\":\"full_replan_plan\"}",
+            "plan": "",
+            "raw_response": "```json\n{\"response\":\"full_replan_plan\",\"reason\":\"anomaly\",\"plan\":\"gc('A2');\"}\n```",
+            "parsed_ok": False,
+        }
+    )
+
+    triggered = controller._maybe_run_agent_heartbeat(force=True)
+
+    assert triggered is False
+    assert controller._pending_heartbeat_replan_plan is None
+    assert any(str(msg).startswith("[AGENT-HEARTBEAT-RAW]") for msg in displayed_messages)

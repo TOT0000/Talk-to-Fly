@@ -657,9 +657,11 @@ class LLMPlanner():
             "Return JSON only."
         )
         raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
+        parsed_ok = True
         try:
             parsed = json.loads(raw)
         except Exception:
+            parsed_ok = False
             parsed = {"response": "continue", "reason": f"non_json_response:{raw[:120]}", "plan": ""}
         response = str(parsed.get("response", "continue")).strip().lower()
         if response not in {"continue", "full_replan_plan"}:
@@ -668,6 +670,8 @@ class LLMPlanner():
             "response": response,
             "reason": str(parsed.get("reason", "")).strip(),
             "plan": str(parsed.get("plan", "")).strip(),
+            "raw_response": raw,
+            "parsed_ok": bool(parsed_ok),
         }
     
     def probe(self, question: str) -> MiniSpecValueType:
