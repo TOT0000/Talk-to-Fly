@@ -314,3 +314,51 @@ def test_agent_heartbeat_raw_response_is_emitted_even_when_non_json_continue():
     assert triggered is False
     assert controller._pending_heartbeat_replan_plan is None
     assert any(str(msg).startswith("[AGENT-HEARTBEAT-RAW]") for msg in displayed_messages)
+
+
+def test_agent_heartbeat_prompt_receives_replan_response_history():
+    pytest.importorskip("PIL")
+    from controller.llm_controller import LLMController
+
+    controller = LLMController.__new__(LLMController)
+    planner_calls = []
+
+    controller.framework_mode = "agent-heartbeat-soft"
+    controller._pending_heartbeat_replan_plan = None
+    controller._pending_heartbeat_reason = ""
+    controller.last_heartbeat_ts = 0.0
+    controller.replan_limit = 5
+    controller._replan_attempts = 0
+    controller.current_task_description = "task"
+    controller.execution_history = "gc('C1');d(2.0);"
+    controller.current_plan = "gc('C2');d(2.0);"
+    controller._replan_response_history = [
+        {
+            "ts": 1.0,
+            "source": "agent_heartbeat_full_replan_response",
+            "reason": "anomaly",
+            "plan": "ml(0.5);gc('C2');d(2.0);",
+            "raw_response": "{\"response\":\"full_replan_plan\"}",
+        }
+    ]
+    controller.append_message = lambda _msg: None
+    controller._sanitize_minispec_plan = lambda raw_plan: str(raw_plan)
+    controller.get_live_ui_snapshot = lambda: {}
+    controller.planner = SimpleNamespace(
+        plan_agent_heartbeat=lambda **kwargs: planner_calls.append(kwargs) or {
+            "response": "continue",
+            "reason": "ok",
+            "plan": "",
+            "raw_response": "{\"response\":\"continue\"}",
+            "parsed_ok": True,
+        }
+    )
+
+    triggered = controller._maybe_run_agent_heartbeat(force=True)
+
+    assert triggered is False
+    assert len(planner_calls) == 1
+    execution_history_text = str(planner_calls[0]["execution_history"])
+    assert "replan_response_history:" in execution_history_text
+    assert "agent_heartbeat_full_replan_response" in execution_history_text
+    assert "ml(0.5);gc('C2');d(2.0);" in execution_history_text
