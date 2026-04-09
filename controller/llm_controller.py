@@ -859,9 +859,10 @@ class LLMController():
             progress_target_match = bool(runtime_target == checkpoint.id)
             safety_context = snapshot.get("safety_context")
             current_p = 0.0 if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
-            if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
-                stop_reason = f"collision_probability_high({current_p:.3f})"
-                break
+            if self.framework_mode != "langgraph_agent":
+                if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
+                    stop_reason = f"collision_probability_high({current_p:.3f})"
+                    break
 
             dx_w = float(checkpoint.x) - float(control_pos[0])
             dy_w = float(checkpoint.y) - float(control_pos[1])
