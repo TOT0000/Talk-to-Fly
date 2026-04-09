@@ -1,26 +1,22 @@
 from pathlib import Path
 
 
-SOURCE_PATH = Path("controller/llm_controller.py")
-AGENT_SOURCE_PATH = Path("controller/langgraph_agent.py")
-PLANNER_SOURCE_PATH = Path("controller/llm_planner.py")
+PLANNER_SOURCE_PATH = Path('controller/llm_planner.py')
+CONTROLLER_SOURCE_PATH = Path('controller/llm_controller.py')
 
 
-def test_agent_mode_no_longer_bypasses_interpreter_collision_abort():
-    source = SOURCE_PATH.read_text(encoding="utf-8")
-    assert 'if str(getattr(self, "framework_mode", "")).strip().lower() == "langgraph_agent":' not in source
+def test_hardgate_rule_is_prompt_level_only():
+    source = CONTROLLER_SOURCE_PATH.read_text(encoding='utf-8')
+    assert 'current_collision_probability > 0.5, you MUST output response=full_replan_plan' not in source
 
 
-def test_gc_loop_collision_abort_not_guarded_by_framework_mode():
-    source = SOURCE_PATH.read_text(encoding="utf-8")
-    assert "if self.framework_mode != \"langgraph_agent\":" not in source
-    assert "if self._should_trigger_auto_replan(current_p, source=\"go_checkpoint_loop\")" in source
+def test_heartbeat_prompt_contains_hardgate_rule():
+    source = PLANNER_SOURCE_PATH.read_text(encoding='utf-8')
+    assert 'current_collision_probability > 0.5' in source
+    assert 'MUST output response=full_replan_plan' in source
 
 
-def test_agent_mode_stall_tracking_fields_removed():
-    agent_source = AGENT_SOURCE_PATH.read_text(encoding="utf-8")
-    planner_source = PLANNER_SOURCE_PATH.read_text(encoding="utf-8")
-    assert "no_progress_steps" not in agent_source
-    assert "repeated_action_count" not in agent_source
-    assert "stall_count" not in planner_source
-    assert "repeated_action_count" not in planner_source
+def test_no_two_stage_decision_call_for_heartbeat():
+    source = PLANNER_SOURCE_PATH.read_text(encoding='utf-8')
+    assert 'response must be one of: continue, full_replan_plan' in source
+    assert 'decision=Replan' not in source
