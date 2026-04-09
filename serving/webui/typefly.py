@@ -125,6 +125,7 @@ class TypeFly:
             "active_enter_ts": None,
             "active_progress": 0.0,
             "current_target": BENCHMARK_CHECKPOINT_ORDER[0] if BENCHMARK_CHECKPOINT_ORDER else None,
+            "executed_gc_sequence": [],
         }
         self.objective_state = {
             # Active objective set is explicitly tracked for future framework linkage.
@@ -799,60 +800,32 @@ class TypeFly:
             self.objective_state["active_checkpoint_ids"] = set(str(v) for v in cp_ids)
 
     def _update_checkpoint_progress(self, snapshot):
-        positions = self._extract_ui_positions(snapshot)
-        drone_gt = positions.get("drone_gt")
-        if drone_gt is None:
+        if not isinstance(snapshot, dict):
             return
-        order = self.benchmark_progress["order"]
-        completed = self.benchmark_progress["completed"]
-        active_ids = set(self.objective_state.get("active_checkpoint_ids", set()))
-        current_target = next((cid for cid in order if cid in active_ids and cid not in completed), None)
-        self.benchmark_progress["current_target"] = current_target
-        if current_target is None:
-            self.benchmark_progress["active_enter_ts"] = None
-            self.benchmark_progress["active_progress"] = 1.0
-            if hasattr(self.llm_controller, "update_benchmark_progress"):
-                self.llm_controller.update_benchmark_progress(
-                    completed_checkpoint_ids=sorted(completed),
-                    current_target_checkpoint=current_target,
-                    in_radius=False,
-                    dwell_seconds=0.0,
-                    required_dwell_seconds=float(CHECKPOINT_DWELL_SECONDS),
-                    dwell_satisfied=False,
-                )
+        progress = snapshot.get("benchmark_progress")
+        if not isinstance(progress, dict):
             return
-        cp = BENCHMARK_CHECKPOINTS_BY_ID[current_target]
-        dist = math.hypot(float(drone_gt[0] - cp.x), float(drone_gt[1] - cp.y))
-        now = time.time()
-        in_radius = bool(dist <= cp.radius_m)
-        dwell = 0.0
-        if dist <= cp.radius_m:
-            if self.benchmark_progress["active_enter_ts"] is None:
-                self.benchmark_progress["active_enter_ts"] = now
-            dwell = now - float(self.benchmark_progress["active_enter_ts"])
-            self.benchmark_progress["active_progress"] = min(1.0, dwell / CHECKPOINT_DWELL_SECONDS)
-            if dwell >= CHECKPOINT_DWELL_SECONDS:
-                completed.add(current_target)
-                self.benchmark_progress["active_enter_ts"] = None
-                self.benchmark_progress["active_progress"] = 0.0
+        completed = set(str(v).upper() for v in (progress.get("completed") or []))
+        dwell_seconds = float(progress.get("dwell_seconds", 0.0) or 0.0)
+        required_dwell_seconds = float(progress.get("required_dwell_seconds", CHECKPOINT_DWELL_SECONDS) or CHECKPOINT_DWELL_SECONDS)
+        if required_dwell_seconds <= 1e-6:
+            active_progress = 0.0
         else:
-            self.benchmark_progress["active_enter_ts"] = None
-            self.benchmark_progress["active_progress"] = 0.0
-
+            active_progress = min(1.0, max(0.0, dwell_seconds / required_dwell_seconds))
+        self.benchmark_progress["completed"] = completed
+        self.benchmark_progress["current_target"] = progress.get("current_target")
+        self.benchmark_progress["active_enter_ts"] = progress.get("active_enter_ts")
+        self.benchmark_progress["active_progress"] = active_progress
+        self.benchmark_progress["executed_gc_sequence"] = [
+            str(v).upper() for v in (progress.get("executed_gc_sequence") or [])
+        ]
+        active_ids = set(self.objective_state.get("active_checkpoint_ids", set()))
+        now = time.time()
         mission_completed = bool(active_ids) and all(cid in completed for cid in active_ids)
         self.mission_clock["objective_completed"] = mission_completed
         if mission_completed and self.mission_clock.get("started_at") is not None and self.mission_clock.get("completed_at") is None:
             self.mission_clock["completed_at"] = now
             self.mission_clock["is_running"] = False
-        if hasattr(self.llm_controller, "update_benchmark_progress"):
-            self.llm_controller.update_benchmark_progress(
-                completed_checkpoint_ids=sorted(completed),
-                current_target_checkpoint=current_target,
-                in_radius=in_radius,
-                dwell_seconds=float(dwell),
-                required_dwell_seconds=float(CHECKPOINT_DWELL_SECONDS),
-                dwell_satisfied=bool(dwell >= CHECKPOINT_DWELL_SECONDS),
-            )
 
     def render_anchor_3d_plot(self):
         fig = plt.figure(figsize=(5.2, 4.2))
