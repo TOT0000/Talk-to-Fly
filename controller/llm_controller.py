@@ -220,6 +220,9 @@ class LLMController():
         self._pending_heartbeat_replan_plan: Optional[str] = None
         self._pending_heartbeat_reason: str = ""
         self._replan_response_history: list[dict] = []
+        self._mission_original_plan: Optional[str] = None
+        self._current_active_plan: Optional[str] = None
+        self._latest_full_replan_response: Optional[str] = None
         self.langgraph_runner = LangGraphOrchestrationRunner(self)
 
         # PX4_SIM optional managed user-position publisher lifecycle
@@ -291,6 +294,7 @@ class LLMController():
         )
         if len(self._replan_response_history) > 20:
             self._replan_response_history = self._replan_response_history[-20:]
+        self._latest_full_replan_response = plan
 
     def _build_execution_history_for_llm(self):
         history = self.execution_history
@@ -1183,6 +1187,9 @@ class LLMController():
             snapshot=snapshot,
             execution_history=self._build_execution_history_for_llm(),
             current_plan=self.current_plan,
+            mission_original_plan=self._mission_original_plan,
+            current_active_plan=self._current_active_plan,
+            latest_full_replan_response=self._latest_full_replan_response,
             hard_gate=(self.framework_mode == MODE_AGENT_HEARTBEAT_HARDGATE),
         )
         raw_response = str(response.get("raw_response", "") or "").strip()
@@ -1494,6 +1501,9 @@ class LLMController():
         self._pending_heartbeat_replan_plan = None
         self._pending_heartbeat_reason = ""
         self._replan_response_history = []
+        self._mission_original_plan = None
+        self._current_active_plan = None
+        self._latest_full_replan_response = None
         def _run_monitor():
             while not monitor_stop.is_set():
                 try:
@@ -1560,6 +1570,12 @@ class LLMController():
                         reason=f"planning_stage={planning_stage}",
                         plan_text=self.current_plan,
                     )
+                if replan_attempts == 0 and self._mission_original_plan is None:
+                    self._mission_original_plan = str(self.current_plan)
+                if self._current_active_plan is None:
+                    self._current_active_plan = str(self.current_plan)
+                if replan_attempts > 0:
+                    self._current_active_plan = str(self.current_plan)
                 if replan_attempts == 0:
                     print_t(f"[PLAN-INITIAL] llm_response={self.current_plan}")
                 else:

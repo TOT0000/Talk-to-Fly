@@ -26,8 +26,15 @@ def test_hardgate_prompt_has_extra_hard_gate_rule():
 def test_heartbeat_prompt_contains_geometry_and_anomaly_policy():
     assert 'Your decision must not rely on collision probability alone.' in PLANNER_SOURCE
     assert '- geometric closeness between UAV and workers' in PLANNER_SOURCE
-    assert 'if an earlier checkpoint in the original plan is still unfinished while a later checkpoint has already been completed' in PLANNER_SOURCE
+    assert 'if an earlier checkpoint in the current active plan is still unfinished while a later checkpoint in that same current active plan has already been completed' in PLANNER_SOURCE
     assert 'plan must include all relevant remaining unfinished checkpoints' in PLANNER_SOURCE
+
+
+def test_heartbeat_prompt_includes_plan_context_fields():
+    assert 'Mission original plan: {mission_original_plan_text}' in PLANNER_SOURCE
+    assert 'Current active plan: {current_active_plan_text}' in PLANNER_SOURCE
+    assert 'Latest full replan response (if any): {latest_full_replan_text}' in PLANNER_SOURCE
+    assert 'The current active plan is the authoritative plan for judging current execution order.' in PLANNER_SOURCE
 
 
 def test_heartbeat_prompt_output_format_unchanged():
@@ -38,9 +45,12 @@ def test_heartbeat_prompt_output_format_unchanged():
 
 def test_examples_files_are_real_and_nonempty_and_referenced():
     assert 'Example S1 (Soft heartbeat: continue current plan under low risk)' in SOFT_EXAMPLES
-    assert 'Example S5 (Soft heartbeat: infer execution anomaly from original plan order and completed checkpoints)' in SOFT_EXAMPLES
+    assert 'Example S5 (Soft heartbeat: infer execution anomaly relative to the current active plan after a prior replan)' in SOFT_EXAMPLES
     assert 'Example H1 (HardGate heartbeat: below threshold, continue)' in HARD_EXAMPLES
-    assert 'Example H5 (HardGate heartbeat: infer execution anomaly and replan all remaining unfinished checkpoints)' in HARD_EXAMPLES
+    assert 'Example H5 (HardGate heartbeat: infer execution anomaly relative to the current active plan after a prior replan)' in HARD_EXAMPLES
+    assert 'Mission original plan:' in SOFT_EXAMPLES
+    assert 'Current active plan:' in SOFT_EXAMPLES
+    assert 'Latest full replan response (if any):' in SOFT_EXAMPLES
     assert 'Agent heartbeat examples:' in PLANNER_SOURCE
     assert '{agent_heartbeat_examples}' in PLANNER_SOURCE
 

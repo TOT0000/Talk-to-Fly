@@ -362,3 +362,114 @@ def test_agent_heartbeat_prompt_receives_replan_response_history():
     assert "replan_response_history:" in execution_history_text
     assert "agent_heartbeat_full_replan_response" in execution_history_text
     assert "ml(0.5);gc('C2');d(2.0);" in execution_history_text
+
+
+def test_current_active_plan_matches_mission_original_when_no_full_replan(monkeypatch):
+    pytest.importorskip("PIL")
+    from controller.llm_controller import LLMController
+
+    controller = LLMController.__new__(LLMController)
+
+    class _Planner:
+        def plan(self, **kwargs):
+            return "gc('A1');d(2.0);gc('A2');d(2.0);"
+
+    controller.replan_limit = 5
+    controller.controller_wait_takeoff = False
+    controller.message_queue = None
+    controller.execution_history = []
+    controller.current_plan = None
+    controller.framework_mode = "typefly-threshold-replan"
+    controller.execution_mode = "Waiting"
+    controller.active_objective_set = {"active_checkpoint_ids": ["A1", "A2"]}
+    controller.latest_benchmark_progress = {"completed": []}
+    controller._benchmark_plan_checkpoint_sequence = []
+    controller._task_id_counter = 0
+    controller.auto_replan_armed = True
+    controller.auto_replan_protection_remaining = 0
+    controller.planner_mode = "llm"
+    controller.planner = _Planner()
+    controller.task_run_logger = _NoopLogger()
+    controller.vision = SimpleNamespace(get_obj_list=lambda: "")
+    controller.enable_video = False
+    controller.state_provider = SimpleNamespace(debug_log_latest_localization_snapshot=lambda **kwargs: None)
+    controller.safety_assessor = SimpleNamespace(build_from_provider=lambda provider: None)
+    controller.append_message = lambda _msg: None
+    controller._resolve_active_objective_set = lambda task_text: {"active_checkpoint_ids": ["A1", "A2"]}
+    controller._reset_benchmark_progress_tracking = lambda: None
+    controller._format_planner_location_info = lambda: "loc"
+    controller.get_live_ui_snapshot = lambda: {"safety_context": None, "benchmark_progress": {"completed": ["A1", "A2"]}}
+    controller._debug_log_safety_context = lambda safety: None
+    controller._build_baseline_control_plan = lambda **kwargs: None
+    controller._sanitize_minispec_plan = lambda raw_plan: str(raw_plan)
+    controller.execute_minispec = lambda *args, **kwargs: MiniSpecReturnValue("ok", False)
+    controller.get_active_scenario_name = lambda: "test"
+
+    monkeypatch.setattr("controller.llm_controller.AUTO_REPLAN_PROTECTION_STATEMENTS", 0)
+    controller.execute_task_description("run mission", framework_mode="typefly-threshold-replan")
+
+    assert controller._mission_original_plan == "gc('A1');d(2.0);gc('A2');d(2.0);"
+    assert controller._current_active_plan == controller._mission_original_plan
+
+
+def test_current_active_plan_updates_after_full_replan(monkeypatch):
+    pytest.importorskip("PIL")
+    from controller.llm_controller import LLMController
+
+    controller = LLMController.__new__(LLMController)
+    planner_calls = []
+
+    class _Planner:
+        def __init__(self):
+            self._responses = ["gc('A1');d(2.0);", "ml(0.5);gc('A2');d(2.0);"]
+
+        def plan(self, **kwargs):
+            planner_calls.append(kwargs)
+            return self._responses[len(planner_calls) - 1]
+
+    exec_calls = []
+
+    def _execute_minispec(program_text, silent=False, allow_auto_interrupt=True):
+        exec_calls.append(program_text)
+        if len(exec_calls) == 1:
+            return MiniSpecReturnValue("MiniSpec execution interrupted for replan: current_collision_probability=0.700000", True)
+        controller.latest_benchmark_progress = {"completed": ["A1", "A2"]}
+        return MiniSpecReturnValue("ok", False)
+
+    controller.replan_limit = 5
+    controller.controller_wait_takeoff = False
+    controller.message_queue = None
+    controller.execution_history = []
+    controller.current_plan = None
+    controller.framework_mode = "typefly-threshold-replan"
+    controller.execution_mode = "Waiting"
+    controller.active_objective_set = {"active_checkpoint_ids": ["A1", "A2"]}
+    controller.latest_benchmark_progress = {"completed": []}
+    controller._benchmark_plan_checkpoint_sequence = []
+    controller._task_id_counter = 0
+    controller.auto_replan_armed = True
+    controller.auto_replan_protection_remaining = 0
+    controller.planner_mode = "llm"
+    controller.planner = _Planner()
+    controller.task_run_logger = _NoopLogger()
+    controller.vision = SimpleNamespace(get_obj_list=lambda: "")
+    controller.enable_video = False
+    controller.state_provider = SimpleNamespace(debug_log_latest_localization_snapshot=lambda **kwargs: None)
+    controller.safety_assessor = SimpleNamespace(build_from_provider=lambda provider: None)
+    controller.append_message = lambda _msg: None
+    controller._resolve_active_objective_set = lambda task_text: {"active_checkpoint_ids": ["A1", "A2"]}
+    controller._reset_benchmark_progress_tracking = lambda: None
+    controller._format_planner_location_info = lambda: "loc"
+    controller.get_live_ui_snapshot = lambda: {"safety_context": None, "benchmark_progress": dict(controller.latest_benchmark_progress)}
+    controller._debug_log_safety_context = lambda safety: None
+    controller._build_baseline_control_plan = lambda **kwargs: None
+    controller._sanitize_minispec_plan = lambda raw_plan: str(raw_plan)
+    controller.execute_minispec = _execute_minispec
+    controller.get_active_scenario_name = lambda: "test"
+
+    monkeypatch.setattr("controller.llm_controller.AUTO_REPLAN_PROTECTION_STATEMENTS", 0)
+    controller.execute_task_description("run mission", framework_mode="typefly-threshold-replan")
+
+    assert controller._mission_original_plan == "gc('A1');d(2.0);"
+    assert controller._current_active_plan == "ml(0.5);gc('A2');d(2.0);"
+    assert controller._latest_full_replan_response == "ml(0.5);gc('A2');d(2.0);"
