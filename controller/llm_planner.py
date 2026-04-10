@@ -587,6 +587,9 @@ class LLMPlanner():
         snapshot: dict,
         execution_history,
         current_plan: str,
+        mission_original_plan: Optional[str] = None,
+        current_active_plan: Optional[str] = None,
+        latest_full_replan_response: Optional[str] = None,
         hard_gate: bool = False,
     ) -> dict:
         safety_context = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
@@ -606,21 +609,56 @@ class LLMPlanner():
             if hard_gate
             else "You may choose continue or full_replan_plan based on your judgment."
         )
-        heartbeat_examples = (
+        agent_heartbeat_examples = (
             self.agent_heartbeat_hardgate_examples
             if hard_gate
             else self.agent_heartbeat_soft_examples
         )
+        mission_original_plan_text = str(mission_original_plan or current_plan or "none")
+        current_active_plan_text = str(current_active_plan or mission_original_plan_text)
+        latest_full_replan_text = str(latest_full_replan_response or "none")
         prompt = (
-            "You are heartbeat monitor for UAV planning.\n"
+            "You are heartbeat monitor for UAV planning.\n\n"
             "Return strict JSON with keys: response, reason, plan.\n"
             "response must be one of: continue, full_replan_plan.\n"
-            "If response=continue, set plan to empty string.\n"
-            f"{hard_gate_rule}\n"
-            "Use same skill abbreviations as TypeFly plans.\n"
-            "Agent heartbeat examples:\n"
-            f"{heartbeat_examples}\n"
+            "If response=continue, set plan to empty string.\n\n"
+            f"{hard_gate_rule}\n\n"
+            "Use the same skill abbreviations as TypeFly plans.\n\n"
+            "Your decision must not rely on collision probability alone.\n"
+            "You must jointly consider:\n"
+            "- current_collision_probability\n"
+            "- UAV position and heading\n"
+            "- worker positions\n"
+            "- geometric closeness between UAV and workers\n"
+            "- whether the current approach corridor is likely to pass too close to a worker\n"
+            "- mission original plan\n"
+            "- current active plan\n"
+            "- latest full replan response (if any)\n"
+            "- completed checkpoints\n"
+            "- unfinished checkpoints\n"
+            "- current queue progress\n"
+            "- execution history\n\n"
+            "Planning interpretation rules:\n"
+            "1. The mission original plan is background context only.\n"
+            "2. The current active plan is the authoritative plan for judging current execution order.\n"
+            "3. After any full replan, anomaly detection and ordering judgments should primarily compare against the current active plan, not the mission original plan.\n"
+            "4. If no full replan has occurred, the current active plan may be the same as the mission original plan.\n\n"
+            "Replan policy:\n"
+            "1. If the current active plan is still safe and usable, return continue.\n"
+            "2. If collision probability is high, you should return full_replan_plan.\n"
+            "3. Even if collision probability is not high, if the UAV is geometrically too close to a worker, or if the current corridor is likely to create a risky close pass, you may still return full_replan_plan.\n"
+            "4. When replanning, you may first use low-level motion or turning actions (mf / mb / ml / mr / tc / tu / d) to create spacing from the risky worker, and then continue planning the remaining unfinished checkpoints.\n"
+            "5. The size of the detour must balance safety and efficiency:\n"
+            "   - if risk is high or geometry is very close, use a larger and more conservative detour\n"
+            "   - if risk is not high but preventive avoidance is still useful, use a smaller detour\n"
+            "6. Normally, the remaining unfinished checkpoints should continue in a way that is consistent with the current active plan whenever reasonable.\n"
+            "7. However, if an earlier checkpoint in the current active plan is still unfinished while a later checkpoint in that same current active plan has already been completed, you should infer that execution likely failed, was interrupted, or deviated after the latest authoritative plan. In that case, you should reconsider all remaining unfinished checkpoints together and produce a new coherent full replan plan instead of blindly following the old queue.\n"
+            "8. If the current active plan itself appears stale or no longer safe because worker geometry has changed, you may replace it with a safer reordered plan.\n"
+            "9. When returning full_replan_plan, plan must include all relevant remaining unfinished checkpoints that still need to be completed, not only the immediately next one.\n\n"
             f"Task: {task_description}\n"
+            f"Mission original plan: {mission_original_plan_text}\n"
+            f"Current active plan: {current_active_plan_text}\n"
+            f"Latest full replan response (if any): {latest_full_replan_text}\n"
             f"Completed checkpoints: {completed}\n"
             f"Unfinished checkpoints: {[cid for cid in active if cid not in completed]}\n"
             f"UAV position: {snapshot.get('drone_est_bias_corrected') or snapshot.get('drone_est') or snapshot.get('drone_gt')}\n"
@@ -630,13 +668,14 @@ class LLMPlanner():
             f"dominant risky worker: {dominant_worker}\n"
             f"Current executing plan: {current_plan}\n"
             f"Queue progress: {benchmark_progress}\n"
-            f"Execution history: {execution_history}\n"
+            f"Execution history: {execution_history}\n\n"
+            "Agent heartbeat examples:\n"
+            f"{agent_heartbeat_examples}\n\n"
             "Return JSON only."
         )
         raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
-        try:
-            parsed = json.loads(raw)
-        except Exception:
+        parsed, parsed_ok = self._parse_heartbeat_response_json(raw)
+        if not parsed_ok:
             parsed = {"response": "continue", "reason": f"non_json_response:{raw[:120]}", "plan": ""}
         response = str(parsed.get("response", "continue")).strip().lower()
         if response not in {"continue", "full_replan_plan"}:
@@ -645,7 +684,47 @@ class LLMPlanner():
             "response": response,
             "reason": str(parsed.get("reason", "")).strip(),
             "plan": str(parsed.get("plan", "")).strip(),
+            "raw_response": raw,
+            "parsed_ok": bool(parsed_ok),
         }
+
+    @staticmethod
+    def _parse_heartbeat_response_json(raw: str) -> tuple[dict, bool]:
+        text = str(raw or "").strip()
+        if not text:
+            return {}, False
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed, True
+        except Exception:
+            pass
+
+        fenced_match = re.fullmatch(
+            r"```(?:json)?\s*(.*?)\s*```",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if fenced_match:
+            text = str(fenced_match.group(1) or "").strip()
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    return parsed, True
+            except Exception:
+                pass
+
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            candidate = text[start:end + 1].strip()
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    return parsed, True
+            except Exception:
+                pass
+        return {}, False
     
     def probe(self, question: str) -> MiniSpecValueType:
         location_info = None

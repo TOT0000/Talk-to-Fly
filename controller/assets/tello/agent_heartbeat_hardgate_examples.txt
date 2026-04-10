@@ -1,5 +1,8 @@
 Example H1 (HardGate heartbeat: below threshold, continue)
 Task: Complete zone_A search.
+Mission original plan: lo('initial efficiency-first route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Current active plan: lo('initial efficiency-first route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Latest full replan response (if any): none
 Completed checkpoints: ["A4"]
 Unfinished checkpoints: ["A1","A2","A3"]
 UAV position: (4.5, 8.3, 1.2)
@@ -14,6 +17,9 @@ Response(JSON): {"response":"continue","reason":"The collision probability is be
 
 Example H2 (HardGate heartbeat: below threshold but proactive replan still allowed)
 Task: Complete zone_B search.
+Mission original plan: lo('initial plan');gc('B1');d(2.0);gc('B4');d(2.0);gc('B2');d(2.0);
+Current active plan: lo('initial plan');gc('B1');d(2.0);gc('B4');d(2.0);gc('B2');d(2.0);
+Latest full replan response (if any): none
 Completed checkpoints: ["B3"]
 Unfinished checkpoints: ["B1","B4","B2"]
 UAV position: (3.9, 8.4, 1.2)
@@ -28,6 +34,9 @@ Response(JSON): {"response":"full_replan_plan","reason":"The hard gate is not tr
 
 Example H3 (HardGate heartbeat: above threshold, must replan)
 Task: Complete zone_C search.
+Mission original plan: lo('initial efficiency-first route');gc('C1');d(2.0);gc('C3');d(2.0);gc('C4');d(2.0);gc('C5');d(2.0);
+Current active plan: lo('initial efficiency-first route');gc('C1');d(2.0);gc('C3');d(2.0);gc('C4');d(2.0);gc('C5');d(2.0);
+Latest full replan response (if any): none
 Completed checkpoints: ["C6","C2"]
 Unfinished checkpoints: ["C1","C3","C4","C5"]
 UAV position: (4.0, 8.9, 1.2)
@@ -42,6 +51,9 @@ Response(JSON): {"response":"full_replan_plan","reason":"The collision probabili
 
 Example H4 (HardGate heartbeat: above threshold, direct continuation is forbidden)
 Task: Complete zone_A search.
+Mission original plan: lo('initial efficiency-first route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Current active plan: lo('initial efficiency-first route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Latest full replan response (if any): none
 Completed checkpoints: ["A4"]
 Unfinished checkpoints: ["A1","A2","A3"]
 UAV position: (4.4, 8.5, 1.2)
@@ -53,3 +65,20 @@ Current executing plan: lo('initial efficiency-first route');gc('A2');d(2.0);gc(
 Queue progress: next checkpoint is A2
 Execution history: A4 completed successfully
 Response(JSON): {"response":"full_replan_plan","reason":"Because the collision probability is above 0.5, continue is not allowed under hard gate mode.","plan":"lo('hardgate threshold replan near worker_1');ml(0.5);tu(15);gc('A1');d(2.0);gc('A2');d(2.0);gc('A3');d(2.0);"}
+
+Example H5 (HardGate heartbeat: infer execution anomaly relative to the current active plan after a prior replan)
+Task: Complete zone_A search.
+Mission original plan: lo('initial efficiency-first route');gc('A2');d(2.0);gc('A4');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Current active plan: lo('post-risk replan after A2 blockage');ml(0.5);tu(12);gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Latest full replan response (if any): lo('post-risk replan after A2 blockage');ml(0.5);tu(12);gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Completed checkpoints: ["A4","A1"]
+Unfinished checkpoints: ["A2","A3"]
+UAV position: (4.2, 8.6, 1.2)
+UAV heading: 14.0 deg
+Worker positions: worker_1=(4.5,9.1), worker_2=(0.9,7.2), worker_3=(5.8,11.1)
+current_collision_probability: 0.270
+dominant risky worker: worker_1
+Current executing plan: lo('post-risk replan after A2 blockage');ml(0.5);tu(12);gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Queue progress: A1 has already been completed, but the earlier checkpoint A2 in the current active plan is still unfinished
+Execution history: the original A2 approach failed, A4 was completed before the replan, then a full replan was issued, and A1 was completed before A2
+Response(JSON): {"response":"full_replan_plan","reason":"The current progress indicates an execution anomaly relative to the current active plan, so all remaining unfinished checkpoints must be replanned coherently.","plan":"lo('hardgate anomaly-aware replan after post-replan A2 interruption');ml(0.6);tu(14);gc('A2');d(2.0);gc('A3');d(2.0);"}

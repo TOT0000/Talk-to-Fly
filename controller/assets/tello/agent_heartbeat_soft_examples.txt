@@ -1,5 +1,8 @@
 Example S1 (Soft heartbeat: continue current plan under low risk)
 Task: Complete zone_A search.
+Mission original plan: lo('initial efficiency-first route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Current active plan: lo('initial efficiency-first route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Latest full replan response (if any): none
 Completed checkpoints: ["A4"]
 Unfinished checkpoints: ["A1","A2","A3"]
 UAV position: (4.5, 8.3, 1.2)
@@ -14,6 +17,9 @@ Response(JSON): {"response":"continue","reason":"Risk is low and the remaining r
 
 Example S2 (Soft heartbeat: optional proactive replan under moderate geometric concern)
 Task: Complete zone_A search.
+Mission original plan: lo('initial efficiency-first route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Current active plan: lo('initial efficiency-first route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Latest full replan response (if any): none
 Completed checkpoints: ["A4"]
 Unfinished checkpoints: ["A1","A2","A3"]
 UAV position: (4.4, 8.5, 1.2)
@@ -28,6 +34,9 @@ Response(JSON): {"response":"full_replan_plan","reason":"The current route towar
 
 Example S3 (Soft heartbeat: high risk judged by LLM, replan immediately)
 Task: Complete zone_C search.
+Mission original plan: lo('initial efficiency-first route');gc('C1');d(2.0);gc('C3');d(2.0);gc('C4');d(2.0);gc('C5');d(2.0);
+Current active plan: lo('initial efficiency-first route');gc('C1');d(2.0);gc('C3');d(2.0);gc('C4');d(2.0);gc('C5');d(2.0);
+Latest full replan response (if any): none
 Completed checkpoints: ["C6","C2"]
 Unfinished checkpoints: ["C1","C3","C4","C5"]
 UAV position: (4.0, 8.9, 1.2)
@@ -42,6 +51,9 @@ Response(JSON): {"response":"full_replan_plan","reason":"The current approach co
 
 Example S4 (Soft heartbeat: continue even after prior failures if present state is acceptable)
 Task: Complete zone_B search.
+Mission original plan: lo('continuation plan');gc('B4');d(2.0);gc('B2');d(2.0);
+Current active plan: lo('continuation plan');gc('B4');d(2.0);gc('B2');d(2.0);
+Latest full replan response (if any): none
 Completed checkpoints: ["B3","B1"]
 Unfinished checkpoints: ["B4","B2"]
 UAV position: (3.8, 8.2, 1.2)
@@ -53,3 +65,20 @@ Current executing plan: lo('continuation plan');gc('B4');d(2.0);gc('B2');d(2.0);
 Queue progress: next checkpoint is B4
 Execution history: one earlier approach failed, then worker_2 moved away
 Response(JSON): {"response":"continue","reason":"The worker has moved away and the current continuation plan is acceptable.","plan":""}
+
+Example S5 (Soft heartbeat: infer execution anomaly relative to the current active plan after a prior replan)
+Task: Complete zone_A search.
+Mission original plan: lo('initial efficiency-first route');gc('A2');d(2.0);gc('A4');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Current active plan: lo('post-risk replan after A2 blockage');ml(0.4);tu(10);gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Latest full replan response (if any): lo('post-risk replan after A2 blockage');ml(0.4);tu(10);gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Completed checkpoints: ["A4","A1"]
+Unfinished checkpoints: ["A2","A3"]
+UAV position: (4.2, 8.6, 1.2)
+UAV heading: 14.0 deg
+Worker positions: worker_1=(4.5,9.1), worker_2=(0.9,7.2), worker_3=(5.8,11.1)
+current_collision_probability: 0.240
+dominant risky worker: worker_1
+Current executing plan: lo('post-risk replan after A2 blockage');ml(0.4);tu(10);gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Queue progress: A1 has already been completed, but the earlier checkpoint A2 in the current active plan is still unfinished
+Execution history: the original A2 approach failed, A4 was completed before the replan, then a full replan was issued, and A1 was completed before A2
+Response(JSON): {"response":"full_replan_plan","reason":"The progress is inconsistent with the current active plan after the last replan, so the remaining unfinished checkpoints should be replanned together.","plan":"lo('heartbeat anomaly-aware replan after post-replan A2 interruption');ml(0.5);tu(12);gc('A2');d(2.0);gc('A3');d(2.0);"}
