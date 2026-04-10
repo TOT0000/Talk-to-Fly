@@ -180,6 +180,19 @@ class TaskRunLogger:
         ws_debug.append(["run_id", "timestamp", "debug_json"])
         wb.save(self.excel_path)
 
+    def _load_workbook_resilient(self):
+        """Load workbook and auto-recreate it if missing/corrupted."""
+        if not self._enabled:
+            return None
+        try:
+            return load_workbook(self.excel_path)
+        except FileNotFoundError:
+            self._ensure_workbook()
+            return load_workbook(self.excel_path)
+        except BadZipFile:
+            self._ensure_workbook()
+            return load_workbook(self.excel_path)
+
     def _ensure_sheet_schema(self, wb, sheet_name: str, expected_columns):
         if sheet_name not in wb.sheetnames:
             ws = wb.create_sheet(sheet_name)
@@ -329,7 +342,9 @@ class TaskRunLogger:
             "safety_score": "" if safety_context is None else float(safety_context.safety_score),
             "details": self._json_text(details),
         }
-        wb = load_workbook(self.excel_path)
+        wb = self._load_workbook_resilient()
+        if wb is None:
+            return
         ws = wb[EVENTS_SHEET]
         ws.append([row[col] for col in EVENT_COLUMNS])
         wb.save(self.excel_path)
@@ -385,7 +400,9 @@ class TaskRunLogger:
             "run_status": active.run_status,
         }
 
-        wb = load_workbook(self.excel_path)
+        wb = self._load_workbook_resilient()
+        if wb is None:
+            return
         ws = wb[RUNS_SHEET]
         ws.append([row[col] for col in RUN_COLUMNS])
         debug_payload = {
