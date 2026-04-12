@@ -5,7 +5,7 @@ Scene:
 - UAV heading/yaw: 94.0 deg
 - dominant risky worker: worker_2
 - worker_2 near-pass geometry repeatedly blocks direct corridor to A1
-- current_collision_probability: 0.710
+- predicted_collision_probability: 0.710
 Task: [A] Reflect on previous step and update strategy memory.
 Last action: mb(0.8);ml(0.8);tu(20);d(0.4);
 Last result: partial risk reduction, direct corridor still blocked.

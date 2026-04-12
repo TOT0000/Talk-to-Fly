@@ -11,7 +11,7 @@ from .abs.robot_wrapper import RobotType
 from .benchmark_layout import CHECKPOINT_DWELL_SECONDS, CHECKPOINT_RADIUS_M, UAV_RADIUS_M, WORKER_RADIUS_M
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.50
+COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.30
 
 class LLMPlanner():
     def __init__(self, robot_type: RobotType):
@@ -113,8 +113,8 @@ class LLMPlanner():
             "Task: {task_description}\n"
             "Current subgoal: {current_subgoal}\n"
             "Remaining checkpoints: {remaining_checkpoints}\n"
-            "Current collision risk: {current_collision_risk}\n"
-            "Historical max collision risk: {historical_max_collision_risk}\n"
+            "Predicted collision risk: {predicted_collision_risk}\n"
+            ""
             "Dominant risky worker: {dominant_risky_worker}\n"
             "Per-worker collision risks: {per_worker_collision_risks}\n"
             "Recovery mode: {recovery_mode}\n"
@@ -176,8 +176,8 @@ class LLMPlanner():
             "Current mode: {current_mode}\n"
             "Current subgoal: {current_subgoal}\n"
             "Remaining checkpoints: {remaining_checkpoints}\n"
-            "Current collision risk: {current_collision_risk}\n"
-            "Historical max collision risk: {historical_max_collision_risk}\n"
+            "Predicted collision risk: {predicted_collision_risk}\n"
+            ""
             "Dominant risky worker: {dominant_risky_worker}\n"
             "Per-worker collision risks: {per_worker_collision_risks}\n"
             "Worker states summary: {worker_states_summary}\n"
@@ -224,7 +224,7 @@ class LLMPlanner():
             "Route decision from evaluator: {route_decision}\n"
             "Last action: {last_action}\n"
             "Last result: {last_result}\n"
-            "Current collision risk: {current_collision_risk}\n"
+            "Predicted collision risk: {predicted_collision_risk}\n"
             "Dominant risky worker: {dominant_risky_worker}\n"
             "Per-worker collision risks: {per_worker_collision_risks}\n"
             "Worker states summary: {worker_states_summary}\n"
@@ -320,7 +320,7 @@ class LLMPlanner():
             else:
                 worker_lines.append(f"- {label} bias-corrected estimated position: (n/a)")
 
-        current_collision_probability = 0.0 if safety_context is None else float(safety_context.current_collision_probability)
+        predicted_collision_probability = 0.0 if safety_context is None else float(safety_context.predicted_collision_probability)
         per_worker_probs = []
         if safety_context is not None:
             for row in (getattr(safety_context, "per_worker_collision_probabilities", []) or []):
@@ -392,7 +392,7 @@ class LLMPlanner():
             f"- checkpoint radius: {float(CHECKPOINT_RADIUS_M):.2f} m\n"
             "\n"
             "Risk context:\n"
-            f"- current collision probability: {current_collision_probability:.6f}\n"
+            f"- predicted collision probability: {predicted_collision_probability:.6f}\n"
             "- per-worker collision probabilities:\n"
             f"{per_worker_collision_probabilities_block}\n"
             f"- dominant risky worker: {dominant_worker}\n"
@@ -422,8 +422,8 @@ class LLMPlanner():
         active_checkpoint_ids: list[str],
         benchmark_progress: Optional[dict] = None,
     ) -> str:
-        current_collision_probability = 0.0 if safety_context is None else float(safety_context.current_collision_probability)
-        if current_collision_probability < float(COLLISION_PROBABILITY_REPLAN_THRESHOLD):
+        predicted_collision_probability = 0.0 if safety_context is None else float(safety_context.predicted_collision_probability)
+        if predicted_collision_probability < float(COLLISION_PROBABILITY_REPLAN_THRESHOLD):
             return ""
         if previous_plan is None and execution_history is None:
             return ""
@@ -464,8 +464,8 @@ class LLMPlanner():
             f"- remaining checkpoints: {remaining if remaining else ['(none)']}\n"
             f"- current target checkpoint: {current_target}\n"
             "- replan trigger reason:\n"
-            f"  - current collision probability >= {float(COLLISION_PROBABILITY_REPLAN_THRESHOLD):.2f} "
-            f"(current={current_collision_probability:.6f})\n"
+            f"  - predicted collision probability > {float(COLLISION_PROBABILITY_REPLAN_THRESHOLD):.2f} "
+            f"(current={predicted_collision_probability:.6f})\n"
             f"  - dominant risky worker = {dominant_worker}"
         )
 
@@ -524,7 +524,7 @@ class LLMPlanner():
         objective = dict(snapshot.get("active_objective_set") or {})
         active_checkpoint_ids = [str(v) for v in objective.get("active_checkpoint_ids", [])]
         benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
-        current_collision_probability = 0.0 if safety_context is None else float(safety_context.current_collision_probability)
+        predicted_collision_probability = 0.0 if safety_context is None else float(safety_context.predicted_collision_probability)
         is_replan_call = str(planning_stage or "initial").strip().lower() == "replan"
         replan_history_block = self._build_replan_history_block(
             task_description=task_description,
@@ -593,7 +593,7 @@ class LLMPlanner():
         hard_gate: bool = False,
     ) -> dict:
         safety_context = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
-        collision_probability = 0.0 if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
+        collision_probability = 0.0 if safety_context is None else float(getattr(safety_context, "predicted_collision_probability", 0.0))
         dominant_worker = "n/a" if safety_context is None else str(getattr(safety_context, "dominant_threat_id", "n/a"))
         benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
         completed = list(benchmark_progress.get("completed") or [])
@@ -605,7 +605,7 @@ class LLMPlanner():
                 "xy": tuple(worker.get("ui_xy") or worker.get("gt_xy") or (None, None)),
             })
         hard_gate_rule = (
-            "If current_collision_probability > 0.5, you MUST output response=full_replan_plan with a new complete MiniSpec plan."
+            "If predicted_collision_probability > 0.3, you MUST output response=full_replan_plan with a new complete MiniSpec plan."
             if hard_gate
             else "You may choose continue or full_replan_plan based on your judgment."
         )
@@ -618,7 +618,7 @@ class LLMPlanner():
         current_active_plan_text = str(current_active_plan or mission_original_plan_text)
         latest_full_replan_text = str(latest_full_replan_response or "none")
         prompt = (
-            "You are heartbeat monitor for UAV planning.\n\n"
+            "You are heartbeat monitor for UAV planning.\nHeartbeat cadence: every 5 seconds.\n\n"
             "Return strict JSON with keys: response, reason, plan.\n"
             "response must be one of: continue, full_replan_plan.\n"
             "If response=continue, set plan to empty string.\n\n"
@@ -626,7 +626,7 @@ class LLMPlanner():
             "Use the same skill abbreviations as TypeFly plans.\n\n"
             "Your decision must not rely on collision probability alone.\n"
             "You must jointly consider:\n"
-            "- current_collision_probability\n"
+            "- predicted_collision_probability\n"
             "- UAV position and heading\n"
             "- worker positions\n"
             "- geometric closeness between UAV and workers\n"
@@ -645,8 +645,8 @@ class LLMPlanner():
             "4. If no full replan has occurred, the current active plan may be the same as the mission original plan.\n\n"
             "Replan policy:\n"
             "1. If the current active plan is still safe and usable, return continue.\n"
-            "2. If collision probability is high, you should return full_replan_plan.\n"
-            "3. Even if collision probability is not high, if the UAV is geometrically too close to a worker, or if the current corridor is likely to create a risky close pass, you may still return full_replan_plan.\n"
+            "2. If predicted collision probability is high, you should return full_replan_plan.\n"
+            "3. Even if predicted collision probability is not high, if the UAV is geometrically too close to a worker, or if the current corridor is likely to create a risky close pass, you may still return full_replan_plan.\n"
             "4. When replanning, you may first use low-level motion or turning actions (mf / mb / ml / mr / tc / tu / d) to create spacing from the risky worker, and then continue planning the remaining unfinished checkpoints.\n"
             "5. The size of the detour must balance safety and efficiency:\n"
             "   - if risk is high or geometry is very close, use a larger and more conservative detour\n"
@@ -664,7 +664,7 @@ class LLMPlanner():
             f"UAV position: {snapshot.get('drone_est_bias_corrected') or snapshot.get('drone_est') or snapshot.get('drone_gt')}\n"
             f"UAV heading: {snapshot.get('drone_yaw_rad')}\n"
             f"Worker positions: {workers}\n"
-            f"current_collision_probability: {collision_probability:.6f}\n"
+            f"predicted_collision_probability: {collision_probability:.6f}\n"
             f"dominant risky worker: {dominant_worker}\n"
             f"Current executing plan: {current_plan}\n"
             f"Queue progress: {benchmark_progress}\n"
@@ -806,9 +806,8 @@ class LLMPlanner():
         task_description: str,
         current_subgoal: str | None,
         remaining_checkpoints: list[str],
-        current_collision_risk: float,
-        historical_max_collision_risk: float,
-        per_worker_collision_risks: dict[str, float],
+        predicted_collision_risk: float,
+                per_worker_collision_risks: dict[str, float],
         dominant_risky_worker: str | None,
         worker_states_summary: list[dict],
         last_action: str,
@@ -833,9 +832,8 @@ class LLMPlanner():
             task_description=str(task_description or ""),
             current_subgoal=str(current_subgoal or "None"),
             remaining_checkpoints=[str(v) for v in list(remaining_checkpoints or [])],
-            current_collision_risk=f"{float(current_collision_risk):.6f}",
-            historical_max_collision_risk=f"{float(historical_max_collision_risk):.6f}",
-            per_worker_collision_risks=str(dict(per_worker_collision_risks or {})),
+            predicted_collision_risk=f"{float(predicted_collision_risk):.6f}",
+                        per_worker_collision_risks=str(dict(per_worker_collision_risks or {})),
             dominant_risky_worker=str(dominant_risky_worker or "n/a"),
             recovery_mode=str(bool(recovery_mode)),
             recovery_reason=str(recovery_reason or "none"),
@@ -867,7 +865,7 @@ class LLMPlanner():
         route_decision: str,
         last_action: str,
         last_result: dict,
-        current_collision_risk: float,
+        predicted_collision_risk: float,
         per_worker_collision_risks: dict[str, float],
         dominant_risky_worker: str | None,
         worker_states_summary: list[dict],
@@ -893,7 +891,7 @@ class LLMPlanner():
             route_decision=str(route_decision or "continue"),
             last_action=str(last_action or ""),
             last_result=str(last_result or {}),
-            current_collision_risk=f"{float(current_collision_risk):.6f}",
+            predicted_collision_risk=f"{float(predicted_collision_risk):.6f}",
             dominant_risky_worker=str(dominant_risky_worker or "n/a"),
             per_worker_collision_risks=str(dict(per_worker_collision_risks or {})),
             worker_states_summary=str(list(worker_states_summary or [])[:3]),
@@ -934,9 +932,8 @@ class LLMPlanner():
         task_description: str,
         current_subgoal: str | None,
         remaining_checkpoints: list[str],
-        current_collision_risk: float,
-        historical_max_collision_risk: float,
-        per_worker_collision_risks: dict[str, float],
+        predicted_collision_risk: float,
+                per_worker_collision_risks: dict[str, float],
         dominant_risky_worker: str | None,
         worker_states_summary: list[dict],
         last_action: str,
@@ -977,9 +974,8 @@ class LLMPlanner():
             dwell_required_seconds=f"{float(dwell_required_seconds):.3f}",
             dwell_satisfied=bool(dwell_satisfied),
             remaining_checkpoints=[str(v) for v in list(remaining_checkpoints or [])],
-            current_collision_risk=f"{float(current_collision_risk):.6f}",
-            historical_max_collision_risk=f"{float(historical_max_collision_risk):.6f}",
-            per_worker_collision_risks=str(dict(per_worker_collision_risks or {})),
+            predicted_collision_risk=f"{float(predicted_collision_risk):.6f}",
+                        per_worker_collision_risks=str(dict(per_worker_collision_risks or {})),
             dominant_risky_worker=str(dominant_risky_worker or "n/a"),
             worker_states_summary=str(list(worker_states_summary or [])[:3]),
             last_action=str(last_action or ""),

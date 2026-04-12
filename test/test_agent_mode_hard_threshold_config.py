@@ -19,7 +19,7 @@ def test_hardgate_heartbeat_prompt_injects_hardgate_examples():
 
 
 def test_hardgate_prompt_has_extra_hard_gate_rule():
-    assert 'If current_collision_probability > 0.5, you MUST output response=full_replan_plan with a new complete MiniSpec plan.' in PLANNER_SOURCE
+    assert 'If predicted_collision_probability > 0.3, you MUST output response=full_replan_plan with a new complete MiniSpec plan.' in PLANNER_SOURCE
     assert 'You may choose continue or full_replan_plan based on your judgment.' in PLANNER_SOURCE
 
 
@@ -53,6 +53,7 @@ def test_examples_files_are_real_and_nonempty_and_referenced():
     assert 'Latest full replan response (if any):' in SOFT_EXAMPLES
     assert 'Agent heartbeat examples:' in PLANNER_SOURCE
     assert '{agent_heartbeat_examples}' in PLANNER_SOURCE
+    assert 'historical_max_collision_probability' not in PLANNER_SOURCE
 
 
 def test_heartbeat_parser_has_fenced_and_embedded_json_fallback_paths():

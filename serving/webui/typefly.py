@@ -322,9 +322,9 @@ class TypeFly:
 
             with gr.Row():
                 self.xy_plot = gr.Image(value=self.create_blank_plot("Local XY", "X (m)", "Y (m)", xlim=(0, 12), ylim=(0, 12), figsize=(5, 4)), label="Local XY", height=320)
-                self.x_plot = gr.Image(value=self.create_sequence_plot("worker_1 Collision Probability", "Sample", "P(collision)", xlim=(0, 1), ylim=(0, 1)), label="worker_1 P(collision)", height=320)
-                self.y_plot = gr.Image(value=self.create_sequence_plot("worker_2 Collision Probability", "Sample", "P(collision)", xlim=(0, 1), ylim=(0, 1)), label="worker_2 P(collision)", height=320)
-                self.z_plot = gr.Image(value=self.create_sequence_plot("worker_3 Collision Probability", "Sample", "P(collision)", xlim=(0, 1), ylim=(0, 1)), label="worker_3 P(collision)", height=320)
+                self.x_plot = gr.Image(value=self.create_sequence_plot("worker_1 3s Predicted Collision Probability", "Sample", "P(predicted collision)", xlim=(0, 1), ylim=(0, 1)), label="worker_1 P(predicted collision)", height=320)
+                self.y_plot = gr.Image(value=self.create_sequence_plot("worker_2 3s Predicted Collision Probability", "Sample", "P(predicted collision)", xlim=(0, 1), ylim=(0, 1)), label="worker_2 P(predicted collision)", height=320)
+                self.z_plot = gr.Image(value=self.create_sequence_plot("worker_3 3s Predicted Collision Probability", "Sample", "P(predicted collision)", xlim=(0, 1), ylim=(0, 1)), label="worker_3 P(predicted collision)", height=320)
 
             self.counter = gr.State(0)
             self.timer = Timer(value=0.08)
@@ -486,8 +486,8 @@ class TypeFly:
         normalized, report, runtime = self._apply_mode_and_collect(scenario_name)
         return (
             f"Scenario `{normalized}` applied. "
-            f"Live collision probability: {self._fmt_float(runtime.get('current_collision_probability'))} "
-            f"(historical_max={self._fmt_float(runtime.get('historical_max_collision_probability'))})"
+            f"Live 3s predicted collision probability: {self._fmt_float(runtime.get('predicted_collision_probability'))}"
+            f""
         )
 
     def apply_baseline_scene(self, scene_id):
@@ -615,8 +615,8 @@ class TypeFly:
         runtime = self.llm_controller.get_scenario_runtime_status()
         return (
             f"User moved to {self._fmt_vec(updated)} | "
-            f"live collision_probability={self._fmt_float(runtime.get('current_collision_probability'))} "
-            f"(historical_max={self._fmt_float(runtime.get('historical_max_collision_probability'))})"
+            f"live predicted_collision_probability={self._fmt_float(runtime.get('predicted_collision_probability'))} "
+            f""
         )
 
     def move_user_forward(self, step_m: float):
@@ -843,7 +843,7 @@ class TypeFly:
     def update_and_step(self, counter, show_error_ellipse=False, show_raw_estimate=False):
         snapshot = self.llm_controller.get_live_ui_snapshot()
         safety_context = snapshot.get("safety_context") if snapshot else None
-        ui_pc = None if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
+        ui_pc = None if safety_context is None else float(getattr(safety_context, "predicted_collision_probability", 0.0))
         if hasattr(self.llm_controller, "update_ui_collision_probability"):
             self.llm_controller.update_ui_collision_probability(ui_pc)
         self._sync_objective_state(snapshot)
@@ -980,7 +980,7 @@ class TypeFly:
         per_worker = {}
         if safety_context is not None:
             per_worker = {
-                str(row.get("id")): float(row.get("collision_probability", 0.0))
+                str(row.get("id")): float(row.get("predicted_collision_probability", 0.0))
                 for row in (getattr(safety_context, "per_worker_collision_probabilities", []) or [])
             }
         for worker_id in ("worker_1", "worker_2", "worker_3"):
@@ -1039,8 +1039,7 @@ class TypeFly:
             f"- current mode: {snapshot.get('execution_mode', 'Waiting')}",
             f"- active zones: {', '.join(sorted(z.replace('zone_', '') for z in self.objective_state.get('active_zone_ids', set())))}",
             f"- active checkpoints: {len(active_ids)}",
-            f"- current_collision_probability: {self._fmt_prob(getattr(safety_context, 'current_collision_probability', 0.0))}",
-            f"- historical_max_collision_probability: {self._fmt_prob(getattr(safety_context, 'historical_max_collision_probability', 0.0))}",
+            f"- predicted_collision_probability: {self._fmt_prob(getattr(safety_context, 'predicted_collision_probability', 0.0))}",
             f"- dominant risky worker: {getattr(safety_context, 'dominant_threat_id', 'n/a')}",
             f"- current target checkpoint: {target}",
             f"- checkpoint progress: {completed_active}/{total}",
@@ -1302,16 +1301,16 @@ class TypeFly:
                     markersize=3,
                     markerfacecolor=color,
                     markeredgecolor=color,
-                    label=f"{worker_id} P(collision)",
+                    label=f"{worker_id} P(predicted collision)",
                 )
             else:
-                ax.plot([], [], color=color, label=f"{worker_id} P(collision)")
+                ax.plot([], [], color=color, label=f"{worker_id} P(predicted collision)")
             max_len = max(len(history), 1)
             ax.set_xlim(0, max(max_len - 1, 1))
             ax.set_ylim(0.0, 1.0)
-            ax.set_title(f"{worker_id} Collision Probability")
+            ax.set_title(f"{worker_id} 3s Predicted Collision Probability")
             ax.set_xlabel("Sample")
-            ax.set_ylabel("P(collision)")
+            ax.set_ylabel("P(predicted collision)")
             ax.grid(True, linestyle='--', linewidth=0.5)
             ax.legend(fontsize=8)
 

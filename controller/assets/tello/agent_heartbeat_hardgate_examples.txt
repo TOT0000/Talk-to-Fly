@@ -8,7 +8,7 @@ Unfinished checkpoints: ["A1","A2","A3"]
 UAV position: (4.5, 8.3, 1.2)
 UAV heading: 10.0 deg
 Worker positions: worker_1=(1.1,11.0), worker_2=(0.9,7.2), worker_3=(5.8,11.1)
-current_collision_probability: 0.140
+predicted_collision_probability: 0.140
 dominant risky worker: worker_3
 Current executing plan: lo('initial efficiency-first route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
 Queue progress: next checkpoint is A2
@@ -25,7 +25,7 @@ Unfinished checkpoints: ["B1","B4","B2"]
 UAV position: (3.9, 8.4, 1.2)
 UAV heading: 20.0 deg
 Worker positions: worker_1=(1.0,11.1), worker_2=(3.4,8.9), worker_3=(5.9,11.2)
-current_collision_probability: 0.310
+predicted_collision_probability: 0.310
 dominant risky worker: worker_2
 Current executing plan: lo('initial plan');gc('B1');d(2.0);gc('B4');d(2.0);gc('B2');d(2.0);
 Queue progress: next checkpoint is B1, but worker_2 is drifting toward the route bottleneck
@@ -42,7 +42,7 @@ Unfinished checkpoints: ["C1","C3","C4","C5"]
 UAV position: (4.0, 8.9, 1.2)
 UAV heading: 95.0 deg
 Worker positions: worker_1=(4.2,9.6), worker_2=(1.0,7.3), worker_3=(5.9,11.0)
-current_collision_probability: 0.690
+predicted_collision_probability: 0.690
 dominant risky worker: worker_1
 Current executing plan: lo('initial efficiency-first route');gc('C1');d(2.0);gc('C3');d(2.0);gc('C4');d(2.0);gc('C5');d(2.0);
 Queue progress: next checkpoint is C1
@@ -59,12 +59,12 @@ Unfinished checkpoints: ["A1","A2","A3"]
 UAV position: (4.4, 8.5, 1.2)
 UAV heading: 12.0 deg
 Worker positions: worker_1=(4.6,8.9), worker_2=(0.9,7.2), worker_3=(5.8,11.1)
-current_collision_probability: 0.540
+predicted_collision_probability: 0.540
 dominant risky worker: worker_1
 Current executing plan: lo('initial efficiency-first route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
 Queue progress: next checkpoint is A2
 Execution history: A4 completed successfully
-Response(JSON): {"response":"full_replan_plan","reason":"Because the collision probability is above 0.5, continue is not allowed under hard gate mode.","plan":"lo('hardgate threshold replan near worker_1');ml(0.5);tu(15);gc('A1');d(2.0);gc('A2');d(2.0);gc('A3');d(2.0);"}
+Response(JSON): {"response":"full_replan_plan","reason":"Because predicted collision probability is above 0.3, continue is not allowed under hard gate mode.","plan":"lo('hardgate threshold replan near worker_1');ml(0.5);tu(15);gc('A1');d(2.0);gc('A2');d(2.0);gc('A3');d(2.0);"}
 
 Example H5 (HardGate heartbeat: infer execution anomaly relative to the current active plan after a prior replan)
 Task: Complete zone_A search.
@@ -76,7 +76,7 @@ Unfinished checkpoints: ["A2","A3"]
 UAV position: (4.2, 8.6, 1.2)
 UAV heading: 14.0 deg
 Worker positions: worker_1=(4.5,9.1), worker_2=(0.9,7.2), worker_3=(5.8,11.1)
-current_collision_probability: 0.270
+predicted_collision_probability: 0.270
 dominant risky worker: worker_1
 Current executing plan: lo('post-risk replan after A2 blockage');ml(0.5);tu(12);gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
 Queue progress: A1 has already been completed, but the earlier checkpoint A2 in the current active plan is still unfinished

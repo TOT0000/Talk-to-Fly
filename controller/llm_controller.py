@@ -48,6 +48,8 @@ from .benchmark_layout import (
     FULL_REPLAN_LIMIT,
     AGENT_HEARTBEAT_INTERVAL_SECONDS,
     TYPEFLY_REPLAN_THRESHOLD,
+    UAV_GC_NOMINAL_SPEED_MPS,
+    UAV_BODY_NOMINAL_SPEED_MPS,
     BENCHMARK_CHECKPOINT_ORDER,
     BENCHMARK_CHECKPOINTS_BY_ID,
     BENCHMARK_CHECKPOINTS,
@@ -56,9 +58,9 @@ from .benchmark_layout import (
 from .langgraph_agent import LangGraphOrchestrationRunner
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = TYPEFLY_REPLAN_THRESHOLD
-COLLISION_PROBABILITY_REPLAN_THRESHOLD = TYPEFLY_REPLAN_THRESHOLD
-COLLISION_PROBABILITY_REARM_THRESHOLD = TYPEFLY_REPLAN_THRESHOLD
+PREDICTED_COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = TYPEFLY_REPLAN_THRESHOLD
+PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD = TYPEFLY_REPLAN_THRESHOLD
+PREDICTED_COLLISION_PROBABILITY_REARM_THRESHOLD = TYPEFLY_REPLAN_THRESHOLD
 AUTO_REPLAN_PROTECTION_STATEMENTS = 2
 COLLISION_RISK_WORKER_IDS = ("worker_1", "worker_2", "worker_3")
 
@@ -381,7 +383,7 @@ class LLMController():
         checkpoint_id: str,
         *,
         timeout_seconds: float = 8.0,
-        risk_abort_threshold: float | None = COLLISION_PROBABILITY_REPLAN_THRESHOLD,
+        risk_abort_threshold: float | None = PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD,
     ) -> dict:
         checkpoint_key = str(checkpoint_id or "").upper()
         deadline = time.time() + max(0.2, float(timeout_seconds))
@@ -421,7 +423,7 @@ class LLMController():
                 snapshot = self.get_live_ui_snapshot()
                 progress = snapshot.get("benchmark_progress") if isinstance(snapshot, dict) else {}
                 safety = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
-                risk = None if safety is None else float(getattr(safety, "current_collision_probability", 0.0))
+                risk = None if safety is None else float(getattr(safety, "predicted_collision_probability", 0.0))
                 if (risk_abort_threshold is not None) and risk is not None and risk >= float(risk_abort_threshold):
                     return {
                         "event_type": "risk_abort",
@@ -984,7 +986,7 @@ class LLMController():
             progress_in_radius = bool(progress.get("in_radius", False))
             progress_target_match = bool(runtime_target == checkpoint.id)
             safety_context = snapshot.get("safety_context")
-            current_p = 0.0 if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
+            current_p = 0.0 if safety_context is None else float(getattr(safety_context, "predicted_collision_probability", 0.0))
             if self._maybe_run_agent_heartbeat():
                 stop_reason = f"agent_heartbeat_replan({self._pending_heartbeat_reason or 'llm'})"
                 print_t(f"[QUEUE] clearing remaining statements due to replan")
@@ -992,7 +994,7 @@ class LLMController():
             if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
                 print_t(
                     "[TYPEFLY-INTERRUPT] "
-                    f"collision_probability={current_p:.6f} > {COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}, "
+                    f"predicted_collision_probability={current_p:.6f} > {PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}, "
                     "aborting current execution"
                 )
                 stop_reason = f"collision_probability_high({current_p:.3f})"
@@ -1144,10 +1146,10 @@ class LLMController():
             "executed_gc_sequence": list(self._benchmark_executed_gc_sequence),
         }
 
-    def update_ui_collision_probability(self, current_collision_probability: Optional[float]):
-        if current_collision_probability is None:
+    def update_ui_collision_probability(self, predicted_collision_probability: Optional[float]):
+        if predicted_collision_probability is None:
             return
-        self.latest_ui_collision_probability = float(current_collision_probability)
+        self.latest_ui_collision_probability = float(predicted_collision_probability)
         self.latest_ui_collision_timestamp = time.time()
 
     def _on_statement_executed_for_replan(self):
@@ -1217,50 +1219,50 @@ class LLMController():
         print_t(f"[AGENT-HEARTBEAT] response=continue reason={reason}")
         return False
 
-    def _should_trigger_auto_replan(self, current_p: float, source: str) -> bool:
+    def _should_trigger_auto_replan(self, predicted_p: float, source: str) -> bool:
         if not self._is_threshold_replan_mode():
             return False
-        current_p = float(current_p)
+        predicted_p = float(predicted_p)
         if self.auto_replan_protection_remaining > 0:
-            if str(source) == "go_checkpoint_loop" and current_p >= COLLISION_PROBABILITY_REPLAN_THRESHOLD:
+            if str(source) == "go_checkpoint_loop" and predicted_p >= PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD:
                 print_debug(
                     "[REPLAN_DEBUG] "
-                    f"protection_window_bypassed_for_gc p={current_p:.6f} "
+                    f"protection_window_bypassed_for_gc p={predicted_p:.6f} "
                     f"remaining_statements={self.auto_replan_protection_remaining} source={source}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
             else:
                 print_debug(
                     "[REPLAN_DEBUG] "
-                    f"auto_replan_suppressed p={current_p:.6f} reason=protection_window "
+                    f"auto_replan_suppressed p={predicted_p:.6f} reason=protection_window "
                     f"remaining_statements={self.auto_replan_protection_remaining} source={source}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
                 return False
 
         if not self.auto_replan_armed:
-            if current_p <= COLLISION_PROBABILITY_REARM_THRESHOLD:
+            if predicted_p <= PREDICTED_COLLISION_PROBABILITY_REARM_THRESHOLD:
                 self.auto_replan_armed = True
                 print_debug(
                     "[REPLAN_DEBUG] "
-                    f"auto_replan_rearmed p={current_p:.6f} "
-                    f"threshold={COLLISION_PROBABILITY_REARM_THRESHOLD:.2f}",
+                    f"auto_replan_rearmed p={predicted_p:.6f} "
+                    f"threshold={PREDICTED_COLLISION_PROBABILITY_REARM_THRESHOLD:.2f}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
             else:
                 print_debug(
                     "[REPLAN_DEBUG] "
-                    f"auto_replan_suppressed p={current_p:.6f} reason=disarmed source={source}",
+                    f"auto_replan_suppressed p={predicted_p:.6f} reason=disarmed source={source}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
             return False
 
-        if current_p >= COLLISION_PROBABILITY_REPLAN_THRESHOLD:
+        if predicted_p >= PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD:
             self.auto_replan_armed = False
             print_debug(
                 "[REPLAN_DEBUG] "
-                f"auto_replan_triggered p={current_p:.6f} armed=True source={source} "
-                f"trigger_threshold={COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}",
+                f"auto_replan_triggered p={predicted_p:.6f} armed=True source={source} "
+                f"trigger_threshold={PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}",
                 env_var="TYPEFLY_VERBOSE_DEBUG",
             )
             print_debug("[REPLAN_DEBUG] auto_replan_armed=False", env_var="TYPEFLY_VERBOSE_DEBUG")
@@ -1326,7 +1328,7 @@ class LLMController():
         safety_context = snapshot.get("safety_context")
         if safety_context is None:
             return False, ""
-        callback_p = float(getattr(safety_context, "current_collision_probability", 0.0))
+        callback_p = float(getattr(safety_context, "predicted_collision_probability", 0.0))
         current_p = callback_p
         ui_p = self.latest_ui_collision_probability
         ui_is_fresh = bool(ui_p is not None and (time.time() - float(self.latest_ui_collision_timestamp)) <= 1.5)
@@ -1338,7 +1340,7 @@ class LLMController():
             ui_p_text = "n/a" if ui_p is None else f"{float(ui_p):.6f}"
             print_t(
                 "[TYPEFLY-INTERRUPT] "
-                f"collision_probability={current_p:.6f} > {COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}, "
+                f"predicted_collision_probability={current_p:.6f} > {PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}, "
                 "aborting current execution"
             )
             print_t(
@@ -1347,13 +1349,13 @@ class LLMController():
                 f"ui_pc={ui_p_text} "
                 f"callback_pc={callback_p:.6f} "
                 f"decision_pc={current_p:.6f} "
-                f"threshold={COLLISION_PROBABILITY_REPLAN_THRESHOLD:.6f} "
+                f"threshold={PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD:.6f} "
                 f"should_abort={should_abort} "
                 f"dominant={dominant}"
             )
             return True, (
-                f"current_collision_probability={current_p:.6f}>="
-                f"{COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}, dominant={dominant}"
+                f"predicted_collision_probability={current_p:.6f}>="
+                f"{PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}, dominant={dominant}"
             )
         return False, ""
 
@@ -1633,8 +1635,8 @@ class LLMController():
                     self._replan_attempts = replan_attempts
                     if replan_source == "collision_threshold_callback":
                         print_t(
-                            f"[TYPEFLY-INTERRUPT-REPLAN] triggered by collision_probability > "
-                            f"{COLLISION_PROBABILITY_REPLAN_THRESHOLD:.1f}"
+                            f"[TYPEFLY-INTERRUPT-REPLAN] triggered by predicted_collision_probability > "
+                            f"{PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD:.1f}"
                         )
                     print_t(f"[FULL-REPLAN] mode={selected_framework} count={replan_attempts}")
                     print_t(f"[REPLAN-COUNT] current={replan_attempts} limit={max_replan_attempts}")
@@ -1672,40 +1674,8 @@ class LLMController():
                         f"missing={missing_from_plan if missing_from_plan else '[]'}"
                     )
                 remaining_active = sorted(cid for cid in active_ids if cid not in completed_set)
-                if selected_framework == MODE_TYPEFLY_THRESHOLD_REPLAN and remaining_active:
-                    print_t(
-                        "[TYPEFLY-POSTCHECK] "
-                        f"queue finished but remaining checkpoints exist: {remaining_active}"
-                    )
-                    self.append_message(
-                        f"[LOG] [TYPEFLY-POSTCHECK] queue finished but remaining checkpoints exist: {remaining_active}"
-                    )
-                    if replan_attempts >= max_replan_attempts:
-                        print_t(f"[REPLAN-COUNT] current={replan_attempts} limit={max_replan_attempts}")
-                        print_t("[TYPEFLY-POSTCHECK-REPLAN] skip auto replan because replan cap reached")
-                        raise RuntimeError(
-                            "Post-check auto replan blocked by replan cap with remaining checkpoints: "
-                            f"{remaining_active}"
-                        )
-                    print_t(
-                        "[TYPEFLY-POSTCHECK-REPLAN] "
-                        f"remaining checkpoints after previous replan: {remaining_active}"
-                    )
-                    print_t("[TYPEFLY-POSTCHECK-REPLAN] invoking automatic replan for unfinished checkpoints")
-                    replan_attempts += 1
-                    self._replan_attempts = replan_attempts
-                    print_t(f"[FULL-REPLAN] mode={selected_framework} count={replan_attempts}")
-                    print_t(f"[REPLAN-COUNT] current={replan_attempts} limit={max_replan_attempts}")
-                    self.task_run_logger.update_execution_info(
-                        execution_success=False,
-                        failure_reason="post_queue_unfinished_checkpoints_auto_replan",
-                        task_completed=False,
-                    )
-                    self.append_message(
-                        f"[LOG] [TYPEFLY-POSTCHECK-REPLAN] invoking automatic replan for unfinished checkpoints: {remaining_active}"
-                    )
-                    self.execution_mode = "Planning"
-                    continue
+                # TypeFly post-check auto repair removed by design:
+                # completion mismatch is logged only; no queue-finished auto replan.
             except Exception as e:
                 self.execution_mode = "Yielding"
                 error_message = f"[C] Error: {e}"
@@ -1897,8 +1867,7 @@ class LLMController():
             "selected_mode": None if report is None else report.selected_mode,
             "target_drone_gt": None if report is None else report.target_drone_position_3d,
             "actual_drone_gt": snapshot.get("drone_gt") if snapshot else None,
-            "current_collision_probability": None if safety_context is None else float(safety_context.current_collision_probability),
-            "historical_max_collision_probability": None if safety_context is None else float(safety_context.historical_max_collision_probability),
+            "predicted_collision_probability": None if safety_context is None else float(safety_context.predicted_collision_probability),
             "safety_score": None if safety_context is None else float(safety_context.safety_score),
             "envelope_gap_m": None if safety_context is None else float(safety_context.envelope_gap_m),
             "uncertainty_scale_m": None if safety_context is None else float(safety_context.uncertainty_scale_m),
@@ -1930,24 +1899,14 @@ class LLMController():
             f"  uncertainty={safety_context.uncertainty_scale_m:.3f}\n"
             f"  overlap={safety_context.envelopes_overlap}\n"
             f"  score={safety_context.safety_score:.3f}\n"
-            f"  current_collision_probability={safety_context.current_collision_probability:.6f}\n"
-            f"  historical_max_collision_probability={safety_context.historical_max_collision_probability:.6f}\n"
+            f"  current_instantaneous_collision_probability={safety_context.current_collision_probability:.6f}\n"
+            f"  predicted_collision_probability={safety_context.predicted_collision_probability:.6f}\n"
             f"  standoff={safety_context.preferred_standoff_m:.3f}\n"
             f"  dominant_threat={safety_context.dominant_threat_type}:{safety_context.dominant_threat_id}\n"
             f"  dominant_gap={safety_context.dominant_gap_m:.3f}\n"
             f"  dominant_uncertainty={safety_context.dominant_uncertainty_scale_m:.3f}\n"
             f"  reasons={safety_context.reason_tags}"
         )
-
-    @staticmethod
-    def _ema_smooth_xy(previous_xy: Optional[Tuple[float, float]], current_xy: Tuple[float, float], beta: float) -> Tuple[float, float]:
-        beta = float(np.clip(float(beta), 1e-6, 1.0))
-        current = np.asarray(current_xy, dtype=float).reshape(2)
-        if previous_xy is None:
-            return float(current[0]), float(current[1])
-        prev = np.asarray(previous_xy, dtype=float).reshape(2)
-        smoothed = ((1.0 - beta) * prev) + (beta * current)
-        return float(smoothed[0]), float(smoothed[1])
 
     def _simulate_obstacle_returns(self, obstacle_states, now: float):
         _ = now
@@ -1976,16 +1935,8 @@ class LLMController():
             noise_rng = np.random.default_rng((hash(worker_id) ^ int(time.time() * 10.0)) & 0xFFFFFFFF)
             measured_x = float(gt_x + bias_x + noise_rng.normal(0.0, sigma_x))
             measured_y = float(gt_y + bias_y + noise_rng.normal(0.0, sigma_y))
-            if loc_state is None:
-                est_x = measured_x
-                est_y = measured_y
-            else:
-                beta = float(os.getenv("COLLISION_WORKER_SMOOTHING_BETA", "0.20"))
-                est_x, est_y = self._ema_smooth_xy(
-                    previous_xy=(float(loc_state["est_x"]), float(loc_state["est_y"])),
-                    current_xy=(measured_x, measured_y),
-                    beta=beta,
-                )
+            est_x = measured_x
+            est_y = measured_y
             self.manual_worker_localization_state[worker_id] = {
                 "est_x": est_x,
                 "est_y": est_y,
@@ -2018,6 +1969,35 @@ class LLMController():
                 packets.append((worker_id, obs.localization_packet))
         return packets
 
+    def _build_uav_prediction_velocity_hint(self, drone_xy, drone_yaw_rad: float) -> np.ndarray:
+        if drone_xy is None:
+            return np.zeros(2, dtype=float)
+        progress = dict(self.latest_benchmark_progress or {})
+        current_target = progress.get("current_target")
+        if current_target and str(current_target).upper() in BENCHMARK_CHECKPOINTS_BY_ID:
+            cp = BENCHMARK_CHECKPOINTS_BY_ID[str(current_target).upper()]
+            delta = np.array([float(cp.x) - float(drone_xy[0]), float(cp.y) - float(drone_xy[1])], dtype=float)
+            norm = float(np.linalg.norm(delta))
+            if norm > 1e-6:
+                return (delta / norm) * float(UAV_GC_NOMINAL_SPEED_MPS)
+        plan_text = str(self.current_plan or "").strip().lower()
+        if plan_text.startswith("mf("):
+            body = np.array([1.0, 0.0], dtype=float)
+        elif plan_text.startswith("mb("):
+            body = np.array([-1.0, 0.0], dtype=float)
+        elif plan_text.startswith("ml("):
+            body = np.array([0.0, 1.0], dtype=float)
+        elif plan_text.startswith("mr("):
+            body = np.array([0.0, -1.0], dtype=float)
+        else:
+            body = np.array([0.0, 0.0], dtype=float)
+        if float(np.linalg.norm(body)) <= 1e-6:
+            return np.zeros(2, dtype=float)
+        c = math.cos(float(drone_yaw_rad))
+        s = math.sin(float(drone_yaw_rad))
+        rot = np.array([[c, -s], [s, c]], dtype=float)
+        return (rot @ body) * float(UAV_BODY_NOMINAL_SPEED_MPS)
+
     def _build_dominant_threat_context(
         self,
         safety_state,
@@ -2037,6 +2017,10 @@ class LLMController():
             worker_packets=worker_packets,
             now=now,
             safety_state=safety_state,
+            uav_velocity_hint_xy=self._build_uav_prediction_velocity_hint(
+                drone_xy=np.asarray(safety_state.drone_packet.estimated_position_3d[:2], dtype=float),
+                drone_yaw_rad=self._get_drone_yaw_rad(),
+            ),
         )
 
         task_points_summary = []
@@ -2114,11 +2098,16 @@ class LLMController():
         obstacle_states = self._simulate_obstacle_returns(obstacle_states_generated, now=now)
         if safety_state is not None:
             worker_packets = self._build_collision_worker_packets_from_obstacles(obstacle_states)
+            uav_hint = self._build_uav_prediction_velocity_hint(
+                drone_xy=np.asarray(safety_state.drone_packet.estimated_position_3d[:2], dtype=float),
+                drone_yaw_rad=self._get_drone_yaw_rad(),
+            )
             safety_context = self.safety_assessor.build_from_packets(
                 drone_packet=safety_state.drone_packet,
                 worker_packets=worker_packets,
                 now=now,
                 safety_state=safety_state,
+                uav_velocity_hint_xy=uav_hint,
             )
         candidate_targets = []
         for point in self.get_baseline_scene().task_points:
@@ -2162,6 +2151,10 @@ class LLMController():
                     worker_packets=worker_packets,
                     now=now,
                     safety_state=None,
+                    uav_velocity_hint_xy=self._build_uav_prediction_velocity_hint(
+                        drone_xy=np.asarray(drone_packet.estimated_position_3d[:2], dtype=float),
+                        drone_yaw_rad=self._get_drone_yaw_rad(),
+                    ),
                 )
         drone_bias_xy = None if drone_packet is None else tuple(float(v) for v in drone_packet.b_xy[:2])
         drone_corrected = None if drone_est is None else (
@@ -2241,7 +2234,7 @@ class LLMController():
                 f"drone_center={tuple(float(v) for v in safety_state.drone_center_xy)} "
                 f"drone_radius={safety_state.drone_radius_along_user_direction:.6f} "
                 f"score={safety_context.safety_score:.6f} "
-                f"current_p={safety_context.current_collision_probability:.6f} "
+                f"current_p={safety_context.predicted_collision_probability:.6f} "
                 f"reason_tags={safety_context.reason_tags}",
                 env_var="TYPEFLY_VERBOSE_DEBUG",
             )
@@ -2290,7 +2283,7 @@ class LLMController():
             )
         lines.append(
             "  "
-            + f"scene_current_collision_probability={float(getattr(safety_context, 'current_collision_probability', 0.0)):.6f}"
+            + f"scene_predicted_collision_probability={float(getattr(safety_context, 'predicted_collision_probability', 0.0)):.6f}"
         )
         print_debug("\n".join(lines), env_var="TYPEFLY_VERBOSE_DEBUG")
 
@@ -2376,7 +2369,7 @@ class LLMController():
         )
         risk_high = bool(
             safety_context is not None
-            and float(safety_context.current_collision_probability) >= COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD
+            and float(safety_context.predicted_collision_probability) >= PREDICTED_COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD
         )
         direct_go_to = bool(path_eval.path_clear and not risk_high)
         if direct_go_to:
@@ -2436,7 +2429,7 @@ class LLMController():
         scene = self.get_baseline_scene()
         risk_high = bool(
             safety_context is not None
-            and float(safety_context.current_collision_probability) >= COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD
+            and float(safety_context.predicted_collision_probability) >= PREDICTED_COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD
         )
         user_radius = max(0.45, float(getattr(safety_context, "uncertainty_scale_m", 1.0)) * 0.5)
         expectations = build_scene_expectations(
@@ -2460,7 +2453,7 @@ class LLMController():
     def get_all_scene_expectation_summary(self, safety_context=None):
         risk_high = bool(
             safety_context is not None
-            and float(safety_context.current_collision_probability) >= COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD
+            and float(safety_context.predicted_collision_probability) >= PREDICTED_COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD
         )
         user_radius = max(0.45, float(getattr(safety_context, "uncertainty_scale_m", 1.0)) * 0.5)
         expectations = build_all_scene_expectations(
