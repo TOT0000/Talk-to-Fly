@@ -186,7 +186,7 @@ def _build_minimal_controller_for_postcheck(plans, completed_after_exec, mode="t
     return controller, planner_calls, queued_programs, displayed_messages
 
 
-def test_threshold_mode_postqueue_unfinished_triggers_auto_replan(monkeypatch):
+def test_threshold_mode_postqueue_unfinished_does_not_trigger_auto_replan(monkeypatch):
     controller, planner_calls, queued_programs, displayed_messages = _build_minimal_controller_for_postcheck(
         plans=["gc('A1');", "gc('A2');"],
         completed_after_exec=[["A1"], ["A1", "A2"]],
@@ -196,12 +196,12 @@ def test_threshold_mode_postqueue_unfinished_triggers_auto_replan(monkeypatch):
     monkeypatch.setattr("controller.llm_controller.AUTO_REPLAN_PROTECTION_STATEMENTS", 0)
     controller.execute_task_description("run mission", framework_mode="typefly-threshold-replan")
 
-    assert len(planner_calls) == 2
-    assert queued_programs == ["gc('A1');", "gc('A2');"]
-    assert any("TYPEFLY-POSTCHECK-REPLAN" in str(msg) for msg in displayed_messages)
+    assert len(planner_calls) == 1
+    assert queued_programs == ["gc('A1');"]
+    assert not any("TYPEFLY-POSTCHECK-REPLAN" in str(msg) for msg in displayed_messages)
 
 
-def test_threshold_mode_postqueue_replan_repeats_until_completed(monkeypatch):
+def test_threshold_mode_no_postqueue_retry_loop(monkeypatch):
     controller, planner_calls, queued_programs, _ = _build_minimal_controller_for_postcheck(
         plans=["gc('A1');", "gc('A1');", "gc('A2');"],
         completed_after_exec=[[], ["A1"], ["A1", "A2"]],
@@ -210,24 +210,8 @@ def test_threshold_mode_postqueue_replan_repeats_until_completed(monkeypatch):
     )
     monkeypatch.setattr("controller.llm_controller.AUTO_REPLAN_PROTECTION_STATEMENTS", 0)
     controller.execute_task_description("run mission", framework_mode="typefly-threshold-replan")
-
-    assert len(planner_calls) == 3
-    assert len(queued_programs) == 3
-
-
-def test_threshold_mode_postqueue_replan_stops_at_cap(monkeypatch):
-    controller, planner_calls, queued_programs, displayed_messages = _build_minimal_controller_for_postcheck(
-        plans=["gc('A1');", "gc('A1');", "gc('A1');"],
-        completed_after_exec=[[], [], []],
-        mode="typefly-threshold-replan",
-        replan_limit=1,
-    )
-    monkeypatch.setattr("controller.llm_controller.AUTO_REPLAN_PROTECTION_STATEMENTS", 0)
-    controller.execute_task_description("run mission", framework_mode="typefly-threshold-replan")
-
-    assert len(planner_calls) == 2
-    assert len(queued_programs) == 2
-    assert any("Error: Post-check auto replan blocked by replan cap" in str(msg) for msg in displayed_messages)
+    assert len(planner_calls) == 1
+    assert len(queued_programs) == 1
 
 
 def test_postqueue_auto_replan_not_applied_to_agent_modes(monkeypatch):

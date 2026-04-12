@@ -16,10 +16,10 @@ Continuation context:
 {replan_history_block}
 
 TypeFly replan requirements:
-- Explicit replan threshold = 0.5.
-- If current_collision_probability < 0.5 and geometry is clear, prioritize checkpoint progress and efficiency.
+- Explicit replan threshold = 0.3.
+- If predicted_collision_probability < 0.3 and geometry is clear, prioritize checkpoint progress and efficiency.
 - Even below threshold, still evaluate close-pass risk via worker geometry, UAV heading, and radii.
-- If current_collision_probability >= 0.5, or geometry is clearly unsafe:
+- If predicted_collision_probability > 0.3, or geometry is clearly unsafe:
   - first output one or more conservative low-level avoidance actions,
   - do not begin with direct gc(...),
   - choose avoidance direction with UAV heading awareness,

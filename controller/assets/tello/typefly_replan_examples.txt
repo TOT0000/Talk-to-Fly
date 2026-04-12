@@ -9,7 +9,7 @@ Scene:
 - UAV heading/yaw: 95.0 deg
 - workers: worker_1=(1.1,11.1), worker_2=(3.7,9.5), worker_3=(5.8,11.2)
 - dominant risky worker: worker_2
-- current_collision_probability: 0.740
+- predicted_collision_probability: 0.740
 Task: [A] Replan and finish remaining checkpoints in zone_A.
 Response: lo('high risk conservative detour first');mb(0.9);ml(1.0);tu(25);d(0.4);gc('A1');d(2.0);gc('A3');d(2.0);
 
@@ -24,6 +24,6 @@ Scene:
 - UAV heading/yaw: 10.0 deg
 - workers: worker_1=(4.8,9.0), worker_2=(0.9,7.3), worker_3=(5.9,11.2)
 - dominant risky worker: worker_1
-- current_collision_probability: 0.320
+- predicted_collision_probability: 0.320
 Task: [A] Continue mission and finish remaining checkpoints in zone_A.
 Response: lo('mild risk small preventive shift');ml(0.3);tu(8);gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
