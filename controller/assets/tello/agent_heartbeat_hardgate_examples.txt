@@ -50,7 +50,7 @@ dominant risky worker: worker_1
 Current executing plan: lo('initial efficiency-first route');gc('C1');d(2.0);gc('C3');d(2.0);gc('C4');d(2.0);gc('C5');d(2.0);
 Queue progress: next checkpoint is C1
 Execution history: C6 completed, C2 completed
-Response(JSON): {"response":"full_replan_plan","reason":"The predicted future collision probability exceeds 0.3, so a replan is mandatory even though only one full replan remains.","plan":"lo('hardgate replan after future collision threshold exceeded');mb(0.8);ml(0.8);tu(20);d(0.4);gc('C3');d(2.0);gc('C4');d(2.0);gc('C5');d(2.0);gc('C1');d(2.0);"}
+Response(JSON): {"response":"full_replan_plan","reason":"The predicted future collision probability exceeds 0.5, so a replan is mandatory even though only one full replan remains.","plan":"lo('hardgate replan after future collision threshold exceeded');mb(0.8);ml(0.8);tu(20);d(0.4);gc('C3');d(2.0);gc('C4');d(2.0);gc('C5');d(2.0);gc('C1');d(2.0);"}
 
 Example H4 (HardGate heartbeat: above threshold, direct continuation is forbidden)
 Task: Complete zone_A search.
@@ -68,7 +68,7 @@ dominant risky worker: worker_1
 Current executing plan: lo('initial efficiency-first route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
 Queue progress: next checkpoint is A2
 Execution history: A4 completed successfully
-Response(JSON): {"response":"full_replan_plan","reason":"Because predicted future collision probability is above 0.3, continue is not allowed under hard gate mode.","plan":"lo('hardgate threshold replan near worker_1');ml(0.5);tu(15);gc('A1');d(2.0);gc('A2');d(2.0);gc('A3');d(2.0);"}
+Response(JSON): {"response":"full_replan_plan","reason":"Because predicted future collision probability is above 0.5, continue is not allowed under hard gate mode.","plan":"lo('hardgate threshold replan near worker_1');ml(0.5);tu(15);gc('A1');d(2.0);gc('A2');d(2.0);gc('A3');d(2.0);"}
 
 Example H5 (HardGate heartbeat: below threshold and budget is limited, so avoid unnecessary replan)
 Task: Complete zone_B search.
