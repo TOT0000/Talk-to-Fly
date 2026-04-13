@@ -24,6 +24,6 @@ Scene:
 - UAV heading/yaw: 10.0 deg
 - workers: worker_1=(4.8,9.0), worker_2=(0.9,7.3), worker_3=(5.9,11.2)
 - dominant risky worker: worker_1
-- predicted_collision_probability over the next 3 seconds: 0.320
+- predicted_collision_probability over the next 3 seconds: 0.520
 Task: [A] Continue mission and finish remaining checkpoints in zone_A.
 Response: lo('mild future risk small preventive shift');ml(0.3);tu(8);gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
