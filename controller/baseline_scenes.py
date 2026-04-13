@@ -231,6 +231,14 @@ def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float) -> List
     for idx, obstacle in enumerate(scene.obstacles):
         if scene.id == "SCENE_MANUAL_WORKER_CONTROL":
             gt_x, gt_y = (float(obstacle.gt_x), float(obstacle.gt_y))
+        elif scene.id == "SCENE_FIXED_W13_MANUAL_W2":
+            if str(obstacle.id) == "worker_1":
+                gt_x, gt_y = (3.0, 4.0)
+            elif str(obstacle.id) == "worker_3":
+                gt_x, gt_y = (7.0, 3.7)
+            else:
+                # Keep worker_2 exactly at the manual-control scene default/static location.
+                gt_x, gt_y = (float(obstacle.gt_x), float(obstacle.gt_y))
         else:
             gt_x, gt_y = _scripted_worker_gt_xy(obstacle.id, now_s, fallback_xy=(obstacle.gt_x, obstacle.gt_y))
         gt = np.asarray([float(gt_x), float(gt_y), 0.0], dtype=float)
@@ -510,6 +518,24 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
             StaticObstacle("worker_3", 2.0, 3.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
         ),
         notes="Manual worker-control scene: worker scripted motion is disabled and UI controls drive worker poses.",
+    ),
+    "SCENE_FIXED_W13_MANUAL_W2": BaselineScene(
+        id="SCENE_FIXED_W13_MANUAL_W2",
+        drone_initial_pose=(1.0, 1.0, -1.5),
+        drone_initial_yaw_rad=0.0,
+        user_position=(10.8, 10.2, 0.0),
+        user_initial_yaw_rad=-2.0,
+        task_points=(
+            TaskPoint("A", 1.4, 10.6, -1.5),
+            TaskPoint("B", 7.4, 10.6, -1.5),
+            TaskPoint("C", 1.7, 4.2, -1.5),
+        ),
+        obstacles=(
+            StaticObstacle("worker_1", 3.0, 4.0, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("worker_2", 8.5, 7.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("worker_3", 7.0, 3.7, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+        ),
+        notes="worker_1 fixed at (3,4), worker_3 fixed at (7,3.7); worker_2 stays at manual-control default location.",
     ),
     "SCENE_1_CLEAR_PATH": BaselineScene(
         id="SCENE_1_CLEAR_PATH",

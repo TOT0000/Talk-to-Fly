@@ -177,7 +177,13 @@ class TypeFly:
                         value=MODE_TYPEFLY_ONESHOT,
                         label="Execution Mode",
                     )
-                    baseline_scene_choices = [sid for sid in ("SCENE_BENCHMARK_DEMO", "SCENE_MANUAL_WORKER_CONTROL") if sid in BASELINE_SCENES]
+                    baseline_scene_choices = [
+                        sid for sid in (
+                            "SCENE_BENCHMARK_DEMO",
+                            "SCENE_MANUAL_WORKER_CONTROL",
+                            "SCENE_FIXED_W13_MANUAL_W2",
+                        ) if sid in BASELINE_SCENES
+                    ]
                     self.baseline_scene_selector = gr.Dropdown(
                         choices=baseline_scene_choices,
                         value=normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_BENCHMARK_DEMO")),
