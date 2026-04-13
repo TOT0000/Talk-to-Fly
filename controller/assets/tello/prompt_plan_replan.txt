@@ -6,7 +6,7 @@ This call is TypeFly REPLAN / CONTINUATION planning, not a fresh plan from zero.
 Use continuation context, preserve completed progress, and re-optimize the remaining route safely.
 
 A TypeFly replan call means a potential collision event is predicted within the next 3 seconds.
-This trigger occurs because predicted_collision_probability has reached or exceeded 0.5.
+This trigger occurs because predicted_collision_probability has reached or exceeded 0.7.
 
 Continuation context:
 - previous plan: {previous_plan}
@@ -19,7 +19,7 @@ Continuation context:
 {replan_history_block}
 
 TypeFly replan requirements:
-- Explicit replan threshold = 0.5.
+- Explicit replan threshold = 0.7.
 - The predicted collision probability refers to the collision risk over the next 3 seconds, not only the current instant.
 - Since replan has already been triggered, first determine what preventive avoidance behavior is needed from the predicted collision probability and the current UAV-worker geometry.
 - Choose avoidance amplitude according to severity.

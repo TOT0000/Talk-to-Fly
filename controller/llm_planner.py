@@ -11,7 +11,7 @@ from .abs.robot_wrapper import RobotType
 from .benchmark_layout import CHECKPOINT_DWELL_SECONDS, CHECKPOINT_RADIUS_M, UAV_RADIUS_M, WORKER_RADIUS_M
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.50
+COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.70
 
 class LLMPlanner():
     def __init__(self, robot_type: RobotType):
@@ -609,7 +609,7 @@ class LLMPlanner():
                 "xy": tuple(worker.get("ui_xy") or worker.get("gt_xy") or (None, None)),
             })
         hard_gate_rule = (
-            "If predicted_collision_probability > 0.5, you MUST output response=full_replan_plan with a new complete MiniSpec plan."
+            "If predicted_collision_probability > 0.7, you MUST output response=full_replan_plan with a new complete MiniSpec plan."
             if hard_gate
             else "You may choose continue or full_replan_plan based on your judgment."
         )
