@@ -349,6 +349,57 @@ def test_agent_heartbeat_prompt_receives_replan_response_history():
     assert int(planner_calls[0]["full_replan_count"]) == 3
 
 
+def test_threshold_mode_does_not_interrupt_when_replan_limit_reached():
+    pytest.importorskip("PIL")
+    from controller.llm_controller import LLMController
+
+    controller = LLMController.__new__(LLMController)
+    controller.framework_mode = "typefly-threshold-replan"
+    controller.replan_limit = 5
+    controller._replan_attempts = 5
+    controller.auto_replan_armed = True
+    controller.auto_replan_protection_remaining = 0
+
+    should_replan = controller._should_trigger_auto_replan(0.95, source="interpreter_callback")
+
+    assert should_replan is False
+    assert controller.auto_replan_armed is True
+
+
+def test_agent_heartbeat_stops_requesting_replan_after_limit_reached():
+    pytest.importorskip("PIL")
+    from controller.llm_controller import LLMController
+
+    controller = LLMController.__new__(LLMController)
+    planner_calls = []
+
+    controller.framework_mode = "agent-heartbeat-soft"
+    controller._pending_heartbeat_replan_plan = None
+    controller._pending_heartbeat_reason = ""
+    controller.last_heartbeat_ts = 0.0
+    controller.replan_limit = 5
+    controller._replan_attempts = 5
+    controller.current_task_description = "task"
+    controller.execution_history = "history"
+    controller.current_plan = "gc('A1');"
+    controller.append_message = lambda _msg: None
+    controller.get_live_ui_snapshot = lambda: {}
+    controller._is_active_objective_completed = lambda: False
+    controller._pending_execution_statement_count = lambda: 1
+    controller.planner = SimpleNamespace(
+        plan_agent_heartbeat=lambda **kwargs: planner_calls.append(kwargs) or {
+            "response": "full_replan_plan",
+            "reason": "geometry_risk",
+            "plan": "gc('A2');",
+        }
+    )
+
+    triggered = controller._maybe_run_agent_heartbeat(force=True)
+
+    assert triggered is False
+    assert len(planner_calls) == 0
+
+
 def test_current_active_plan_matches_mission_original_when_no_full_replan(monkeypatch):
     pytest.importorskip("PIL")
     from controller.llm_controller import LLMController

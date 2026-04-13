@@ -1255,6 +1255,14 @@ class LLMController():
     def _should_trigger_auto_replan(self, predicted_p: float, source: str) -> bool:
         if not self._is_threshold_replan_mode():
             return False
+        if int(getattr(self, "_replan_attempts", 0)) >= int(self.replan_limit):
+            print_debug(
+                "[REPLAN_DEBUG] "
+                f"auto_replan_suppressed p={float(predicted_p):.6f} reason=max_replan_attempts_reached "
+                f"current={int(getattr(self, '_replan_attempts', 0))} limit={int(self.replan_limit)} source={source}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
+            )
+            return False
         predicted_p = float(predicted_p)
         if self.auto_replan_protection_remaining > 0:
             if str(source) == "go_checkpoint_loop" and predicted_p >= PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD:
