@@ -9,6 +9,7 @@ from .collision_probability_core import CollisionEntity2D, CollisionProbabilityC
 from .gcs_safety_state import GcsSafetyStateService
 from .safety_context import SafetyContext
 from .benchmark_layout import PREDICTION_HORIZON_SECONDS, PREDICTION_DT_SECONDS
+from .utils import print_debug
 
 
 class GcsSafetyAssessmentService:
@@ -21,6 +22,8 @@ class GcsSafetyAssessmentService:
         self._risk_worker_ids = ("worker_1", "worker_2", "worker_3")
         self._last_uav_samples: list[tuple[float, np.ndarray]] = []
         self._last_worker_samples: dict[str, list[tuple[float, np.ndarray]]] = {}
+        self._uav_process_noise_var_m2ps = float(os.getenv("TYPEFLY_UAV_PROCESS_NOISE_VAR_M2PS", "0.01"))
+        self._worker_process_noise_var_m2ps = float(os.getenv("TYPEFLY_WORKER_PROCESS_NOISE_VAR_M2PS", "0.015"))
 
     def _build_context_from_scene_summary(
         self,
@@ -79,18 +82,57 @@ class GcsSafetyAssessmentService:
         dt = max(1e-3, float(t1 - t0))
         return (np.asarray(p1, dtype=float).reshape(2) - np.asarray(p0, dtype=float).reshape(2)) / dt
 
+    @staticmethod
+    def _bias_corrected_xy(mean_xy: np.ndarray, bias_xy: np.ndarray) -> np.ndarray:
+        return np.asarray(mean_xy, dtype=float).reshape(2) - np.asarray(bias_xy, dtype=float).reshape(2)
+
+    @staticmethod
+    def _predict_uav_xy_at_tau(
+        *,
+        tau: float,
+        uav_start_xy: np.ndarray,
+        fallback_vel_xy: np.ndarray,
+        uav_prediction_intent: Optional[dict],
+    ) -> tuple[np.ndarray, str]:
+        start = np.asarray(uav_start_xy, dtype=float).reshape(2)
+        fallback = np.asarray(fallback_vel_xy, dtype=float).reshape(2)
+        intent = dict(uav_prediction_intent or {})
+        mode = str(intent.get("mode", "velocity_fallback"))
+        if mode == "gc_target":
+            target_xy = intent.get("target_xy")
+            speed_mps = float(intent.get("speed_mps", 0.0))
+            if target_xy is not None:
+                target = np.asarray(target_xy, dtype=float).reshape(2)
+                delta = target - start
+                dist = float(np.linalg.norm(delta))
+                if dist > 1e-6 and speed_mps > 0.0:
+                    dir_xy = delta / dist
+                    travel = min(dist, max(0.0, speed_mps * float(tau)))
+                    return start + dir_xy * travel, "gc_target"
+            return start + fallback * float(tau), "gc_target_fallback_velocity"
+        if mode == "body_action":
+            vel_xy = intent.get("body_velocity_xy")
+            if vel_xy is not None:
+                return start + np.asarray(vel_xy, dtype=float).reshape(2) * float(tau), "body_action"
+            return start + fallback * float(tau), "body_action_fallback_velocity"
+        return start + fallback * float(tau), "velocity_fallback"
+
     def _push_samples(
         self,
         *,
         now: float,
-        uav_xy: np.ndarray,
+        uav_corrected_xy: np.ndarray,
         worker_packet_map: dict[str, object],
     ):
-        self._last_uav_samples.append((float(now), np.asarray(uav_xy, dtype=float).reshape(2)))
+        self._last_uav_samples.append((float(now), np.asarray(uav_corrected_xy, dtype=float).reshape(2)))
         self._last_uav_samples = self._last_uav_samples[-3:]
         for worker_id, packet in worker_packet_map.items():
             samples = self._last_worker_samples.setdefault(str(worker_id), [])
-            samples.append((float(now), np.asarray(packet.estimated_position_3d[:2], dtype=float).reshape(2)))
+            corrected_xy = self._bias_corrected_xy(
+                np.asarray(packet.estimated_position_3d[:2], dtype=float),
+                np.asarray(packet.b_xy[:2], dtype=float),
+            )
+            samples.append((float(now), corrected_xy))
             self._last_worker_samples[str(worker_id)] = samples[-3:]
 
     def _compute_predicted_collision_probability(
@@ -99,10 +141,13 @@ class GcsSafetyAssessmentService:
         now: float,
         uav_entity: CollisionEntity2D,
         worker_entities: list[CollisionEntity2D],
+        uav_start_xy: np.ndarray,
+        worker_start_xy_map: dict[str, np.ndarray],
         uav_velocity_hint_xy: Optional[np.ndarray] = None,
-    ) -> tuple[float, float, str, dict[str, float]]:
+        uav_prediction_intent: Optional[dict] = None,
+    ) -> tuple[float, float, str, dict[str, float], dict]:
         if not worker_entities:
-            return 0.0, 0.0, "none", {}
+            return 0.0, 0.0, "none", {}, {}
         uav_vel = (
             np.asarray(uav_velocity_hint_xy, dtype=float).reshape(2)
             if uav_velocity_hint_xy is not None
@@ -112,15 +157,30 @@ class GcsSafetyAssessmentService:
         max_tau = 0.0
         dominant_worker = "none"
         per_worker_max: dict[str, float] = {str(w.entity_id): 0.0 for w in worker_entities}
+        tau_debug: list[dict] = []
         tau = float(PREDICTION_DT_SECONDS)
         while tau <= float(PREDICTION_HORIZON_SECONDS) + 1e-9:
-            uav_xy = np.asarray(uav_entity.mean_xy, dtype=float).reshape(2) + (uav_vel * tau)
+            uav_xy, uav_branch = self._predict_uav_xy_at_tau(
+                tau=tau,
+                uav_start_xy=uav_start_xy,
+                fallback_vel_xy=uav_vel,
+                uav_prediction_intent=uav_prediction_intent,
+            )
             for worker in worker_entities:
                 worker_samples = self._last_worker_samples.get(str(worker.entity_id), [])
                 worker_vel = self._estimate_velocity(worker_samples)
-                worker_xy = np.asarray(worker.mean_xy, dtype=float).reshape(2) + (worker_vel * tau)
+                worker_start = np.asarray(
+                    worker_start_xy_map.get(str(worker.entity_id), np.asarray(worker.mean_xy, dtype=float).reshape(2)),
+                    dtype=float,
+                ).reshape(2)
+                worker_xy = worker_start + (worker_vel * tau)
                 mu_k = worker_xy - uav_xy
-                sigma_rel = np.asarray(worker.cov_xy, dtype=float).reshape(2, 2) + np.asarray(uav_entity.cov_xy, dtype=float).reshape(2, 2)
+                sigma_rel_now = np.asarray(worker.cov_xy, dtype=float).reshape(2, 2) + np.asarray(uav_entity.cov_xy, dtype=float).reshape(2, 2)
+                process_var = max(
+                    0.0,
+                    (float(self._uav_process_noise_var_m2ps) + float(self._worker_process_noise_var_m2ps)) * float(tau),
+                )
+                sigma_rel = sigma_rel_now + (process_var * np.eye(2, dtype=float))
                 p = hard_collision_probability_gauss_hermite(
                     mu_xy=mu_k,
                     sigma_xy=sigma_rel,
@@ -131,8 +191,37 @@ class GcsSafetyAssessmentService:
                     max_tau = float(tau)
                     dominant_worker = str(worker.entity_id)
                 per_worker_max[str(worker.entity_id)] = max(per_worker_max.get(str(worker.entity_id), 0.0), float(p))
+                tau_debug.append(
+                    {
+                        "tau": float(tau),
+                        "worker_id": str(worker.entity_id),
+                        "uav_xy": [float(uav_xy[0]), float(uav_xy[1])],
+                        "worker_xy": [float(worker_xy[0]), float(worker_xy[1])],
+                        "worker_velocity_xy": [float(worker_vel[0]), float(worker_vel[1])],
+                        "uav_branch": str(uav_branch),
+                        "probability": float(p),
+                    }
+                )
             tau += float(PREDICTION_DT_SECONDS)
-        return float(max_prob), float(max_tau), str(dominant_worker), per_worker_max
+        print_debug(
+            "[PREDICTED-RISK-DEBUG] "
+            f"raw_uav={np.asarray(uav_entity.mean_xy, dtype=float).reshape(2).tolist()} "
+            f"corrected_uav={np.asarray(uav_start_xy, dtype=float).reshape(2).tolist()} "
+            f"uav_velocity={uav_vel.tolist()} "
+            f"dominant_worker={dominant_worker} "
+            f"max_tau={max_tau:.3f} "
+            f"predicted_max={max_prob:.6f} "
+            f"per_worker_max={per_worker_max} "
+            f"tau_samples={tau_debug}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
+        )
+        return float(max_prob), float(max_tau), str(dominant_worker), per_worker_max, {
+            "raw_uav_xy": np.asarray(uav_entity.mean_xy, dtype=float).reshape(2).tolist(),
+            "corrected_uav_xy": np.asarray(uav_start_xy, dtype=float).reshape(2).tolist(),
+            "uav_velocity_xy": uav_vel.tolist(),
+            "worker_start_xy_map": {k: np.asarray(v, dtype=float).reshape(2).tolist() for k, v in worker_start_xy_map.items()},
+            "tau_samples": tau_debug,
+        }
 
     def build_from_packets(
         self,
@@ -142,6 +231,7 @@ class GcsSafetyAssessmentService:
         now: Optional[float] = None,
         safety_state=None,
         uav_velocity_hint_xy: Optional[np.ndarray] = None,
+        uav_prediction_intent: Optional[dict] = None,
     ) -> SafetyContext:
         now = time.time() if now is None else float(now)
         uav_entity = CollisionEntity2D(
@@ -150,6 +240,10 @@ class GcsSafetyAssessmentService:
             cov_xy=np.asarray(drone_packet.P_xy, dtype=float),
             bias_xy=np.asarray(drone_packet.b_xy, dtype=float),
             radius_m=float(self._uav_radius_m),
+        )
+        uav_corrected_xy = self._bias_corrected_xy(
+            np.asarray(drone_packet.estimated_position_3d[:2], dtype=float),
+            np.asarray(drone_packet.b_xy[:2], dtype=float),
         )
         worker_packet_map: dict[str, object] = {}
         for worker_id, packet in worker_packets:
@@ -172,17 +266,30 @@ class GcsSafetyAssessmentService:
                 )
             )
         risk_entity_ids = [str(entity.entity_id) for entity in worker_entities]
-        self._push_samples(now=now, uav_xy=np.asarray(drone_packet.estimated_position_3d[:2], dtype=float), worker_packet_map=worker_packet_map)
+        worker_start_xy_map: dict[str, np.ndarray] = {}
+        for worker_key, packet in worker_packet_map.items():
+            worker_start_xy_map[str(worker_key)] = self._bias_corrected_xy(
+                np.asarray(packet.estimated_position_3d[:2], dtype=float),
+                np.asarray(packet.b_xy[:2], dtype=float),
+            )
+        self._push_samples(
+            now=now,
+            uav_corrected_xy=uav_corrected_xy,
+            worker_packet_map=worker_packet_map,
+        )
 
         summary = self._core.evaluate_scene(
             uav=uav_entity,
             workers=worker_entities,
         )
-        predicted_probability, max_tau, dominant_predicted_worker, per_worker_predicted_max = self._compute_predicted_collision_probability(
+        predicted_probability, max_tau, dominant_predicted_worker, per_worker_predicted_max, predicted_debug = self._compute_predicted_collision_probability(
             now=now,
             uav_entity=uav_entity,
             worker_entities=worker_entities,
+            uav_start_xy=uav_corrected_xy,
+            worker_start_xy_map=worker_start_xy_map,
             uav_velocity_hint_xy=uav_velocity_hint_xy,
+            uav_prediction_intent=uav_prediction_intent,
         )
         per_worker_probs = [
             {
@@ -214,6 +321,7 @@ class GcsSafetyAssessmentService:
             "prediction_dt_seconds": float(PREDICTION_DT_SECONDS),
             "max_risk_tau_seconds": float(max_tau),
             "dominant_predicted_worker": str(dominant_predicted_worker),
+            "prediction_debug": predicted_debug,
         }
         return self._build_context_from_scene_summary(
             current_probability=float(summary.current_probability),

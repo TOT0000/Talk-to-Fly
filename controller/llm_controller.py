@@ -1970,17 +1970,23 @@ class LLMController():
                 packets.append((worker_id, obs.localization_packet))
         return packets
 
-    def _build_uav_prediction_velocity_hint(self, drone_xy, drone_yaw_rad: float) -> np.ndarray:
+    def _build_uav_prediction_intent(self, drone_xy, drone_yaw_rad: float) -> dict:
+        intent = {
+            "mode": "velocity_fallback",
+            "target_xy": None,
+            "speed_mps": float(UAV_GC_NOMINAL_SPEED_MPS),
+            "body_velocity_xy": None,
+        }
         if drone_xy is None:
-            return np.zeros(2, dtype=float)
+            return intent
         progress = dict(self.latest_benchmark_progress or {})
         current_target = progress.get("current_target")
         if current_target and str(current_target).upper() in BENCHMARK_CHECKPOINTS_BY_ID:
             cp = BENCHMARK_CHECKPOINTS_BY_ID[str(current_target).upper()]
-            delta = np.array([float(cp.x) - float(drone_xy[0]), float(cp.y) - float(drone_xy[1])], dtype=float)
-            norm = float(np.linalg.norm(delta))
-            if norm > 1e-6:
-                return (delta / norm) * float(UAV_GC_NOMINAL_SPEED_MPS)
+            intent["mode"] = "gc_target"
+            intent["target_xy"] = (float(cp.x), float(cp.y))
+            intent["speed_mps"] = float(UAV_GC_NOMINAL_SPEED_MPS)
+            return intent
         plan_text = str(self.current_plan or "").strip().lower()
         if plan_text.startswith("mf("):
             body = np.array([1.0, 0.0], dtype=float)
@@ -1993,11 +1999,33 @@ class LLMController():
         else:
             body = np.array([0.0, 0.0], dtype=float)
         if float(np.linalg.norm(body)) <= 1e-6:
-            return np.zeros(2, dtype=float)
+            return intent
         c = math.cos(float(drone_yaw_rad))
         s = math.sin(float(drone_yaw_rad))
         rot = np.array([[c, -s], [s, c]], dtype=float)
-        return (rot @ body) * float(UAV_BODY_NOMINAL_SPEED_MPS)
+        intent["mode"] = "body_action"
+        intent["body_velocity_xy"] = tuple(((rot @ body) * float(UAV_BODY_NOMINAL_SPEED_MPS)).tolist())
+        intent["speed_mps"] = float(UAV_BODY_NOMINAL_SPEED_MPS)
+        return intent
+
+    def _build_uav_prediction_velocity_hint(self, drone_xy, drone_yaw_rad: float) -> np.ndarray:
+        intent = self._build_uav_prediction_intent(drone_xy=drone_xy, drone_yaw_rad=drone_yaw_rad)
+        mode = str(intent.get("mode", "velocity_fallback"))
+        if mode == "gc_target":
+            target_xy = intent.get("target_xy")
+            if target_xy is None:
+                return np.zeros(2, dtype=float)
+            delta = np.array([float(target_xy[0]) - float(drone_xy[0]), float(target_xy[1]) - float(drone_xy[1])], dtype=float)
+            norm = float(np.linalg.norm(delta))
+            if norm <= 1e-6:
+                return np.zeros(2, dtype=float)
+            return (delta / norm) * float(intent.get("speed_mps", UAV_GC_NOMINAL_SPEED_MPS))
+        if mode == "body_action":
+            body_velocity_xy = intent.get("body_velocity_xy")
+            if body_velocity_xy is None:
+                return np.zeros(2, dtype=float)
+            return np.asarray(body_velocity_xy, dtype=float).reshape(2)
+        return np.zeros(2, dtype=float)
 
     def _build_dominant_threat_context(
         self,
@@ -2019,7 +2047,13 @@ class LLMController():
             now=now,
             safety_state=safety_state,
             uav_velocity_hint_xy=self._build_uav_prediction_velocity_hint(
-                drone_xy=np.asarray(safety_state.drone_packet.estimated_position_3d[:2], dtype=float),
+                drone_xy=np.asarray(safety_state.drone_packet.estimated_position_3d[:2], dtype=float)
+                - np.asarray(safety_state.drone_packet.b_xy[:2], dtype=float),
+                drone_yaw_rad=self._get_drone_yaw_rad(),
+            ),
+            uav_prediction_intent=self._build_uav_prediction_intent(
+                drone_xy=np.asarray(safety_state.drone_packet.estimated_position_3d[:2], dtype=float)
+                - np.asarray(safety_state.drone_packet.b_xy[:2], dtype=float),
                 drone_yaw_rad=self._get_drone_yaw_rad(),
             ),
         )
@@ -2100,7 +2134,8 @@ class LLMController():
         if safety_state is not None:
             worker_packets = self._build_collision_worker_packets_from_obstacles(obstacle_states)
             uav_hint = self._build_uav_prediction_velocity_hint(
-                drone_xy=np.asarray(safety_state.drone_packet.estimated_position_3d[:2], dtype=float),
+                drone_xy=np.asarray(safety_state.drone_packet.estimated_position_3d[:2], dtype=float)
+                - np.asarray(safety_state.drone_packet.b_xy[:2], dtype=float),
                 drone_yaw_rad=self._get_drone_yaw_rad(),
             )
             safety_context = self.safety_assessor.build_from_packets(
@@ -2109,6 +2144,11 @@ class LLMController():
                 now=now,
                 safety_state=safety_state,
                 uav_velocity_hint_xy=uav_hint,
+                uav_prediction_intent=self._build_uav_prediction_intent(
+                    drone_xy=np.asarray(safety_state.drone_packet.estimated_position_3d[:2], dtype=float)
+                    - np.asarray(safety_state.drone_packet.b_xy[:2], dtype=float),
+                    drone_yaw_rad=self._get_drone_yaw_rad(),
+                ),
             )
         candidate_targets = []
         for point in self.get_baseline_scene().task_points:
@@ -2153,7 +2193,13 @@ class LLMController():
                     now=now,
                     safety_state=None,
                     uav_velocity_hint_xy=self._build_uav_prediction_velocity_hint(
-                        drone_xy=np.asarray(drone_packet.estimated_position_3d[:2], dtype=float),
+                        drone_xy=np.asarray(drone_packet.estimated_position_3d[:2], dtype=float)
+                        - np.asarray(drone_packet.b_xy[:2], dtype=float),
+                        drone_yaw_rad=self._get_drone_yaw_rad(),
+                    ),
+                    uav_prediction_intent=self._build_uav_prediction_intent(
+                        drone_xy=np.asarray(drone_packet.estimated_position_3d[:2], dtype=float)
+                        - np.asarray(drone_packet.b_xy[:2], dtype=float),
                         drone_yaw_rad=self._get_drone_yaw_rad(),
                     ),
                 )
