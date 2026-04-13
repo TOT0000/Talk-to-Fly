@@ -23,7 +23,8 @@ class SafetyContext:
     candidate_targets_summary: Optional[List[Dict[str, Any]]] = None
     candidate_path_summaries: Optional[List[Dict[str, Any]]] = None
     current_collision_probability: float = 0.0
-    historical_max_collision_probability: float = 0.0
+    predicted_collision_probability: float = 0.0
+    historical_max_collision_probability: float = 0.0  # deprecated internal compatibility field
     per_worker_collision_probabilities: Optional[List[Dict[str, Any]]] = None
     collision_debug_info: Optional[Dict[str, Any]] = None
 
@@ -38,8 +39,8 @@ class SafetyContext:
             else "- (n/a)"
         )
         return (
-            f"current_collision_probability: {self.current_collision_probability:.6f}\n"
-            f"historical_max_collision_probability: {self.historical_max_collision_probability:.6f}\n"
+            f"current_instantaneous_collision_probability: {self.current_collision_probability:.6f}\n"
+            f"predicted_collision_probability: {self.predicted_collision_probability:.6f}\n"
             f"safety_score: {self.safety_score:.3f}\n"
             f"reason_tags: {self.reason_tags}\n"
             f"dominant_threat_type: {self.dominant_threat_type}\n"
