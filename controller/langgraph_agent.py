@@ -36,8 +36,8 @@ class AgentState(TypedDict, total=False):
     latest_snapshot: dict[str, Any] | None
     uav_est_xy: tuple[float, float] | None
     worker_states: list[dict[str, Any]]
-    current_collision_risk: float
-    historical_max_collision_risk: float
+    predicted_collision_risk: float
+    predicted_collision_risk: float
     per_worker_collision_risks: dict[str, float]
     dominant_risky_worker: str | None
     mission_collision_count: int
@@ -132,8 +132,8 @@ class LangGraphOrchestrationRunner:
             "latest_snapshot": None,
             "uav_est_xy": None,
             "worker_states": [],
-            "current_collision_risk": 0.0,
-            "historical_max_collision_risk": 0.0,
+            "predicted_collision_risk": 0.0,
+            "predicted_collision_risk": 0.0,
             "per_worker_collision_risks": {},
             "dominant_risky_worker": None,
             "mission_collision_count": 0,
@@ -241,14 +241,14 @@ class LangGraphOrchestrationRunner:
             uav_pos = snapshot.get("drone_est_bias_corrected") or snapshot.get("drone_est")
             if uav_pos is not None:
                 uav_est = (float(uav_pos[0]), float(uav_pos[1]))
-        current_collision_risk = 0.0 if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
-        historical_max_collision_risk = 0.0 if safety_context is None else float(getattr(safety_context, "historical_max_collision_probability", 0.0))
+        predicted_collision_risk = 0.0 if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
+        predicted_collision_risk = 0.0 if safety_context is None else float(getattr(safety_context, "predicted_collision_probability", 0.0))
         dominant_risky_worker = None if safety_context is None else str(getattr(safety_context, "dominant_threat_id", "unknown"))
         print_debug(
             "[AGENT-LOAD-RUNTIME] "
             f"step={int(state.get('agent_step_count', 0))} "
             f"route_decision={state.get('route_decision')} "
-            f"current_collision_risk={current_collision_risk:.6f} "
+            f"predicted_collision_risk={predicted_collision_risk:.6f} "
             f"dominant_risky_worker={dominant_risky_worker} "
             f"per_worker={per_worker}",
             env_var="TYPEFLY_VERBOSE_DEBUG",
@@ -257,9 +257,9 @@ class LangGraphOrchestrationRunner:
             "latest_snapshot": snapshot,
             "uav_est_xy": uav_est,
             "worker_states": workers,
-            "current_collision_risk": current_collision_risk,
-            "latest_collision_risk": current_collision_risk,
-            "historical_max_collision_risk": historical_max_collision_risk,
+            "predicted_collision_risk": predicted_collision_risk,
+            "latest_collision_risk": predicted_collision_risk,
+            "predicted_collision_risk": predicted_collision_risk,
             "per_worker_collision_risks": per_worker,
             "latest_per_worker_collision_risks": per_worker,
             "dominant_risky_worker": dominant_risky_worker,
@@ -333,7 +333,7 @@ class LangGraphOrchestrationRunner:
             f"step={int(state.get('agent_step_count', 0))} "
             f"route_decision={state.get('route_decision')} "
             f"subgoal={state.get('current_subgoal_id')} "
-            f"current_collision_risk={float(state.get('current_collision_risk', 0.0)):.6f} "
+            f"predicted_collision_risk={float(state.get('predicted_collision_risk', 0.0)):.6f} "
             f"dominant_risky_worker={state.get('dominant_risky_worker')} "
             f"per_worker={state.get('per_worker_collision_risks')}",
             env_var="TYPEFLY_VERBOSE_DEBUG",
@@ -403,15 +403,14 @@ class LangGraphOrchestrationRunner:
                 "completion_monitor_status": ("waiting_event" if plan == "wait_checkpoint_event();" else "active"),
             }
 
-        collision_risk = float(state.get("current_collision_risk", 0.0))
+        collision_risk = float(state.get("predicted_collision_risk", 0.0))
         last_action = str(state.get("last_action_text", "")).strip()
         recovery_mode = bool(current_mode == "recovery")
         decision = self.controller.planner.decide_langgraph_mode_and_action(
             task_description=str(state.get("user_task", "")),
             current_subgoal=str(subgoal),
             remaining_checkpoints=remaining,
-            current_collision_risk=collision_risk,
-            historical_max_collision_risk=float(state.get("historical_max_collision_risk", 0.0)),
+            predicted_collision_risk=collision_risk,
             per_worker_collision_risks=dict(state.get("per_worker_collision_risks", {})),
             dominant_risky_worker=state.get("dominant_risky_worker"),
             worker_states_summary=list(state.get("worker_states", [])),
@@ -993,7 +992,7 @@ class LangGraphOrchestrationRunner:
             "[AGENT-ROUTE] "
             f"step={int(state.get('agent_step_count', 0))} "
             f"route_decision={route} "
-            f"current_collision_risk={float(state.get('current_collision_risk', 0.0)):.6f}",
+            f"predicted_collision_risk={float(state.get('predicted_collision_risk', 0.0)):.6f}",
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
         return route  # type: ignore[return-value]
@@ -1009,7 +1008,7 @@ class LangGraphOrchestrationRunner:
             route_decision=route_decision,
             last_action=last_plan,
             last_result=result,
-            current_collision_risk=float(state.get("current_collision_risk", 0.0)),
+            predicted_collision_risk=float(state.get("predicted_collision_risk", 0.0)),
             per_worker_collision_risks=dict(state.get("per_worker_collision_risks", {})),
             dominant_risky_worker=(None if state.get("dominant_risky_worker") is None else str(state.get("dominant_risky_worker"))),
             worker_states_summary=list(state.get("worker_states", [])),

@@ -11,7 +11,7 @@ from .abs.robot_wrapper import RobotType
 from .benchmark_layout import CHECKPOINT_DWELL_SECONDS, CHECKPOINT_RADIUS_M, UAV_RADIUS_M, WORKER_RADIUS_M
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.50
+COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.30
 
 class LLMPlanner():
     def __init__(self, robot_type: RobotType):
@@ -31,9 +31,14 @@ class LLMPlanner():
         self.guides_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/guides.txt")
         self.typefly_initial_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/typefly_initial_examples.txt")
         self.typefly_replan_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/typefly_replan_examples.txt")
-        self.agent_decomposition_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_decomposition_examples.txt")
-        self.agent_mode_action_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_mode_action_examples.txt")
-        self.agent_reflection_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_reflection_examples.txt")
+        self.agent_decomposition_examples_path = None
+        self.agent_mode_action_examples_path = None
+        self.agent_reflection_examples_path = None
+        self.agent_decomposition_examples = ""
+        self.agent_mode_action_examples = ""
+        self.agent_reflection_examples = ""
+        self.agent_heartbeat_soft_prompt_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_heartbeat_soft_prompt.txt")
+        self.agent_heartbeat_hardgate_prompt_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_heartbeat_hardgate_prompt.txt")
         self.agent_heartbeat_soft_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_heartbeat_soft_examples.txt")
         self.agent_heartbeat_hardgate_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_heartbeat_hardgate_examples.txt")
         with open(self.prompt_plan_path, "r") as f:
@@ -49,12 +54,10 @@ class LLMPlanner():
             self.typefly_initial_examples = f.read()
         with open(self.typefly_replan_examples_path, "r") as f:
             self.typefly_replan_examples = f.read()
-        with open(self.agent_decomposition_examples_path, "r") as f:
-            self.agent_decomposition_examples = f.read()
-        with open(self.agent_mode_action_examples_path, "r") as f:
-            self.agent_mode_action_examples = f.read()
-        with open(self.agent_reflection_examples_path, "r") as f:
-            self.agent_reflection_examples = f.read()
+        with open(self.agent_heartbeat_soft_prompt_path, "r") as f:
+            self.agent_heartbeat_soft_prompt = f.read()
+        with open(self.agent_heartbeat_hardgate_prompt_path, "r") as f:
+            self.agent_heartbeat_hardgate_prompt = f.read()
         with open(self.agent_heartbeat_soft_examples_path, "r") as f:
             self.agent_heartbeat_soft_examples = f.read()
         with open(self.agent_heartbeat_hardgate_examples_path, "r") as f:
@@ -113,8 +116,8 @@ class LLMPlanner():
             "Task: {task_description}\n"
             "Current subgoal: {current_subgoal}\n"
             "Remaining checkpoints: {remaining_checkpoints}\n"
-            "Current collision risk: {current_collision_risk}\n"
-            "Historical max collision risk: {historical_max_collision_risk}\n"
+            "Predicted collision risk: {predicted_collision_risk}\n"
+            ""
             "Dominant risky worker: {dominant_risky_worker}\n"
             "Per-worker collision risks: {per_worker_collision_risks}\n"
             "Recovery mode: {recovery_mode}\n"
@@ -176,8 +179,8 @@ class LLMPlanner():
             "Current mode: {current_mode}\n"
             "Current subgoal: {current_subgoal}\n"
             "Remaining checkpoints: {remaining_checkpoints}\n"
-            "Current collision risk: {current_collision_risk}\n"
-            "Historical max collision risk: {historical_max_collision_risk}\n"
+            "Predicted collision risk: {predicted_collision_risk}\n"
+            ""
             "Dominant risky worker: {dominant_risky_worker}\n"
             "Per-worker collision risks: {per_worker_collision_risks}\n"
             "Worker states summary: {worker_states_summary}\n"
@@ -224,7 +227,7 @@ class LLMPlanner():
             "Route decision from evaluator: {route_decision}\n"
             "Last action: {last_action}\n"
             "Last result: {last_result}\n"
-            "Current collision risk: {current_collision_risk}\n"
+            "Predicted collision risk: {predicted_collision_risk}\n"
             "Dominant risky worker: {dominant_risky_worker}\n"
             "Per-worker collision risks: {per_worker_collision_risks}\n"
             "Worker states summary: {worker_states_summary}\n"
@@ -320,7 +323,7 @@ class LLMPlanner():
             else:
                 worker_lines.append(f"- {label} bias-corrected estimated position: (n/a)")
 
-        current_collision_probability = 0.0 if safety_context is None else float(safety_context.current_collision_probability)
+        predicted_collision_probability = 0.0 if safety_context is None else float(safety_context.predicted_collision_probability)
         per_worker_probs = []
         if safety_context is not None:
             for row in (getattr(safety_context, "per_worker_collision_probabilities", []) or []):
@@ -392,7 +395,7 @@ class LLMPlanner():
             f"- checkpoint radius: {float(CHECKPOINT_RADIUS_M):.2f} m\n"
             "\n"
             "Risk context:\n"
-            f"- current collision probability: {current_collision_probability:.6f}\n"
+            f"- predicted collision probability: {predicted_collision_probability:.6f}\n"
             "- per-worker collision probabilities:\n"
             f"{per_worker_collision_probabilities_block}\n"
             f"- dominant risky worker: {dominant_worker}\n"
@@ -422,8 +425,8 @@ class LLMPlanner():
         active_checkpoint_ids: list[str],
         benchmark_progress: Optional[dict] = None,
     ) -> str:
-        current_collision_probability = 0.0 if safety_context is None else float(safety_context.current_collision_probability)
-        if current_collision_probability < float(COLLISION_PROBABILITY_REPLAN_THRESHOLD):
+        predicted_collision_probability = 0.0 if safety_context is None else float(safety_context.predicted_collision_probability)
+        if predicted_collision_probability < float(COLLISION_PROBABILITY_REPLAN_THRESHOLD):
             return ""
         if previous_plan is None and execution_history is None:
             return ""
@@ -464,8 +467,8 @@ class LLMPlanner():
             f"- remaining checkpoints: {remaining if remaining else ['(none)']}\n"
             f"- current target checkpoint: {current_target}\n"
             "- replan trigger reason:\n"
-            f"  - current collision probability >= {float(COLLISION_PROBABILITY_REPLAN_THRESHOLD):.2f} "
-            f"(current={current_collision_probability:.6f})\n"
+            f"  - predicted collision probability > {float(COLLISION_PROBABILITY_REPLAN_THRESHOLD):.2f} "
+            f"(current={predicted_collision_probability:.6f})\n"
             f"  - dominant risky worker = {dominant_worker}"
         )
 
@@ -524,7 +527,7 @@ class LLMPlanner():
         objective = dict(snapshot.get("active_objective_set") or {})
         active_checkpoint_ids = [str(v) for v in objective.get("active_checkpoint_ids", [])]
         benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
-        current_collision_probability = 0.0 if safety_context is None else float(safety_context.current_collision_probability)
+        predicted_collision_probability = 0.0 if safety_context is None else float(safety_context.predicted_collision_probability)
         is_replan_call = str(planning_stage or "initial").strip().lower() == "replan"
         replan_history_block = self._build_replan_history_block(
             task_description=task_description,
@@ -590,10 +593,11 @@ class LLMPlanner():
         mission_original_plan: Optional[str] = None,
         current_active_plan: Optional[str] = None,
         latest_full_replan_response: Optional[str] = None,
+        full_replan_count: int = 0,
         hard_gate: bool = False,
     ) -> dict:
         safety_context = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
-        collision_probability = 0.0 if safety_context is None else float(getattr(safety_context, "current_collision_probability", 0.0))
+        collision_probability = 0.0 if safety_context is None else float(getattr(safety_context, "predicted_collision_probability", 0.0))
         dominant_worker = "n/a" if safety_context is None else str(getattr(safety_context, "dominant_threat_id", "n/a"))
         benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
         completed = list(benchmark_progress.get("completed") or [])
@@ -605,7 +609,7 @@ class LLMPlanner():
                 "xy": tuple(worker.get("ui_xy") or worker.get("gt_xy") or (None, None)),
             })
         hard_gate_rule = (
-            "If current_collision_probability > 0.5, you MUST output response=full_replan_plan with a new complete MiniSpec plan."
+            "If predicted_collision_probability > 0.3, you MUST output response=full_replan_plan with a new complete MiniSpec plan."
             if hard_gate
             else "You may choose continue or full_replan_plan based on your judgment."
         )
@@ -617,61 +621,43 @@ class LLMPlanner():
         mission_original_plan_text = str(mission_original_plan or current_plan or "none")
         current_active_plan_text = str(current_active_plan or mission_original_plan_text)
         latest_full_replan_text = str(latest_full_replan_response or "none")
+        heartbeat_prompt_template = (
+            self.agent_heartbeat_hardgate_prompt if hard_gate else self.agent_heartbeat_soft_prompt
+        )
+        prompt = heartbeat_prompt_template.format(
+            shared_opening_block=self._build_shared_opening_block(),
+            shared_runtime_context_block=self._build_shared_runtime_context_block(
+                safety_context,
+                snapshot=(snapshot if isinstance(snapshot, dict) else {}),
+            ),
+            task_description=task_description,
+            mission_original_plan=mission_original_plan_text,
+            current_active_plan=current_active_plan_text,
+            latest_full_replan_response=latest_full_replan_text,
+            full_replan_count=int(max(0, full_replan_count)),
+            completed_checkpoints=completed,
+            unfinished_checkpoints=[cid for cid in active if cid not in completed],
+            uav_position=(snapshot.get('drone_est_bias_corrected') or snapshot.get('drone_est') or snapshot.get('drone_gt')),
+            uav_heading=snapshot.get('drone_yaw_rad'),
+            worker_positions=workers,
+            predicted_collision_probability=f"{collision_probability:.6f}",
+            dominant_worker=dominant_worker,
+            current_executing_plan=current_plan,
+            queue_progress=benchmark_progress,
+            execution_history=execution_history,
+        )
         prompt = (
-            "You are heartbeat monitor for UAV planning.\n\n"
-            "Return strict JSON with keys: response, reason, plan.\n"
-            "response must be one of: continue, full_replan_plan.\n"
-            "If response=continue, set plan to empty string.\n\n"
-            f"{hard_gate_rule}\n\n"
-            "Use the same skill abbreviations as TypeFly plans.\n\n"
-            "Your decision must not rely on collision probability alone.\n"
-            "You must jointly consider:\n"
-            "- current_collision_probability\n"
-            "- UAV position and heading\n"
-            "- worker positions\n"
-            "- geometric closeness between UAV and workers\n"
-            "- whether the current approach corridor is likely to pass too close to a worker\n"
-            "- mission original plan\n"
-            "- current active plan\n"
-            "- latest full replan response (if any)\n"
-            "- completed checkpoints\n"
-            "- unfinished checkpoints\n"
-            "- current queue progress\n"
-            "- execution history\n\n"
-            "Planning interpretation rules:\n"
-            "1. The mission original plan is background context only.\n"
-            "2. The current active plan is the authoritative plan for judging current execution order.\n"
-            "3. After any full replan, anomaly detection and ordering judgments should primarily compare against the current active plan, not the mission original plan.\n"
-            "4. If no full replan has occurred, the current active plan may be the same as the mission original plan.\n\n"
-            "Replan policy:\n"
-            "1. If the current active plan is still safe and usable, return continue.\n"
-            "2. If collision probability is high, you should return full_replan_plan.\n"
-            "3. Even if collision probability is not high, if the UAV is geometrically too close to a worker, or if the current corridor is likely to create a risky close pass, you may still return full_replan_plan.\n"
-            "4. When replanning, you may first use low-level motion or turning actions (mf / mb / ml / mr / tc / tu / d) to create spacing from the risky worker, and then continue planning the remaining unfinished checkpoints.\n"
-            "5. The size of the detour must balance safety and efficiency:\n"
-            "   - if risk is high or geometry is very close, use a larger and more conservative detour\n"
-            "   - if risk is not high but preventive avoidance is still useful, use a smaller detour\n"
-            "6. Normally, the remaining unfinished checkpoints should continue in a way that is consistent with the current active plan whenever reasonable.\n"
-            "7. However, if an earlier checkpoint in the current active plan is still unfinished while a later checkpoint in that same current active plan has already been completed, you should infer that execution likely failed, was interrupted, or deviated after the latest authoritative plan. In that case, you should reconsider all remaining unfinished checkpoints together and produce a new coherent full replan plan instead of blindly following the old queue.\n"
-            "8. If the current active plan itself appears stale or no longer safe because worker geometry has changed, you may replace it with a safer reordered plan.\n"
-            "9. When returning full_replan_plan, plan must include all relevant remaining unfinished checkpoints that still need to be completed, not only the immediately next one.\n\n"
-            f"Task: {task_description}\n"
-            f"Mission original plan: {mission_original_plan_text}\n"
-            f"Current active plan: {current_active_plan_text}\n"
-            f"Latest full replan response (if any): {latest_full_replan_text}\n"
-            f"Completed checkpoints: {completed}\n"
-            f"Unfinished checkpoints: {[cid for cid in active if cid not in completed]}\n"
-            f"UAV position: {snapshot.get('drone_est_bias_corrected') or snapshot.get('drone_est') or snapshot.get('drone_gt')}\n"
-            f"UAV heading: {snapshot.get('drone_yaw_rad')}\n"
-            f"Worker positions: {workers}\n"
-            f"current_collision_probability: {collision_probability:.6f}\n"
-            f"dominant risky worker: {dominant_worker}\n"
-            f"Current executing plan: {current_plan}\n"
-            f"Queue progress: {benchmark_progress}\n"
-            f"Execution history: {execution_history}\n\n"
+            f"{prompt}\n\n"
+            f"Hard gate policy note: {hard_gate_rule}\n\n"
             "Agent heartbeat examples:\n"
             f"{agent_heartbeat_examples}\n\n"
             "Return JSON only."
+        )
+        print_debug(
+            "[AGENT-HEARTBEAT-PROMPT-CONTEXT] "
+            f"predicted_collision_probability={collision_probability:.6f} "
+            f"full_replan_count={int(max(0, full_replan_count))} "
+            f"hard_gate={hard_gate}"
         )
         raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
         parsed, parsed_ok = self._parse_heartbeat_response_json(raw)
@@ -806,9 +792,8 @@ class LLMPlanner():
         task_description: str,
         current_subgoal: str | None,
         remaining_checkpoints: list[str],
-        current_collision_risk: float,
-        historical_max_collision_risk: float,
-        per_worker_collision_risks: dict[str, float],
+        predicted_collision_risk: float,
+                per_worker_collision_risks: dict[str, float],
         dominant_risky_worker: str | None,
         worker_states_summary: list[dict],
         last_action: str,
@@ -833,9 +818,8 @@ class LLMPlanner():
             task_description=str(task_description or ""),
             current_subgoal=str(current_subgoal or "None"),
             remaining_checkpoints=[str(v) for v in list(remaining_checkpoints or [])],
-            current_collision_risk=f"{float(current_collision_risk):.6f}",
-            historical_max_collision_risk=f"{float(historical_max_collision_risk):.6f}",
-            per_worker_collision_risks=str(dict(per_worker_collision_risks or {})),
+            predicted_collision_risk=f"{float(predicted_collision_risk):.6f}",
+                        per_worker_collision_risks=str(dict(per_worker_collision_risks or {})),
             dominant_risky_worker=str(dominant_risky_worker or "n/a"),
             recovery_mode=str(bool(recovery_mode)),
             recovery_reason=str(recovery_reason or "none"),
@@ -867,7 +851,7 @@ class LLMPlanner():
         route_decision: str,
         last_action: str,
         last_result: dict,
-        current_collision_risk: float,
+        predicted_collision_risk: float,
         per_worker_collision_risks: dict[str, float],
         dominant_risky_worker: str | None,
         worker_states_summary: list[dict],
@@ -893,7 +877,7 @@ class LLMPlanner():
             route_decision=str(route_decision or "continue"),
             last_action=str(last_action or ""),
             last_result=str(last_result or {}),
-            current_collision_risk=f"{float(current_collision_risk):.6f}",
+            predicted_collision_risk=f"{float(predicted_collision_risk):.6f}",
             dominant_risky_worker=str(dominant_risky_worker or "n/a"),
             per_worker_collision_risks=str(dict(per_worker_collision_risks or {})),
             worker_states_summary=str(list(worker_states_summary or [])[:3]),
@@ -934,9 +918,8 @@ class LLMPlanner():
         task_description: str,
         current_subgoal: str | None,
         remaining_checkpoints: list[str],
-        current_collision_risk: float,
-        historical_max_collision_risk: float,
-        per_worker_collision_risks: dict[str, float],
+        predicted_collision_risk: float,
+                per_worker_collision_risks: dict[str, float],
         dominant_risky_worker: str | None,
         worker_states_summary: list[dict],
         last_action: str,
@@ -977,9 +960,8 @@ class LLMPlanner():
             dwell_required_seconds=f"{float(dwell_required_seconds):.3f}",
             dwell_satisfied=bool(dwell_satisfied),
             remaining_checkpoints=[str(v) for v in list(remaining_checkpoints or [])],
-            current_collision_risk=f"{float(current_collision_risk):.6f}",
-            historical_max_collision_risk=f"{float(historical_max_collision_risk):.6f}",
-            per_worker_collision_risks=str(dict(per_worker_collision_risks or {})),
+            predicted_collision_risk=f"{float(predicted_collision_risk):.6f}",
+                        per_worker_collision_risks=str(dict(per_worker_collision_risks or {})),
             dominant_risky_worker=str(dominant_risky_worker or "n/a"),
             worker_states_summary=str(list(worker_states_summary or [])[:3]),
             last_action=str(last_action or ""),
