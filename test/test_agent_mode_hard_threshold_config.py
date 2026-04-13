@@ -24,13 +24,13 @@ def test_hardgate_heartbeat_prompt_injects_hardgate_examples():
 
 
 def test_hardgate_prompt_has_extra_hard_gate_rule():
-    assert 'If predicted_collision_probability > 0.3, you MUST output response=full_replan_plan with a new complete MiniSpec plan.' in PLANNER_SOURCE
+    assert 'If predicted_collision_probability > 0.7, you MUST output response=full_replan_plan with a new complete MiniSpec plan.' in PLANNER_SOURCE
     assert 'You may choose continue or full_replan_plan based on your judgment.' in PLANNER_SOURCE
 
 
 def test_heartbeat_prompt_contains_budget_and_timing_policy():
-    assert 'The system calls you once every 5 seconds during execution.' in SOFT_PROMPT
-    assert 'The system calls you once every 5 seconds during execution.' in HARD_PROMPT
+    assert 'The system calls you once every 3 seconds during execution.' in SOFT_PROMPT
+    assert 'The system calls you once every 3 seconds during execution.' in HARD_PROMPT
     assert 'Full replans already used: {full_replan_count} / 5' in SOFT_PROMPT
     assert 'Full replans already used: {full_replan_count} / 5' in HARD_PROMPT
 

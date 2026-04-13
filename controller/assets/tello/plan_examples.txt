@@ -22,7 +22,7 @@ Scene:
 - worker_2 est: (3.7, 9.5)
 - predicted_collision_probability=0.740
 Task: [A] Replan and finish remaining checkpoints in zone_A.
-Rationale: Replan continuation (>0.3). First perform larger conservative detour because risk + proximity are high, then continue unfinished checkpoints only.
+Rationale: Replan continuation (>0.7). First perform larger conservative detour because risk + proximity are high, then continue unfinished checkpoints only.
 Response: lo('replan high-risk detour before remaining checkpoints');mr(1.0);mb(0.8);tu(25);d(0.5);gc('A1');d(2.0);gc('A3');d(2.0);
 
 Example C (Agent low-risk style reference)
