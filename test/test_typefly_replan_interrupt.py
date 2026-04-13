@@ -312,7 +312,7 @@ def test_agent_heartbeat_prompt_receives_replan_response_history():
     controller._pending_heartbeat_reason = ""
     controller.last_heartbeat_ts = 0.0
     controller.replan_limit = 5
-    controller._replan_attempts = 0
+    controller._replan_attempts = 3
     controller.current_task_description = "task"
     controller.execution_history = "gc('C1');d(2.0);"
     controller.current_plan = "gc('C2');d(2.0);"
@@ -346,6 +346,7 @@ def test_agent_heartbeat_prompt_receives_replan_response_history():
     assert "replan_response_history:" in execution_history_text
     assert "agent_heartbeat_full_replan_response" in execution_history_text
     assert "ml(0.5);gc('C2');d(2.0);" in execution_history_text
+    assert int(planner_calls[0]["full_replan_count"]) == 3
 
 
 def test_current_active_plan_matches_mission_original_when_no_full_replan(monkeypatch):

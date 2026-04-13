@@ -18,6 +18,9 @@ def test_prompts_use_predicted_and_no_historical_max():
     planner_src = Path('controller/llm_planner.py').read_text(encoding='utf-8')
     assert 'predicted_collision_probability' in planner_src
     assert 'historical_max_collision_risk' not in planner_src
+    assert 'agent_heartbeat_soft_prompt_path' in planner_src
+    assert 'agent_heartbeat_hardgate_prompt_path' in planner_src
+    assert 'self.agent_decomposition_examples_path = None' in planner_src
 
 
 def test_ui_uses_predicted_collision_probability_for_status_and_charts():

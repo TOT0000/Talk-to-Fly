@@ -3,7 +3,10 @@
 {shared_runtime_context_block}
 
 This call is TypeFly REPLAN / CONTINUATION planning, not a fresh plan from zero.
-Use continuation context, preserve completed progress, and re-optimize remaining route safely.
+Use continuation context, preserve completed progress, and re-optimize the remaining route safely.
+
+A TypeFly replan call means a potential collision event is predicted within the next 3 seconds.
+This trigger occurs because predicted_collision_probability has reached or exceeded 0.3.
 
 Continuation context:
 - previous plan: {previous_plan}
@@ -17,15 +20,14 @@ Continuation context:
 
 TypeFly replan requirements:
 - Explicit replan threshold = 0.3.
-- If predicted_collision_probability < 0.3 and geometry is clear, prioritize checkpoint progress and efficiency.
-- Even below threshold, still evaluate close-pass risk via worker geometry, UAV heading, and radii.
-- If predicted_collision_probability > 0.3, or geometry is clearly unsafe:
-  - first output one or more conservative low-level avoidance actions,
-  - do not begin with direct gc(...),
-  - choose avoidance direction with UAV heading awareness,
-  - match avoidance amplitude to severity.
-- After avoidance, continue remaining checkpoints only; never redo completed checkpoints.
-- Remaining checkpoint order may be re-sorted dynamically by safety + geometry + efficiency.
+- The predicted collision probability refers to the collision risk over the next 3 seconds, not only the current instant.
+- Since replan has already been triggered, first determine what preventive avoidance behavior is needed from the predicted collision probability and the current UAV-worker geometry.
+- Choose avoidance amplitude according to severity.
+- If the predicted collision probability is only mildly above threshold, a small preventive detour may be enough.
+- If the predicted collision probability is much higher or the geometry is clearly unsafe, use a larger and more conservative detour.
+- Do not begin a replan with direct gc(...) when the future 3-second risk is already elevated.
+- After avoidance, continue only the remaining checkpoints; never redo completed checkpoints.
+- Remaining checkpoint order may be re-sorted dynamically by safety, geometry, and efficiency.
 - The same ml/mr/mf/mb maps to different world directions under different headings; keep this heading-aware in replan.
 
 Guides:

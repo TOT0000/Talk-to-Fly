@@ -1192,6 +1192,7 @@ class LLMController():
             mission_original_plan=self._mission_original_plan,
             current_active_plan=self._current_active_plan,
             latest_full_replan_response=self._latest_full_replan_response,
+            full_replan_count=int(getattr(self, "_replan_attempts", 0)),
             hard_gate=(self.framework_mode == MODE_AGENT_HEARTBEAT_HARDGATE),
         )
         raw_response = str(response.get("raw_response", "") or "").strip()
