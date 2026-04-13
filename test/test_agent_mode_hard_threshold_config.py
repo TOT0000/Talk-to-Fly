@@ -5,6 +5,7 @@ SOFT_EXAMPLES = Path('controller/assets/tello/agent_heartbeat_soft_examples.txt'
 HARD_EXAMPLES = Path('controller/assets/tello/agent_heartbeat_hardgate_examples.txt').read_text(encoding='utf-8')
 SOFT_PROMPT = Path('controller/assets/tello/agent_heartbeat_soft_prompt.txt').read_text(encoding='utf-8')
 HARD_PROMPT = Path('controller/assets/tello/agent_heartbeat_hardgate_prompt.txt').read_text(encoding='utf-8')
+CONTROLLER_SOURCE = Path('controller/llm_controller.py').read_text(encoding='utf-8')
 
 
 def test_soft_heartbeat_prompt_injects_soft_examples():
@@ -64,3 +65,10 @@ def test_heartbeat_parser_has_fenced_and_embedded_json_fallback_paths():
     assert "```(?:json)?\\s*(.*?)\\s*```" in PLANNER_SOURCE
     assert 'start = text.find("{")' in PLANNER_SOURCE
     assert 'end = text.rfind("}")' in PLANNER_SOURCE
+
+
+def test_heartbeat_skips_llm_after_task_completed_and_queue_empty():
+    assert 'def _pending_execution_statement_count(self) -> int:' in CONTROLLER_SOURCE
+    assert 'def _is_active_objective_completed(self) -> bool:' in CONTROLLER_SOURCE
+    assert 'def _should_skip_heartbeat_after_task_completion(self) -> bool:' in CONTROLLER_SOURCE
+    assert 'if self._should_skip_heartbeat_after_task_completion():' in CONTROLLER_SOURCE

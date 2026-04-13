@@ -1171,11 +1171,43 @@ class LLMController():
     def _is_threshold_replan_mode(self) -> bool:
         return self.framework_mode == MODE_TYPEFLY_THRESHOLD_REPLAN
 
+    def _pending_execution_statement_count(self) -> int:
+        queue_obj = getattr(Statement, "execution_queue", None)
+        if queue_obj is None:
+            return 0
+        try:
+            return int(queue_obj.qsize())
+        except Exception:
+            return 0
+
+    def _is_active_objective_completed(self) -> bool:
+        active_ids = set(str(v).upper() for v in self.active_objective_set.get("active_checkpoint_ids", []))
+        if not active_ids:
+            return False
+        completed = set(str(v).upper() for v in (self.latest_benchmark_progress.get("completed") or []))
+        return all(cid in completed for cid in active_ids)
+
+    def _should_skip_heartbeat_after_task_completion(self) -> bool:
+        if not self._is_active_objective_completed():
+            return False
+        if self._pending_execution_statement_count() > 0:
+            return False
+        # When mission objectives are complete and there are no remaining execution statements,
+        # heartbeat should stop calling LLM continuously.
+        return True
+
     def _maybe_run_agent_heartbeat(self, force: bool = False) -> bool:
         if not self._is_agent_heartbeat_mode():
             return False
         if self._pending_heartbeat_replan_plan:
             return True
+        if self._should_skip_heartbeat_after_task_completion():
+            print_debug(
+                "[AGENT-HEARTBEAT] skipped after task completion "
+                f"pending_statements={self._pending_execution_statement_count()}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
+            )
+            return False
         now = time.time()
         if (not force) and (now - float(self.last_heartbeat_ts) < float(AGENT_HEARTBEAT_INTERVAL_SECONDS)):
             return False
