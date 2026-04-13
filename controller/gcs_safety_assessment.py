@@ -5,9 +5,10 @@ from typing import Optional
 import os
 import numpy as np
 
-from .collision_probability_core import CollisionEntity2D, CollisionProbabilityCore
+from .collision_probability_core import CollisionEntity2D, CollisionProbabilityCore, hard_collision_probability_gauss_hermite
 from .gcs_safety_state import GcsSafetyStateService
 from .safety_context import SafetyContext
+from .benchmark_layout import PREDICTION_HORIZON_SECONDS, PREDICTION_DT_SECONDS
 
 
 class GcsSafetyAssessmentService:
@@ -18,19 +19,21 @@ class GcsSafetyAssessmentService:
         self._uav_radius_m = float(os.getenv("TYPEFLY_UAV_RADIUS_M", "0.22"))
         self._worker_radius_m = float(os.getenv("TYPEFLY_WORKER_RADIUS_M", "0.30"))
         self._risk_worker_ids = ("worker_1", "worker_2", "worker_3")
+        self._last_uav_samples: list[tuple[float, np.ndarray]] = []
+        self._last_worker_samples: dict[str, list[tuple[float, np.ndarray]]] = {}
 
     def _build_context_from_scene_summary(
         self,
         *,
         current_probability: float,
-        historical_max_probability: float,
+        predicted_probability: float,
         per_worker_probs: list[dict],
         collision_debug_info: Optional[dict],
         dominant_worker_id: str,
         safety_state,
         now: float,
     ) -> SafetyContext:
-        overlap_flag = bool(current_probability >= 0.5)
+        overlap_flag = bool(predicted_probability >= 0.3)
         if safety_state is not None:
             envelope_gap_m = float(safety_state.envelope_gap_m)
             geometric_uncertainty_m = float(
@@ -62,10 +65,74 @@ class GcsSafetyAssessmentService:
             dominant_gap_m=float(envelope_gap_m),
             dominant_uncertainty_scale_m=float(uncertainty_scale_m),
             current_collision_probability=float(current_probability),
-            historical_max_collision_probability=float(historical_max_probability),
+            predicted_collision_probability=float(predicted_probability),
             per_worker_collision_probabilities=per_worker_probs,
             collision_debug_info=collision_debug_info,
         )
+
+    @staticmethod
+    def _estimate_velocity(samples: list[tuple[float, np.ndarray]]) -> np.ndarray:
+        if len(samples) < 2:
+            return np.zeros(2, dtype=float)
+        t0, p0 = samples[-2]
+        t1, p1 = samples[-1]
+        dt = max(1e-3, float(t1 - t0))
+        return (np.asarray(p1, dtype=float).reshape(2) - np.asarray(p0, dtype=float).reshape(2)) / dt
+
+    def _push_samples(
+        self,
+        *,
+        now: float,
+        uav_xy: np.ndarray,
+        worker_packet_map: dict[str, object],
+    ):
+        self._last_uav_samples.append((float(now), np.asarray(uav_xy, dtype=float).reshape(2)))
+        self._last_uav_samples = self._last_uav_samples[-3:]
+        for worker_id, packet in worker_packet_map.items():
+            samples = self._last_worker_samples.setdefault(str(worker_id), [])
+            samples.append((float(now), np.asarray(packet.estimated_position_3d[:2], dtype=float).reshape(2)))
+            self._last_worker_samples[str(worker_id)] = samples[-3:]
+
+    def _compute_predicted_collision_probability(
+        self,
+        *,
+        now: float,
+        uav_entity: CollisionEntity2D,
+        worker_entities: list[CollisionEntity2D],
+        uav_velocity_hint_xy: Optional[np.ndarray] = None,
+    ) -> tuple[float, float, str, dict[str, float]]:
+        if not worker_entities:
+            return 0.0, 0.0, "none", {}
+        uav_vel = (
+            np.asarray(uav_velocity_hint_xy, dtype=float).reshape(2)
+            if uav_velocity_hint_xy is not None
+            else self._estimate_velocity(self._last_uav_samples)
+        )
+        max_prob = 0.0
+        max_tau = 0.0
+        dominant_worker = "none"
+        per_worker_max: dict[str, float] = {str(w.entity_id): 0.0 for w in worker_entities}
+        tau = float(PREDICTION_DT_SECONDS)
+        while tau <= float(PREDICTION_HORIZON_SECONDS) + 1e-9:
+            uav_xy = np.asarray(uav_entity.mean_xy, dtype=float).reshape(2) + (uav_vel * tau)
+            for worker in worker_entities:
+                worker_samples = self._last_worker_samples.get(str(worker.entity_id), [])
+                worker_vel = self._estimate_velocity(worker_samples)
+                worker_xy = np.asarray(worker.mean_xy, dtype=float).reshape(2) + (worker_vel * tau)
+                mu_k = worker_xy - uav_xy
+                sigma_rel = np.asarray(worker.cov_xy, dtype=float).reshape(2, 2) + np.asarray(uav_entity.cov_xy, dtype=float).reshape(2, 2)
+                p = hard_collision_probability_gauss_hermite(
+                    mu_xy=mu_k,
+                    sigma_xy=sigma_rel,
+                    r_c=float(self._uav_radius_m + self._worker_radius_m),
+                )
+                if p > max_prob:
+                    max_prob = float(p)
+                    max_tau = float(tau)
+                    dominant_worker = str(worker.entity_id)
+                per_worker_max[str(worker.entity_id)] = max(per_worker_max.get(str(worker.entity_id), 0.0), float(p))
+            tau += float(PREDICTION_DT_SECONDS)
+        return float(max_prob), float(max_tau), str(dominant_worker), per_worker_max
 
     def build_from_packets(
         self,
@@ -74,6 +141,7 @@ class GcsSafetyAssessmentService:
         worker_packets: list[tuple[str, object]],
         now: Optional[float] = None,
         safety_state=None,
+        uav_velocity_hint_xy: Optional[np.ndarray] = None,
     ) -> SafetyContext:
         now = time.time() if now is None else float(now)
         uav_entity = CollisionEntity2D(
@@ -104,10 +172,17 @@ class GcsSafetyAssessmentService:
                 )
             )
         risk_entity_ids = [str(entity.entity_id) for entity in worker_entities]
+        self._push_samples(now=now, uav_xy=np.asarray(drone_packet.estimated_position_3d[:2], dtype=float), worker_packet_map=worker_packet_map)
 
         summary = self._core.evaluate_scene(
             uav=uav_entity,
             workers=worker_entities,
+        )
+        predicted_probability, max_tau, dominant_predicted_worker, per_worker_predicted_max = self._compute_predicted_collision_probability(
+            now=now,
+            uav_entity=uav_entity,
+            worker_entities=worker_entities,
+            uav_velocity_hint_xy=uav_velocity_hint_xy,
         )
         per_worker_probs = [
             {
@@ -123,6 +198,7 @@ class GcsSafetyAssessmentService:
                 "r_u": float(self._uav_radius_m),
                 "r_h": float(self._worker_radius_m),
                 "r_c": float(self._uav_radius_m + self._worker_radius_m),
+                "predicted_collision_probability": float(per_worker_predicted_max.get(str(item.entity_id), 0.0)),
             }
             for item in summary.per_entity
         ]
@@ -133,13 +209,18 @@ class GcsSafetyAssessmentService:
             "collision_radius_m": float(self._uav_radius_m + self._worker_radius_m),
             "risk_entities": list(risk_entity_ids),
             "risk_entities_expected": list(self._risk_worker_ids),
+            "predicted_collision_probability": float(predicted_probability),
+            "prediction_horizon_seconds": float(PREDICTION_HORIZON_SECONDS),
+            "prediction_dt_seconds": float(PREDICTION_DT_SECONDS),
+            "max_risk_tau_seconds": float(max_tau),
+            "dominant_predicted_worker": str(dominant_predicted_worker),
         }
         return self._build_context_from_scene_summary(
             current_probability=float(summary.current_probability),
-            historical_max_probability=float(summary.historical_max_probability),
+            predicted_probability=float(predicted_probability),
             per_worker_probs=per_worker_probs,
             collision_debug_info=collision_debug_info,
-            dominant_worker_id=str(summary.dominant_entity_id),
+            dominant_worker_id=str(dominant_predicted_worker or summary.dominant_entity_id),
             safety_state=safety_state,
             now=now,
         )
@@ -170,7 +251,7 @@ class GcsSafetyAssessmentService:
                 dominant_gap_m=0.0,
                 dominant_uncertainty_scale_m=0.0,
                 current_collision_probability=0.0,
-                historical_max_collision_probability=float(self._core.get_historical_max_probability()),
+                predicted_collision_probability=0.0,
                 per_worker_collision_probabilities=[],
                 collision_debug_info=None,
             )
@@ -188,7 +269,7 @@ class GcsSafetyAssessmentService:
                 dominant_gap_m=0.0,
                 dominant_uncertainty_scale_m=0.0,
                 current_collision_probability=0.0,
-                historical_max_collision_probability=float(self._core.get_historical_max_probability()),
+                predicted_collision_probability=0.0,
                 per_worker_collision_probabilities=[],
                 collision_debug_info={
                     "risk_entities": [],
