@@ -16,7 +16,7 @@ Runtime task/safety context to use explicitly:
 - worker_2 bias-corrected estimated position
 - worker_3 bias-corrected estimated position
 - dominant risky worker
-- current collision probability
+- predicted collision probability
 
 2) Task structure
 - active zones
@@ -33,8 +33,8 @@ Runtime task/safety context to use explicitly:
 Planning contract:
 - Output exactly one MiniSpec sentence.
 - Use MiniSpec syntax only (`?cond{{...}}`, `;`, assignments, function calls).
-- For checkpoint tasks in normal risk (`current_collision_probability < 0.5`), `gc(...)` is allowed as the primary primitive.
-- Replan condition: `current_collision_probability >= 0.5`.
+- For checkpoint tasks in normal risk (`predicted_collision_probability < 0.3`), `gc(...)` is allowed as the primary primitive.
+- Replan condition: `predicted_collision_probability > 0.3`.
 - Under replan condition:
   - this is continuation, not a fresh task from zero
   - continue unfinished checkpoints; do not redo completed checkpoints
