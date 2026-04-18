@@ -626,8 +626,12 @@ class MiniSpecInterpreter:
         self.execution_history = []
         self.timestamp_get_plan = time.time()
         program = MiniSpecProgram(mq=self.message_queue)
-        program.parse(code, True)
+        # Parse first, then enqueue, to avoid race between executor thread
+        # consuming statements and program_count initialization.
+        program.parse(code, False)
         self.program_count = len(program.statements)
+        for statement in program.statements:
+            Statement.execution_queue.put(statement)
         t2 = time.time()
         print_t(">>> Program: ", program, "Time: ", t2 - self.timestamp_get_plan)
 
