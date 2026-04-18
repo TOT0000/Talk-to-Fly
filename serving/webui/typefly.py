@@ -628,8 +628,7 @@ class TypeFly:
             self.llm_controller._reset_benchmark_progress_tracking()
             self.llm_controller.apply_baseline_scene()
             self._reset_runtime_records()
-            self._reset_persisted_logs()
-            return "System reset complete: drone/workers repositioned, runtime progress cleared, and log records deleted."
+            return "System reset complete: drone/workers repositioned and runtime progress cleared (archive logs retained)."
         except Exception as e:
             return f"System reset failed: {e}"
 
