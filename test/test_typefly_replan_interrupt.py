@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import threading
 
 import pytest
 
@@ -129,53 +130,25 @@ def test_typefly_replan_uses_fresh_llm_response_and_discards_old_queue(monkeypat
     assert len(plan_markers) == 2
 
 
-def test_gc_preempts_mid_statement_before_finishing_chunked_motion():
+def test_ui_collision_event_triggers_runtime_replan_abort():
     pytest.importorskip("PIL")
     from controller.llm_controller import LLMController
 
     controller = LLMController.__new__(LLMController)
-    motion_state = {"x": 0.0, "p": 0.1}
-    counters = {"move_calls": 0}
-
-    class _Drone:
-        def move_forward(self, step):
-            counters["move_calls"] += 1
-            motion_state["x"] += float(step)
-            if counters["move_calls"] == 1:
-                motion_state["p"] = 0.9
-            return True, False
-
-        def turn_ccw(self, _deg):
-            return True, False
-
-        def turn_cw(self, _deg):
-            return True, False
-
-    controller.drone = _Drone()
-    controller._benchmark_executed_gc_sequence = []
-    controller.set_benchmark_progress_focus_checkpoint = lambda _cp: None
+    controller._runtime_replan_event = threading.Event()
+    controller._runtime_replan_reason = ""
+    controller.latest_ui_collision_probability = None
+    controller.latest_ui_collision_timestamp = 0.0
+    controller.predicted_collision_replan_threshold = 0.7
     controller._is_active_objective_completed = lambda: False
     controller._maybe_run_agent_heartbeat = lambda: False
-    controller._pending_heartbeat_reason = ""
-    controller.predicted_collision_replan_threshold = 0.7
     controller._should_trigger_auto_replan = lambda p, source="": float(p) >= 0.7
 
-    def _snapshot():
-        return {
-            "drone_gt": (motion_state["x"], 0.0, 0.0),
-            "drone_est": (motion_state["x"], 0.0, 0.0),
-            "drone_est_bias_corrected": (motion_state["x"], 0.0, 0.0),
-            "drone_yaw_rad": 0.0,
-            "benchmark_progress": {"completed": [], "current_target": "A1", "in_radius": False},
-            "safety_context": SimpleNamespace(predicted_collision_probability=motion_state["p"]),
-        }
+    controller.update_ui_collision_probability(0.9)
+    should_abort, reason = controller._should_abort_current_execution_for_replan()
 
-    controller.get_live_ui_snapshot = _snapshot
-
-    _summary, should_replan = controller.skill_go_checkpoint("A1")
-
-    assert should_replan is True
-    assert counters["move_calls"] == 1
+    assert should_abort is True
+    assert "source=ui_event" in str(reason)
 
 
 def _build_minimal_controller_for_postcheck(plans, completed_after_exec, mode="typefly-threshold-replan", replan_limit=8):
