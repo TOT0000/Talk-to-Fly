@@ -582,21 +582,6 @@ class LLMPlanner():
         text = str(payload.get("guides") or "").strip()
         return text if text else self.guides
 
-    def _extract_completed_checkpoints_from_history(self, execution_history) -> list[str]:
-        if execution_history is None:
-            return []
-        if isinstance(execution_history, list):
-            history_text = ";".join(str(v) for v in execution_history)
-        else:
-            history_text = str(execution_history)
-        found = re.findall(r"(?:gc|go_checkpoint)\(\s*['\"]?\s*([A-Za-z]\d+)\s*['\"]?\s*\)", history_text)
-        ordered = []
-        for cid in found:
-            norm = str(cid).upper()
-            if norm not in ordered:
-                ordered.append(norm)
-        return ordered
-
     def _build_replan_history_block(
         self,
         task_description: str,
@@ -616,8 +601,6 @@ class LLMPlanner():
 
         progress = dict(benchmark_progress or {})
         completed = [str(v).upper() for v in list(progress.get("completed") or [])]
-        if not completed:
-            completed = self._extract_completed_checkpoints_from_history(execution_history)
         remaining = [cid for cid in active_checkpoint_ids if cid not in completed]
         current_target = progress.get("current_target")
         if current_target is not None:
@@ -646,6 +629,7 @@ class LLMPlanner():
             f"- previous plan: {previous_plan_text}\n"
             f"- execution history: {execution_history if execution_history is not None else '(n/a)'}\n"
             f"- mission progress snapshot: {mission_progress}\n"
+            "- completion_state_source: benchmark_progress/dwell_tracker\n"
             f"- completed checkpoints: {completed if completed else ['(none_detected)']}\n"
             f"- remaining checkpoints: {remaining if remaining else ['(none)']}\n"
             f"- current target checkpoint: {current_target}\n"
@@ -710,6 +694,11 @@ class LLMPlanner():
         objective = dict(snapshot.get("active_objective_set") or {})
         active_checkpoint_ids = [str(v) for v in objective.get("active_checkpoint_ids", [])]
         benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
+        true_completed_checkpoints = [str(v).upper() for v in list(benchmark_progress.get("completed") or [])]
+        true_remaining_checkpoints = [str(cid).upper() for cid in active_checkpoint_ids if str(cid).upper() not in set(true_completed_checkpoints)]
+        current_target_checkpoint = benchmark_progress.get("current_target") if isinstance(benchmark_progress, dict) else None
+        if current_target_checkpoint is not None:
+            current_target_checkpoint = str(current_target_checkpoint).upper()
         predicted_collision_probability = 0.0 if safety_context is None else float(safety_context.predicted_collision_probability)
         trigger_threshold = float(getattr(self.controller, "predicted_collision_replan_threshold", COLLISION_PROBABILITY_REPLAN_THRESHOLD))
         is_replan_call = str(planning_stage or "initial").strip().lower() == "replan"
@@ -761,9 +750,9 @@ class LLMPlanner():
             execution_history=execution_history_block,
             mission_progress=mission_progress_block,
             previous_plan=previous_plan if is_replan_call else None,
-            completed_checkpoints=self._extract_completed_checkpoints_from_history(execution_history_block) if is_replan_call else [],
-            remaining_checkpoints=[cid for cid in active_checkpoint_ids if cid not in self._extract_completed_checkpoints_from_history(execution_history_block)] if is_replan_call else active_checkpoint_ids,
-            current_target_checkpoint=(benchmark_progress.get("current_target") if isinstance(benchmark_progress, dict) else None),
+            completed_checkpoints=true_completed_checkpoints if is_replan_call else [],
+            remaining_checkpoints=true_remaining_checkpoints if is_replan_call else [str(v).upper() for v in active_checkpoint_ids],
+            current_target_checkpoint=current_target_checkpoint,
         )
         dump_prompt = str(os.getenv("TYPEFLY_DUMP_LLM_PROMPT", "1")).strip().lower() not in {"0", "false", "no"}
         if dump_prompt:
@@ -794,10 +783,15 @@ class LLMPlanner():
             "prompt": prompt,
             "raw_response": raw_response,
             "planning_stage": str(planning_stage or "initial"),
+            "plan_source": ("llm_replan" if str(planning_stage or "initial").strip().lower() == "replan" else "llm_initial"),
             "prompt_variant": self.runtime_prompt_variant,
             "example_variant": self.runtime_example_variant,
             "use_output_example": bool(self.runtime_use_output_example),
             "source": "plan",
+            "true_completed_checkpoints": list(true_completed_checkpoints),
+            "true_remaining_checkpoints": list(true_remaining_checkpoints),
+            "current_target_checkpoint": current_target_checkpoint,
+            "completion_state_source": "benchmark_progress/dwell_tracker",
         }
         return raw_response
 
