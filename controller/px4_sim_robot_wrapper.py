@@ -1,4 +1,5 @@
 import math
+import os
 import threading
 import time
 from typing import Optional, Tuple
@@ -47,6 +48,11 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._active_command_name: Optional[str] = None
         self._active_command_value: Optional[float] = None
         self._active_command_start_time: Optional[float] = None
+        # Offboard warmup dominates per-command latency in px4_sim mode.
+        # Keep it tunable and skip warmup entirely once already OFFBOARD+ARMED.
+        self._offboard_warmup_s = max(0.0, float(os.getenv("TYPEFLY_PX4_OFFBOARD_WARMUP_S", "0.25")))
+        self._offboard_confirm_timeout_s = max(0.1, float(os.getenv("TYPEFLY_PX4_OFFBOARD_CONFIRM_TIMEOUT_S", "1.0")))
+        self._offboard_max_attempts = max(1, int(os.getenv("TYPEFLY_PX4_OFFBOARD_MAX_ATTEMPTS", "2")))
 
     def set_state_provider(self, state_provider):
         self._state_provider = state_provider
@@ -169,9 +175,9 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         y: float,
         z: float,
         yaw: float,
-        warmup_s: float = 1.0,
-        confirm_timeout_s: float = 2.0,
-        max_attempts: int = 3,
+        warmup_s: Optional[float] = None,
+        confirm_timeout_s: Optional[float] = None,
+        max_attempts: Optional[int] = None,
     ) -> bool:
         """Warm the position-setpoint stream, then request OFFBOARD + arm.
 
@@ -182,8 +188,19 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         """
         cmd_mode = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_DO_SET_MODE", 176)
         cmd_arm = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_COMPONENT_ARM_DISARM", 400)
+        if warmup_s is None:
+            warmup_s = self._offboard_warmup_s
+        if confirm_timeout_s is None:
+            confirm_timeout_s = self._offboard_confirm_timeout_s
+        if max_attempts is None:
+            max_attempts = self._offboard_max_attempts
+
+        # Fast path: during normal px4_sim operation we are already OFFBOARD+ARMED.
+        self._set_active_target(x, y, z, yaw)
+        if self._is_offboard_ready():
+            return True
+
         for attempt in range(1, max_attempts + 1):
-            self._set_active_target(x, y, z, yaw)
             time.sleep(warmup_s)
             self._publish_vehicle_command(cmd_mode, param1=1.0, param2=6.0)
             self._publish_vehicle_command(cmd_arm, param1=1.0)

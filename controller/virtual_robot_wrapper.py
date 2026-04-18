@@ -1,3 +1,4 @@
+import os
 import cv2, time
 from typing import Tuple
 from .abs.robot_wrapper import RobotWrapper
@@ -24,6 +25,9 @@ class VirtualRobotWrapper(RobotWrapper):
     def __init__(self, enable_video: bool = False):
         self.stream_on = False
         self.enable_video = enable_video
+        # Keep simulation responsive by default while allowing callers to tune
+        # pacing to mimic real-world drone latency when needed.
+        self.command_delay_s = max(0.0, float(os.getenv("TYPEFLY_VIRTUAL_COMMAND_DELAY_S", "0.05")))
         self.movement_x_accumulator = 0.0 
         self.movement_y_accumulator = 0.0 
         self.movement_z_accumulator = 0.0 
@@ -33,6 +37,10 @@ class VirtualRobotWrapper(RobotWrapper):
             self.start_stream()  
         
         print(f"[INFO] VirtualRobotWrapper: enable_video = {self.enable_video}")
+
+    def _sleep_after_command(self):
+        if self.command_delay_s > 0:
+            time.sleep(self.command_delay_s)
 
     def keep_active(self):
         pass
@@ -73,37 +81,37 @@ class VirtualRobotWrapper(RobotWrapper):
     def move_forward(self, distance: float) -> Tuple[bool, bool]:
         print(f"-> Moving forward {distance} m")
         self.movement_y_accumulator += distance
-        time.sleep(1)
+        self._sleep_after_command()
         return True, False
     # ***
     def move_backward(self, distance: float) -> Tuple[bool, bool]:
         print(f"-> Moving backward {distance} m")
         self.movement_y_accumulator -= distance
-        time.sleep(1)
+        self._sleep_after_command()
         return True, False
     # ***
     def move_left(self, distance: float) -> Tuple[bool, bool]:
         print(f"-> Moving left {distance} m")
         self.movement_x_accumulator -= distance
-        time.sleep(1)
+        self._sleep_after_command()
         return True, False
     # ***
     def move_right(self, distance: float) -> Tuple[bool, bool]:
         print(f"-> Moving right {distance} m")
         self.movement_x_accumulator += distance
-        time.sleep(1)
+        self._sleep_after_command()
         return True, False
     # ***
     def move_up(self, distance: float) -> Tuple[bool, bool]:
         print(f"-> Moving up {distance} m")
         self.movement_z_accumulator += distance  # ***
-        time.sleep(1)
+        self._sleep_after_command()
         return True, False
     # ***
     def move_down(self, distance: float) -> Tuple[bool, bool]:
         print(f"-> Moving down {distance} m")
         self.movement_z_accumulator -= distance  # ***
-        time.sleep(1)
+        self._sleep_after_command()
         return True, False
 
     def turn_ccw(self, degree: int) -> Tuple[bool, bool]:
@@ -112,7 +120,7 @@ class VirtualRobotWrapper(RobotWrapper):
         if degree >= 90:
             print("-> Turning CCW over 90 degrees")
             return True, False
-        time.sleep(1)
+        self._sleep_after_command()
         return True, False
 
     def turn_cw(self, degree: int) -> Tuple[bool, bool]:
@@ -121,7 +129,7 @@ class VirtualRobotWrapper(RobotWrapper):
         if degree >= 90:
             print("-> Turning CW over 90 degrees")
             return True, False
-        time.sleep(1)
+        self._sleep_after_command()
         return True, False
    
     # ***    
@@ -132,4 +140,3 @@ class VirtualRobotWrapper(RobotWrapper):
             round(self.movement_y_accumulator, 2),
             round(self.movement_z_accumulator, 2)
         )
-

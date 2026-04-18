@@ -953,8 +953,10 @@ class LLMController():
         )
 
         max_step_m = 1.0
-        heading_align_far_deg = 14.0
-        heading_align_near_deg = 7.0
+        # gc policy: align to checkpoint heading first, then move straight forward.
+        # Use tighter alignment thresholds to avoid diagonal-looking trajectories.
+        heading_align_far_deg = 8.0
+        heading_align_near_deg = 5.0
         max_turn_step_deg = 28
 
         initial_snapshot = self.get_live_ui_snapshot()
