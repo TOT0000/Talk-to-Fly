@@ -244,6 +244,14 @@ class LLMController():
         self._mission_original_plan: Optional[str] = None
         self._current_active_plan: Optional[str] = None
         self._latest_full_replan_response: Optional[str] = None
+        self.mission_start_ts: Optional[float] = None
+        self.mission_end_ts: Optional[float] = None
+        self.final_mission_summary: Optional[dict] = None
+        self.interrupted_for_replan = False
+        self.entered_awaiting_replan_response = False
+        self.execution_resumed_from_new_plan = False
+        self.next_statement_executed_after_interrupt = False
+        self._interrupt_pending_until_new_plan = False
         self.langgraph_runner = LangGraphOrchestrationRunner(self)
         self.set_selected_pipeline(self.selected_pipeline_id)
 
@@ -1155,9 +1163,15 @@ class LLMController():
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
         should_request_replan = bool(
-            str(stop_reason).startswith("collision_probability_high")
+            preempted_for_replan
+            or str(stop_reason).startswith("collision_probability_high")
             or str(stop_reason).startswith("agent_heartbeat_replan")
+            or str(stop_reason).startswith("runtime_replan_event")
         )
+        if should_request_replan:
+            self.interrupted_for_replan = True
+            self.entered_awaiting_replan_response = True
+            self._interrupt_pending_until_new_plan = True
         # Keep gc non-replan on pure kinematic convergence limits (e.g. max_iterations).
         return summary, should_request_replan
 
@@ -1238,6 +1252,8 @@ class LLMController():
         return True, reason
 
     def _on_statement_executed_for_replan(self):
+        if bool(getattr(self, "_interrupt_pending_until_new_plan", False)):
+            self.next_statement_executed_after_interrupt = True
         if self.auto_replan_protection_remaining > 0:
             self.auto_replan_protection_remaining -= 1
             print_debug(
@@ -1472,9 +1488,15 @@ class LLMController():
         event_triggered, event_reason = self._consume_runtime_replan_event()
         if event_triggered:
             print_t("[QUEUE] clearing remaining statements due to replan")
+            self.interrupted_for_replan = True
+            self.entered_awaiting_replan_response = True
+            self._interrupt_pending_until_new_plan = True
             return True, event_reason
         if self._maybe_run_agent_heartbeat():
             print_t("[QUEUE] clearing remaining statements due to replan")
+            self.interrupted_for_replan = True
+            self.entered_awaiting_replan_response = True
+            self._interrupt_pending_until_new_plan = True
             return True, f"agent_heartbeat_replan:{self._pending_heartbeat_reason or 'llm'}"
         if not self._is_threshold_replan_mode():
             return False, ""
@@ -1499,6 +1521,9 @@ class LLMController():
                 f"predicted_collision_probability={current_p:.6f} > {self.predicted_collision_replan_threshold:.2f}, "
                 "aborting current execution"
             )
+            self.interrupted_for_replan = True
+            self.entered_awaiting_replan_response = True
+            self._interrupt_pending_until_new_plan = True
             print_t(
                 "[REPLAN_DEBUG] "
                 f"source=collision_threshold "
@@ -1691,6 +1716,14 @@ class LLMController():
         self._mission_original_plan = None
         self._current_active_plan = None
         self._latest_full_replan_response = None
+        self.mission_start_ts = time.time()
+        self.mission_end_ts = None
+        self.final_mission_summary = None
+        self.interrupted_for_replan = False
+        self.entered_awaiting_replan_response = False
+        self.execution_resumed_from_new_plan = False
+        self.next_statement_executed_after_interrupt = False
+        self._interrupt_pending_until_new_plan = False
         def _run_monitor():
             while not monitor_stop.is_set():
                 try:
@@ -1737,6 +1770,10 @@ class LLMController():
                         self._pending_heartbeat_replan_plan = None
                         self._pending_heartbeat_reason = ""
                         self._clear_runtime_replan_event()
+                        if self._interrupt_pending_until_new_plan:
+                            self.execution_resumed_from_new_plan = True
+                        self._interrupt_pending_until_new_plan = False
+                        self.entered_awaiting_replan_response = False
                         current_progress = dict(self.latest_benchmark_progress or {})
                         completed_now = [str(v).upper() for v in list(current_progress.get("completed") or [])]
                         active_now = [str(v).upper() for v in list(self.active_objective_set.get("active_checkpoint_ids") or [])]
@@ -1769,6 +1806,10 @@ class LLMController():
                         )
                         llm_called = True
                         final_plan_source = f"llm_{planning_stage}"
+                        if str(planning_stage).strip().lower() == "replan" and self._interrupt_pending_until_new_plan:
+                            self.execution_resumed_from_new_plan = True
+                            self.entered_awaiting_replan_response = False
+                            self._interrupt_pending_until_new_plan = False
                         self.task_run_logger.append_planning_trace(
                             trace={
                                 **self.planner.get_last_plan_trace(),
@@ -1851,7 +1892,10 @@ class LLMController():
                         else:
                             replan_attempts += 1
                             self._replan_attempts = replan_attempts
-                            self.execution_mode = "Planning"
+                            self.execution_mode = "AwaitingReplanResponse"
+                            self.interrupted_for_replan = True
+                            self.entered_awaiting_replan_response = True
+                            self._interrupt_pending_until_new_plan = True
                             self.append_message(
                                 "[TYPEFLY-INTERRUPT] statement requested replan, aborting current execution: "
                                 f"{replan_value if replan_value else 'no detail'}"
@@ -1899,7 +1943,16 @@ class LLMController():
                     current_target_checkpoint=self.latest_benchmark_progress.get("current_target"),
                     checkpoint_status_snapshot=dict(self.latest_benchmark_progress),
                     completion_state_source="benchmark_progress/dwell_tracker",
-                    completion_time_sec=(time.time() - self.execution_time) if task_completed else None,
+                    completion_time_mission_sec=((time.time() - float(self.mission_start_ts)) if (task_completed and self.mission_start_ts is not None) else None),
+                    mission_start_ts=self.mission_start_ts,
+                    mission_end_ts=(time.time() if task_completed else None),
+                    final_summary_source="final_mission_summary",
+                    final_runtime_snapshot_ts=None,
+                    final_status_source="benchmark_progress/dwell_tracker",
+                    interrupted_for_replan=bool(self.interrupted_for_replan),
+                    entered_awaiting_replan_response=bool(self.entered_awaiting_replan_response),
+                    execution_resumed_from_new_plan=bool(self.execution_resumed_from_new_plan),
+                    next_statement_executed_after_interrupt=bool(self.next_statement_executed_after_interrupt),
                 )
                 # TypeFly post-check auto repair removed by design:
                 # completion mismatch is logged only; no queue-finished auto replan.
@@ -1931,12 +1984,49 @@ class LLMController():
         remaining_active = sorted(cid for cid in active_ids if cid not in completed_set)
         mission_success = (len(remaining_active) == 0)
         run_status = "completed" if mission_success else "incomplete"
+        termination_reason = (
+            "mission_completed_all_active_checkpoints"
+            if mission_success
+            else "queue_exhausted_with_unfinished_checkpoints"
+        )
+        queue_exhausted_with_unfinished = bool((not mission_success) and bool(remaining_active))
         if not mission_success:
             self.append_message(
                 f"[LOG] Mission incomplete: queue exhausted with unfinished checkpoints={remaining_active}"
             )
-        self.execution_mode = "Completed"
-        self.task_run_logger.consume_runtime_snapshot(self.get_live_ui_snapshot())
+        self.execution_mode = ("Completed" if mission_success else "Incomplete")
+        final_snapshot = self.get_live_ui_snapshot()
+        final_summary = self._build_final_mission_summary(
+            final_snapshot,
+            run_status=run_status,
+            mission_success=mission_success,
+            termination_reason=termination_reason,
+        )
+        final_snapshot["final_mission_summary"] = dict(final_summary)
+        self.task_run_logger.consume_runtime_snapshot(final_snapshot)
+        self.task_run_logger.update_execution_info(
+            execution_success=True,
+            task_completed=mission_success,
+            mission_success=mission_success,
+            termination_reason=termination_reason,
+            queue_exhausted_with_unfinished=queue_exhausted_with_unfinished,
+            ended_due_to_replan_interrupt=False,
+            true_completed_checkpoints=sorted(completed_set),
+            true_remaining_checkpoints=remaining_active,
+            current_target_checkpoint=self.latest_benchmark_progress.get("current_target"),
+            checkpoint_status_snapshot=dict(self.latest_benchmark_progress),
+            completion_state_source="benchmark_progress/dwell_tracker",
+            completion_time_mission_sec=final_summary.get("completion_time_mission_sec"),
+            mission_start_ts=final_summary.get("mission_start_ts"),
+            mission_end_ts=final_summary.get("mission_end_ts"),
+            final_summary_source=final_summary.get("final_summary_source", "final_runtime_snapshot"),
+            final_runtime_snapshot_ts=str(final_summary.get("final_runtime_snapshot_ts")),
+            final_status_source=final_summary.get("final_status_source", "benchmark_progress/dwell_tracker"),
+            interrupted_for_replan=bool(final_summary.get("interrupted_for_replan")),
+            entered_awaiting_replan_response=bool(final_summary.get("entered_awaiting_replan_response")),
+            execution_resumed_from_new_plan=bool(final_summary.get("execution_resumed_from_new_plan")),
+            next_statement_executed_after_interrupt=bool(final_summary.get("next_statement_executed_after_interrupt")),
+        )
         self.task_run_logger.end_run(run_status=run_status)
         monitor_stop.set()
         if monitor_thread is not None:
@@ -2344,6 +2434,35 @@ class LLMController():
         assessed_context.candidate_path_summaries = candidate_path_summaries or []
         return assessed_context
 
+    def _build_final_mission_summary(self, snapshot: dict, *, run_status: str, mission_success: bool, termination_reason: str) -> dict:
+        mission_end_ts = time.time()
+        self.mission_end_ts = mission_end_ts if bool(mission_success) else None
+        summary = {
+            "run_status": str(run_status),
+            "mission_success": bool(mission_success),
+            "termination_reason": str(termination_reason or ""),
+            "mission_start_ts": self.mission_start_ts,
+            "mission_end_ts": self.mission_end_ts,
+            "completion_time_mission_sec": (
+                None
+                if (not bool(mission_success) or self.mission_start_ts is None or self.mission_end_ts is None)
+                else round(float(self.mission_end_ts) - float(self.mission_start_ts), 3)
+            ),
+            "collision_count": int((snapshot or {}).get("collision_count", 0) or 0),
+            "near_miss_count": int((snapshot or {}).get("near_miss_count", 0) or 0),
+            "replan_count": int(getattr(self, "_replan_attempts", 0)),
+            "queue_exhausted_with_unfinished": bool((not bool(mission_success))),
+            "final_summary_source": "final_runtime_snapshot",
+            "final_runtime_snapshot_ts": float(mission_end_ts),
+            "final_status_source": "benchmark_progress/dwell_tracker",
+            "interrupted_for_replan": bool(self.interrupted_for_replan),
+            "entered_awaiting_replan_response": bool(self.entered_awaiting_replan_response),
+            "execution_resumed_from_new_plan": bool(self.execution_resumed_from_new_plan),
+            "next_statement_executed_after_interrupt": bool(self.next_statement_executed_after_interrupt),
+        }
+        self.final_mission_summary = dict(summary)
+        return summary
+
     def get_live_ui_snapshot(self):
         provider = getattr(self, "state_provider", None)
         if provider is None:
@@ -2539,6 +2658,12 @@ class LLMController():
             "replan_count": int(getattr(self, "_replan_attempts", 0)),
         }
         self._update_proximity_metrics(snapshot)
+        if self.final_mission_summary is not None:
+            summary = dict(self.final_mission_summary)
+            summary["collision_count"] = int(summary.get("collision_count", snapshot.get("collision_count", 0)) or 0)
+            summary["near_miss_count"] = int(summary.get("near_miss_count", snapshot.get("near_miss_count", 0)) or 0)
+            summary["replan_count"] = int(summary.get("replan_count", getattr(self, "_replan_attempts", 0)) or 0)
+            snapshot["final_mission_summary"] = summary
         if safety_state is not None and safety_context is not None:
             consistency_from_gap = bool(float(safety_state.envelope_gap_m) < 0.0)
             print_debug(
