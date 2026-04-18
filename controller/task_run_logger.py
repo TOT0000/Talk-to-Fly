@@ -127,6 +127,14 @@ class _RunRecord:
     mission_end_ts: Optional[float] = None
     final_summary_source: str = "runtime_snapshot"
     final_runtime_snapshot_ts: Optional[str] = None
+    final_completion_snapshot_ts: Optional[str] = None
+    final_completion_snapshot_source: str = "benchmark_progress/dwell_tracker"
+    final_execution_mode: str = ""
+    final_run_status: str = ""
+    final_mission_success: Optional[bool] = None
+    final_termination_reason: str = ""
+    final_true_completed_checkpoints: List[str] = field(default_factory=list)
+    final_true_remaining_checkpoints: List[str] = field(default_factory=list)
     final_status_source: str = "final_mission_summary"
     interrupted_for_replan: bool = False
     entered_awaiting_replan_response: bool = False
@@ -297,6 +305,14 @@ class TaskRunLogger:
         mission_end_ts: Optional[float] = None,
         final_summary_source: str = "runtime_snapshot",
         final_runtime_snapshot_ts: Optional[str] = None,
+        final_completion_snapshot_ts: Optional[str] = None,
+        final_completion_snapshot_source: str = "benchmark_progress/dwell_tracker",
+        final_execution_mode: str = "",
+        final_run_status: str = "",
+        final_mission_success: Optional[bool] = None,
+        final_termination_reason: str = "",
+        final_true_completed_checkpoints: Optional[List[str]] = None,
+        final_true_remaining_checkpoints: Optional[List[str]] = None,
         final_status_source: str = "final_mission_summary",
         interrupted_for_replan: bool = False,
         entered_awaiting_replan_response: bool = False,
@@ -334,6 +350,16 @@ class TaskRunLogger:
                 self._active.mission_end_ts = float(mission_end_ts)
             self._active.final_summary_source = str(final_summary_source or "runtime_snapshot")
             self._active.final_runtime_snapshot_ts = final_runtime_snapshot_ts
+            self._active.final_completion_snapshot_ts = final_completion_snapshot_ts
+            self._active.final_completion_snapshot_source = str(final_completion_snapshot_source or "benchmark_progress/dwell_tracker")
+            self._active.final_execution_mode = str(final_execution_mode or "")
+            self._active.final_run_status = str(final_run_status or "")
+            self._active.final_mission_success = None if final_mission_success is None else bool(final_mission_success)
+            self._active.final_termination_reason = str(final_termination_reason or "")
+            if final_true_completed_checkpoints is not None:
+                self._active.final_true_completed_checkpoints = [str(v).upper() for v in list(final_true_completed_checkpoints)]
+            if final_true_remaining_checkpoints is not None:
+                self._active.final_true_remaining_checkpoints = [str(v).upper() for v in list(final_true_remaining_checkpoints)]
             self._active.final_status_source = str(final_status_source or "final_mission_summary")
             self._active.interrupted_for_replan = bool(interrupted_for_replan)
             self._active.entered_awaiting_replan_response = bool(entered_awaiting_replan_response)
@@ -519,6 +545,14 @@ class TaskRunLogger:
             "mission_end_ts": active.mission_end_ts,
             "final_summary_source": active.final_summary_source,
             "final_runtime_snapshot_ts": active.final_runtime_snapshot_ts,
+            "final_completion_snapshot_ts": active.final_completion_snapshot_ts,
+            "final_completion_snapshot_source": active.final_completion_snapshot_source,
+            "final_execution_mode": active.final_execution_mode,
+            "final_run_status": active.final_run_status,
+            "final_mission_success": active.final_mission_success,
+            "final_termination_reason": active.final_termination_reason,
+            "final_true_completed_checkpoints": list(active.final_true_completed_checkpoints),
+            "final_true_remaining_checkpoints": list(active.final_true_remaining_checkpoints),
             "final_status_source": active.final_status_source,
             "interrupted_for_replan": bool(active.interrupted_for_replan),
             "entered_awaiting_replan_response": bool(active.entered_awaiting_replan_response),
@@ -648,6 +682,14 @@ class TaskRunLogger:
             "completion_state_source": active.completion_state_source,
             "final_summary_source": active.final_summary_source,
             "final_runtime_snapshot_ts": active.final_runtime_snapshot_ts,
+            "final_completion_snapshot_ts": active.final_completion_snapshot_ts,
+            "final_completion_snapshot_source": active.final_completion_snapshot_source,
+            "final_execution_mode": active.final_execution_mode,
+            "final_run_status": active.final_run_status,
+            "final_mission_success": active.final_mission_success,
+            "final_termination_reason": active.final_termination_reason,
+            "final_true_completed_checkpoints": list(active.final_true_completed_checkpoints),
+            "final_true_remaining_checkpoints": list(active.final_true_remaining_checkpoints),
             "final_status_source": active.final_status_source,
             "interrupted_for_replan": bool(active.interrupted_for_replan),
             "entered_awaiting_replan_response": bool(active.entered_awaiting_replan_response),

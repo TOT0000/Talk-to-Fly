@@ -1979,10 +1979,11 @@ class LLMController():
                 return
 
             break
-        completed_set = set(str(v).upper() for v in (self.latest_benchmark_progress.get("completed") or []))
-        active_ids = set(str(v).upper() for v in self.active_objective_set.get("active_checkpoint_ids", []))
-        remaining_active = sorted(cid for cid in active_ids if cid not in completed_set)
-        mission_success = (len(remaining_active) == 0)
+        final_snapshot = self.get_live_ui_snapshot()
+        completion_state = self._derive_completion_state_from_snapshot(final_snapshot)
+        completed_set = set(completion_state.get("true_completed_checkpoints", []))
+        remaining_active = list(completion_state.get("true_remaining_checkpoints", []))
+        mission_success = bool(completion_state.get("mission_success"))
         run_status = "completed" if mission_success else "incomplete"
         termination_reason = (
             "mission_completed_all_active_checkpoints"
@@ -1995,7 +1996,7 @@ class LLMController():
                 f"[LOG] Mission incomplete: queue exhausted with unfinished checkpoints={remaining_active}"
             )
         self.execution_mode = ("Completed" if mission_success else "Incomplete")
-        final_snapshot = self.get_live_ui_snapshot()
+        final_snapshot["execution_mode"] = self.execution_mode
         final_summary = self._build_final_mission_summary(
             final_snapshot,
             run_status=run_status,
@@ -2013,14 +2014,22 @@ class LLMController():
             ended_due_to_replan_interrupt=False,
             true_completed_checkpoints=sorted(completed_set),
             true_remaining_checkpoints=remaining_active,
-            current_target_checkpoint=self.latest_benchmark_progress.get("current_target"),
-            checkpoint_status_snapshot=dict(self.latest_benchmark_progress),
+            current_target_checkpoint=completion_state.get("current_target_checkpoint"),
+            checkpoint_status_snapshot=dict(final_snapshot.get("benchmark_progress") or {}),
             completion_state_source="benchmark_progress/dwell_tracker",
             completion_time_mission_sec=final_summary.get("completion_time_mission_sec"),
             mission_start_ts=final_summary.get("mission_start_ts"),
             mission_end_ts=final_summary.get("mission_end_ts"),
             final_summary_source=final_summary.get("final_summary_source", "final_runtime_snapshot"),
             final_runtime_snapshot_ts=str(final_summary.get("final_runtime_snapshot_ts")),
+            final_completion_snapshot_ts=str(final_summary.get("final_completion_snapshot_ts")),
+            final_completion_snapshot_source=final_summary.get("final_completion_snapshot_source", "benchmark_progress/dwell_tracker"),
+            final_execution_mode=final_summary.get("final_execution_mode"),
+            final_run_status=final_summary.get("final_run_status"),
+            final_mission_success=final_summary.get("final_mission_success"),
+            final_termination_reason=final_summary.get("final_termination_reason"),
+            final_true_completed_checkpoints=final_summary.get("final_true_completed_checkpoints"),
+            final_true_remaining_checkpoints=final_summary.get("final_true_remaining_checkpoints"),
             final_status_source=final_summary.get("final_status_source", "benchmark_progress/dwell_tracker"),
             interrupted_for_replan=bool(final_summary.get("interrupted_for_replan")),
             entered_awaiting_replan_response=bool(final_summary.get("entered_awaiting_replan_response")),
@@ -2437,6 +2446,7 @@ class LLMController():
     def _build_final_mission_summary(self, snapshot: dict, *, run_status: str, mission_success: bool, termination_reason: str) -> dict:
         mission_end_ts = time.time()
         self.mission_end_ts = mission_end_ts if bool(mission_success) else None
+        completion_state = self._derive_completion_state_from_snapshot(snapshot)
         summary = {
             "run_status": str(run_status),
             "mission_success": bool(mission_success),
@@ -2454,6 +2464,14 @@ class LLMController():
             "queue_exhausted_with_unfinished": bool((not bool(mission_success))),
             "final_summary_source": "final_runtime_snapshot",
             "final_runtime_snapshot_ts": float(mission_end_ts),
+            "final_completion_snapshot_ts": float(mission_end_ts),
+            "final_completion_snapshot_source": "benchmark_progress/dwell_tracker",
+            "final_execution_mode": ("Completed" if bool(mission_success) else "Incomplete"),
+            "final_run_status": str(run_status),
+            "final_mission_success": bool(mission_success),
+            "final_termination_reason": str(termination_reason or ""),
+            "final_true_completed_checkpoints": list(completion_state.get("true_completed_checkpoints", [])),
+            "final_true_remaining_checkpoints": list(completion_state.get("true_remaining_checkpoints", [])),
             "final_status_source": "benchmark_progress/dwell_tracker",
             "interrupted_for_replan": bool(self.interrupted_for_replan),
             "entered_awaiting_replan_response": bool(self.entered_awaiting_replan_response),
@@ -2462,6 +2480,23 @@ class LLMController():
         }
         self.final_mission_summary = dict(summary)
         return summary
+
+    def _derive_completion_state_from_snapshot(self, snapshot: dict) -> dict:
+        progress = dict((snapshot or {}).get("benchmark_progress") or {})
+        active_ids = [
+            str(v).upper()
+            for v in list(((snapshot or {}).get("active_objective_set") or {}).get("active_checkpoint_ids") or [])
+        ]
+        completed = [str(v).upper() for v in list(progress.get("completed") or [])]
+        completed_in_scope = [cid for cid in completed if (not active_ids) or (cid in set(active_ids))]
+        remaining = [cid for cid in active_ids if cid not in set(completed_in_scope)]
+        return {
+            "active_checkpoint_ids": list(active_ids),
+            "true_completed_checkpoints": list(completed_in_scope),
+            "true_remaining_checkpoints": list(remaining),
+            "current_target_checkpoint": progress.get("current_target"),
+            "mission_success": (len(remaining) == 0),
+        }
 
     def get_live_ui_snapshot(self):
         provider = getattr(self, "state_provider", None)

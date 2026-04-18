@@ -1140,11 +1140,12 @@ class TypeFly:
         run_status = str(final_summary.get("run_status", "running"))
         mission_success = bool(final_summary.get("mission_success", self.mission_clock.get("objective_completed", False)))
         termination_reason = str(final_summary.get("termination_reason", ""))
+        final_execution_mode = str(final_summary.get("final_execution_mode", snapshot.get("execution_mode", "Waiting")))
 
         lines = [
             "### Status",
             f"- current framework: {snapshot.get('framework_name', 'n/a')}",
-            f"- current mode: {snapshot.get('execution_mode', 'Waiting')}",
+            f"- current mode: {final_execution_mode}",
             f"- selected baseline: {snapshot.get('selected_baseline_id', 'n/a')} ({snapshot.get('selected_baseline_name', 'n/a')})",
             f"- current scene: {snapshot.get('baseline_scene_id', 'n/a')}",
             f"- archive policy: post-run Save/Discard decision",
