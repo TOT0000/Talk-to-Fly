@@ -1312,12 +1312,22 @@ class LLMController():
             full_replan_count=int(getattr(self, "_replan_attempts", 0)),
             hard_gate=(self.framework_mode == MODE_AGENT_HEARTBEAT_HARDGATE),
         )
+        benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
+        completed = [str(v).upper() for v in list(benchmark_progress.get("completed") or [])]
+        active_ids = [str(v).upper() for v in list((snapshot.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])]
+        remaining = [cid for cid in active_ids if cid not in set(completed)]
         self.task_run_logger.append_planning_trace(
             trace={
                 **self.planner.get_last_heartbeat_trace(),
+                "planning_stage": "heartbeat",
+                "plan_source": "heartbeat_decision",
                 "llm_call_purpose": "heartbeat",
                 "selected_baseline_id": self.selected_pipeline_id,
                 "scene_id": self.baseline_scene_id,
+                "current_target_checkpoint": benchmark_progress.get("current_target"),
+                "true_completed_checkpoints": [str(v).upper() for v in list(completed or [])],
+                "true_remaining_checkpoints": [str(v).upper() for v in list(remaining or [])],
+                "completion_state_source": "benchmark_progress/dwell_tracker",
             }
         )
         raw_response = str(response.get("raw_response", "") or "").strip()
@@ -1727,6 +1737,24 @@ class LLMController():
                         self._pending_heartbeat_replan_plan = None
                         self._pending_heartbeat_reason = ""
                         self._clear_runtime_replan_event()
+                        current_progress = dict(self.latest_benchmark_progress or {})
+                        completed_now = [str(v).upper() for v in list(current_progress.get("completed") or [])]
+                        active_now = [str(v).upper() for v in list(self.active_objective_set.get("active_checkpoint_ids") or [])]
+                        remaining_now = [cid for cid in active_now if cid not in set(completed_now)]
+                        self.task_run_logger.append_planning_trace(
+                            trace={
+                                "planning_stage": "replan",
+                                "plan_source": "committed_replan",
+                                "llm_call_purpose": "heartbeat_commit",
+                                "parsed_plan": self.current_plan,
+                                "selected_baseline_id": self.selected_pipeline_id,
+                                "scene_id": self.baseline_scene_id,
+                                "current_target_checkpoint": current_progress.get("current_target"),
+                                "true_completed_checkpoints": completed_now,
+                                "true_remaining_checkpoints": remaining_now,
+                                "completion_state_source": "benchmark_progress/dwell_tracker",
+                            }
+                        )
                         llm_called = False
                         final_plan_source = "agent_heartbeat"
                     else:
@@ -1740,7 +1768,7 @@ class LLMController():
                             planning_stage=planning_stage,
                         )
                         llm_called = True
-                        final_plan_source = "llm"
+                        final_plan_source = f"llm_{planning_stage}"
                         self.task_run_logger.append_planning_trace(
                             trace={
                                 **self.planner.get_last_plan_trace(),

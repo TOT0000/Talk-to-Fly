@@ -336,6 +336,20 @@ class TaskRunLogger:
             if self._active is None:
                 return
             payload = dict(trace or {})
+            if not payload.get("planning_stage"):
+                purpose = str(payload.get("llm_call_purpose") or "").strip().lower()
+                payload["planning_stage"] = (
+                    "heartbeat" if "heartbeat" in purpose else ("replan" if "replan" in purpose else "initial")
+                )
+            if not payload.get("plan_source"):
+                candidate_source = payload.get("plan_source") or payload.get("source") or payload.get("final_plan_source")
+                if candidate_source:
+                    payload["plan_source"] = str(candidate_source)
+                else:
+                    stage = str(payload.get("planning_stage") or "").strip().lower()
+                    payload["plan_source"] = (
+                        "heartbeat_decision" if stage == "heartbeat" else ("llm_replan" if stage == "replan" else "llm_initial")
+                    )
             payload = {k: payload.get(k) for k in PLANNING_TRACE_ALLOWED_KEYS if k in payload}
             payload["run_id"] = self._active.run_id
             payload["timestamp"] = self._to_iso(time.time())
@@ -370,7 +384,12 @@ class TaskRunLogger:
         benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
         completed_checkpoints = [str(v).upper() for v in list(benchmark_progress.get("completed") or [])]
         checkpoint_order = [str(v).upper() for v in list(snapshot.get("checkpoint_order") or [])]
-        remaining_checkpoints = [cid for cid in checkpoint_order if cid not in set(completed_checkpoints)]
+        global_unfinished_checkpoints = [cid for cid in checkpoint_order if cid not in set(completed_checkpoints)]
+        active_checkpoint_ids = [
+            str(v).upper()
+            for v in list((snapshot.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])
+        ]
+        remaining_checkpoints = [cid for cid in active_checkpoint_ids if cid not in set(completed_checkpoints)]
         return {
             "run_id": self._active.run_id if self._active else "",
             "timestamp": self._to_iso(now),
@@ -380,6 +399,8 @@ class TaskRunLogger:
             "benchmark_progress": benchmark_progress,
             "completed_checkpoints": completed_checkpoints,
             "remaining_checkpoints": remaining_checkpoints,
+            "active_checkpoint_ids": active_checkpoint_ids,
+            "global_unfinished_checkpoints": global_unfinished_checkpoints,
             "execution_mode": snapshot.get("execution_mode"),
             "framework_name": snapshot.get("framework_name"),
             "triggered_for_replan": bool(snapshot.get("replan_count", 0)),

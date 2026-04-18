@@ -783,6 +783,7 @@ class LLMPlanner():
             "prompt": prompt,
             "raw_response": raw_response,
             "planning_stage": str(planning_stage or "initial"),
+            "plan_source": ("llm_replan" if str(planning_stage or "initial").strip().lower() == "replan" else "llm_initial"),
             "prompt_variant": self.runtime_prompt_variant,
             "example_variant": self.runtime_example_variant,
             "use_output_example": bool(self.runtime_use_output_example),

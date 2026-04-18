@@ -88,3 +88,49 @@ def test_planning_trace_filters_legacy_fields(tmp_path):
     assert "blocking_entity" not in payload
     assert "candidate_targets" not in payload
     assert "generated_control_plan" not in payload
+
+
+def test_runtime_trace_remaining_checkpoints_are_active_scoped(tmp_path):
+    excel_path = tmp_path / "logs" / "task_runs.xlsx"
+    logger = TaskRunLogger(excel_path=str(excel_path))
+    logger.start_run(
+        task_id="task-active",
+        task_text="active remaining",
+        scenario_name="scene-active",
+        initial_snapshot={
+            "benchmark_progress": {"completed": ["A1"]},
+            "checkpoint_order": ["A1", "B1", "C1"],
+            "active_objective_set": {"active_checkpoint_ids": ["A1", "A2"]},
+        },
+    )
+    logger.end_run(run_status="completed")
+    assert logger.save_pending_run() is True
+
+    runtime_lines = (tmp_path / "logs" / "task_runs_runtime_trace.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    payload = json.loads(runtime_lines[-1])
+    assert payload["remaining_checkpoints"] == ["A2"]
+    assert payload["global_unfinished_checkpoints"] == ["B1", "C1"]
+
+
+def test_planning_trace_defaults_stage_and_source(tmp_path):
+    excel_path = tmp_path / "logs" / "task_runs.xlsx"
+    logger = TaskRunLogger(excel_path=str(excel_path))
+    logger.start_run(
+        task_id="task-plan-default",
+        task_text="plan defaults",
+        scenario_name="scene-plan",
+        initial_snapshot={"benchmark_progress": {"completed": []}, "checkpoint_order": ["A1"]},
+    )
+    logger.append_planning_trace(
+        {
+            "llm_call_purpose": "heartbeat",
+            "raw_response": "{\"response\":\"continue\"}",
+            "current_target_checkpoint": "A1",
+        }
+    )
+    logger.end_run(run_status="completed")
+    assert logger.save_pending_run() is True
+    planning_lines = (tmp_path / "logs" / "task_runs_planning_trace.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    payload = json.loads(planning_lines[-1])
+    assert payload["planning_stage"] == "heartbeat"
+    assert payload["plan_source"] == "heartbeat_decision"
