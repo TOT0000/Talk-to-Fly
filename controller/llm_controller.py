@@ -1041,22 +1041,39 @@ class LLMController():
                 if dist_control + 0.02 < best_dist:
                     best_dist = dist_control
 
-                local_step_cap = 0.25 if dist_control < 0.35 else max_step_m
+                if is_px4_sim:
+                    local_step_cap = 0.60 if dist_control < 0.80 else max_step_m
+                else:
+                    local_step_cap = 0.25 if dist_control < 0.35 else max_step_m
 
                 desired_yaw = math.atan2(dy_w, dx_w)
                 yaw_error = (desired_yaw - yaw + math.pi) % (2.0 * math.pi) - math.pi
                 yaw_error_deg = math.degrees(yaw_error)
                 align_threshold = heading_align_near_deg if dist_control < 0.8 else heading_align_far_deg
                 if abs(yaw_error_deg) > align_threshold:
-                    turn_deg = int(max(5.0, min(float(max_turn_step_deg), abs(yaw_error_deg))))
-                    if yaw_error_deg > 0:
-                        self.drone.turn_ccw(turn_deg)
-                        chosen_action = f"turn_ccw({turn_deg})"
+                    # In px4_sim, strafing can be cheaper than rotate+forward loops.
+                    can_strafe = is_px4_sim and abs(yaw_error_deg) <= 55.0 and abs(body_right) > 0.25
+                    if can_strafe:
+                        lateral_step = min(local_step_cap, max(0.25, min(abs(body_right), dist_control)))
+                        if body_right > 0:
+                            self.drone.move_right(lateral_step)
+                            chosen_action = f"move_right({lateral_step:.2f})"
+                        else:
+                            self.drone.move_left(lateral_step)
+                            chosen_action = f"move_left({lateral_step:.2f})"
                     else:
-                        self.drone.turn_cw(turn_deg)
-                        chosen_action = f"turn_cw({turn_deg})"
+                        turn_deg = int(max(5.0, min(float(max_turn_step_deg), abs(yaw_error_deg))))
+                        if yaw_error_deg > 0:
+                            self.drone.turn_ccw(turn_deg)
+                            chosen_action = f"turn_ccw({turn_deg})"
+                        else:
+                            self.drone.turn_cw(turn_deg)
+                            chosen_action = f"turn_cw({turn_deg})"
                 else:
-                    forward_step = min(local_step_cap, max(0.15, dist_control * 0.65))
+                    if is_px4_sim:
+                        forward_step = min(local_step_cap, max(0.35, dist_control * 0.90))
+                    else:
+                        forward_step = min(local_step_cap, max(0.15, dist_control * 0.65))
                     self.drone.move_forward(forward_step)
                     chosen_action = f"move_forward({forward_step:.2f})"
 
