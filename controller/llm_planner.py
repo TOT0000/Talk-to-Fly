@@ -71,6 +71,8 @@ class LLMPlanner():
             self.prompt_plan_initial = f.read()
         with open(self.prompt_plan_replan_path, "r") as f:
             self.prompt_plan_replan = f.read()
+        self.prompt_variant_assets = self._build_prompt_variant_assets(type_folder_name)
+        self.example_variant_assets = self._build_example_variant_assets(type_folder_name)
         self.prompt_langgraph_decomposition = (
             "{shared_opening_block}\n\n"
             "{shared_runtime_context_block}\n\n"
@@ -251,6 +253,71 @@ class LLMPlanner():
         )
     def set_model(self, model_name):
         self.model_name = model_name
+
+    @staticmethod
+    def _read_text(path: str) -> str:
+        with open(path, "r") as f:
+            return f.read()
+
+    def _build_prompt_variant_assets(self, type_folder_name: str) -> dict:
+        base_dir = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}")
+        variants = {
+            "default": {
+                "plan_initial_prompt": self.prompt_plan_initial,
+                "plan_replan_prompt": self.prompt_plan_replan,
+                "heartbeat_soft_prompt": self.agent_heartbeat_soft_prompt,
+                "heartbeat_hardgate_prompt": self.agent_heartbeat_hardgate_prompt,
+            }
+        }
+        for baseline_id in ("baseline1", "baseline2", "baseline3"):
+            key = f"{baseline_id}_prompt"
+            init_path = os.path.join(base_dir, f"{baseline_id}_prompt_plan_initial.txt")
+            replan_path = os.path.join(base_dir, f"{baseline_id}_prompt_plan_replan.txt")
+            hb_soft_path = os.path.join(base_dir, f"{baseline_id}_prompt_heartbeat_soft.txt")
+            if not (os.path.exists(init_path) and os.path.exists(replan_path) and os.path.exists(hb_soft_path)):
+                variants[key] = dict(variants["default"])
+                continue
+            variants[key] = {
+                "plan_initial_prompt": self._read_text(init_path),
+                "plan_replan_prompt": self._read_text(replan_path),
+                "heartbeat_soft_prompt": self._read_text(hb_soft_path),
+                # Keep hardgate prompt behavior unchanged; only soft is used by baseline1/2.
+                "heartbeat_hardgate_prompt": self.agent_heartbeat_hardgate_prompt,
+            }
+        return variants
+
+    def _build_example_variant_assets(self, type_folder_name: str) -> dict:
+        base_dir = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}")
+        variants = {
+            "default": {
+                "initial_examples": self.typefly_initial_examples,
+                "replan_examples": self.typefly_replan_examples,
+                "heartbeat_soft_examples": self.agent_heartbeat_soft_examples,
+                "heartbeat_hardgate_examples": self.agent_heartbeat_hardgate_examples,
+            }
+        }
+        for baseline_id in ("baseline1", "baseline2", "baseline3"):
+            key = f"{baseline_id}_example"
+            init_ex_path = os.path.join(base_dir, f"{baseline_id}_example_initial.txt")
+            replan_ex_path = os.path.join(base_dir, f"{baseline_id}_example_replan.txt")
+            hb_soft_ex_path = os.path.join(base_dir, f"{baseline_id}_example_heartbeat_soft.txt")
+            if not (os.path.exists(init_ex_path) and os.path.exists(replan_ex_path) and os.path.exists(hb_soft_ex_path)):
+                variants[key] = dict(variants["default"])
+                continue
+            variants[key] = {
+                "initial_examples": self._read_text(init_ex_path),
+                "replan_examples": self._read_text(replan_ex_path),
+                "heartbeat_soft_examples": self._read_text(hb_soft_ex_path),
+                # Keep hardgate examples behavior unchanged.
+                "heartbeat_hardgate_examples": self.agent_heartbeat_hardgate_examples,
+            }
+        return variants
+
+    def _get_prompt_variant_payload(self) -> dict:
+        return dict(self.prompt_variant_assets.get(self.runtime_prompt_variant) or self.prompt_variant_assets["default"])
+
+    def _get_example_variant_payload(self) -> dict:
+        return dict(self.example_variant_assets.get(self.runtime_example_variant) or self.example_variant_assets["default"])
 
     def set_runtime_prompt_example_variant(
         self,
@@ -560,13 +627,20 @@ class LLMPlanner():
             benchmark_progress=benchmark_progress,
         )
         prompt_template = (self.prompt_plan_replan if is_replan_call else self.prompt_plan_initial)
+        prompt_variant_payload = self._get_prompt_variant_payload()
+        example_variant_payload = self._get_example_variant_payload()
+        prompt_template = (
+            prompt_variant_payload["plan_replan_prompt"]
+            if is_replan_call
+            else prompt_variant_payload["plan_initial_prompt"]
+        )
         execution_history_block = (execution_history if is_replan_call else None)
         mission_progress_block = (benchmark_progress if is_replan_call else None)
         prompt = prompt_template.format(
             system_skill_description_low=self.low_level_skillset,
             guides=self.guides,
-            typefly_initial_examples=self.typefly_initial_examples,
-            typefly_replan_examples=self.typefly_replan_examples,
+            typefly_initial_examples=example_variant_payload["initial_examples"],
+            typefly_replan_examples=example_variant_payload["replan_examples"],
             error_message=error_message,
             scene_description=full_scene,
             task_description=task_description,
@@ -646,15 +720,17 @@ class LLMPlanner():
             else "You may choose continue or full_replan_plan based on your judgment."
         )
         agent_heartbeat_examples = (
-            self.agent_heartbeat_hardgate_examples
+            self._get_example_variant_payload().get("heartbeat_hardgate_examples", self.agent_heartbeat_hardgate_examples)
             if hard_gate
-            else self.agent_heartbeat_soft_examples
+            else self._get_example_variant_payload().get("heartbeat_soft_examples", self.agent_heartbeat_soft_examples)
         )
         mission_original_plan_text = str(mission_original_plan or current_plan or "none")
         current_active_plan_text = str(current_active_plan or mission_original_plan_text)
         latest_full_replan_text = str(latest_full_replan_response or "none")
         heartbeat_prompt_template = (
-            self.agent_heartbeat_hardgate_prompt if hard_gate else self.agent_heartbeat_soft_prompt
+            self._get_prompt_variant_payload().get("heartbeat_hardgate_prompt", self.agent_heartbeat_hardgate_prompt)
+            if hard_gate
+            else self._get_prompt_variant_payload().get("heartbeat_soft_prompt", self.agent_heartbeat_soft_prompt)
         )
         prompt = heartbeat_prompt_template.format(
             shared_opening_block=self._build_shared_opening_block(),
