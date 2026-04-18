@@ -274,16 +274,24 @@ class LLMPlanner():
             init_path = os.path.join(base_dir, f"{baseline_id}_prompt_plan_initial.txt")
             replan_path = os.path.join(base_dir, f"{baseline_id}_prompt_plan_replan.txt")
             hb_soft_path = os.path.join(base_dir, f"{baseline_id}_prompt_heartbeat_soft.txt")
-            if not (os.path.exists(init_path) and os.path.exists(replan_path) and os.path.exists(hb_soft_path)):
-                variants[key] = dict(variants["default"])
-                continue
-            variants[key] = {
-                "plan_initial_prompt": self._read_text(init_path),
-                "plan_replan_prompt": self._read_text(replan_path),
-                "heartbeat_soft_prompt": self._read_text(hb_soft_path),
-                # Keep hardgate prompt behavior unchanged; only soft is used by baseline1/2.
-                "heartbeat_hardgate_prompt": self.agent_heartbeat_hardgate_prompt,
-            }
+            payload = dict(variants["default"])
+            if baseline_id in {"baseline1", "baseline2"}:
+                if not (os.path.exists(init_path) and os.path.exists(hb_soft_path)):
+                    variants[key] = payload
+                    continue
+                payload["plan_initial_prompt"] = self._read_text(init_path)
+                # baseline1/2 do not keep a dedicated replan-plan prompt; reuse initial prompt.
+                payload["plan_replan_prompt"] = payload["plan_initial_prompt"]
+                payload["heartbeat_soft_prompt"] = self._read_text(hb_soft_path)
+            elif baseline_id == "baseline3":
+                if not (os.path.exists(init_path) and os.path.exists(replan_path)):
+                    variants[key] = payload
+                    continue
+                payload["plan_initial_prompt"] = self._read_text(init_path)
+                payload["plan_replan_prompt"] = self._read_text(replan_path)
+                # baseline3 does not keep a dedicated heartbeat-soft prompt.
+                payload["heartbeat_soft_prompt"] = self.agent_heartbeat_soft_prompt
+            variants[key] = payload
         return variants
 
     def _build_example_variant_assets(self, type_folder_name: str) -> dict:
@@ -301,16 +309,24 @@ class LLMPlanner():
             init_ex_path = os.path.join(base_dir, f"{baseline_id}_example_initial.txt")
             replan_ex_path = os.path.join(base_dir, f"{baseline_id}_example_replan.txt")
             hb_soft_ex_path = os.path.join(base_dir, f"{baseline_id}_example_heartbeat_soft.txt")
-            if not (os.path.exists(init_ex_path) and os.path.exists(replan_ex_path) and os.path.exists(hb_soft_ex_path)):
-                variants[key] = dict(variants["default"])
-                continue
-            variants[key] = {
-                "initial_examples": self._read_text(init_ex_path),
-                "replan_examples": self._read_text(replan_ex_path),
-                "heartbeat_soft_examples": self._read_text(hb_soft_ex_path),
-                # Keep hardgate examples behavior unchanged.
-                "heartbeat_hardgate_examples": self.agent_heartbeat_hardgate_examples,
-            }
+            payload = dict(variants["default"])
+            if baseline_id in {"baseline1", "baseline2"}:
+                if not (os.path.exists(init_ex_path) and os.path.exists(hb_soft_ex_path)):
+                    variants[key] = payload
+                    continue
+                payload["initial_examples"] = self._read_text(init_ex_path)
+                # baseline1/2 do not keep dedicated replan examples; reuse initial examples.
+                payload["replan_examples"] = payload["initial_examples"]
+                payload["heartbeat_soft_examples"] = self._read_text(hb_soft_ex_path)
+            elif baseline_id == "baseline3":
+                if not (os.path.exists(init_ex_path) and os.path.exists(replan_ex_path)):
+                    variants[key] = payload
+                    continue
+                payload["initial_examples"] = self._read_text(init_ex_path)
+                payload["replan_examples"] = self._read_text(replan_ex_path)
+                # baseline3 does not keep dedicated heartbeat-soft examples.
+                payload["heartbeat_soft_examples"] = self.agent_heartbeat_soft_examples
+            variants[key] = payload
         return variants
 
     def _get_prompt_variant_payload(self) -> dict:
