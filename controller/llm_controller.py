@@ -952,19 +952,12 @@ class LLMController():
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
 
-        is_px4_sim = isinstance(self.drone, Px4SimRobotWrapper)
-        # gc() in px4_sim should prefer larger translational steps and less
-        # rotate-first behavior; each primitive command waits for convergence.
-        if is_px4_sim:
-            max_step_m = 2.2
-            heading_align_far_deg = 30.0
-            heading_align_near_deg = 15.0
-            max_turn_step_deg = 20
-        else:
-            max_step_m = 1.0
-            heading_align_far_deg = 14.0
-            heading_align_near_deg = 7.0
-            max_turn_step_deg = 28
+        max_step_m = 1.0
+        # gc policy: align to checkpoint heading first, then move straight forward.
+        # Use tighter alignment thresholds to avoid diagonal-looking trajectories.
+        heading_align_far_deg = 8.0
+        heading_align_near_deg = 5.0
+        max_turn_step_deg = 28
 
         initial_snapshot = self.get_live_ui_snapshot()
         initial_control = (
