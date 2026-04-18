@@ -1010,6 +1010,11 @@ class LLMController():
             progress_target_match = bool(runtime_target == checkpoint.id)
             safety_context = snapshot.get("safety_context")
             current_p = 0.0 if safety_context is None else float(getattr(safety_context, "predicted_collision_probability", 0.0))
+            objective_completed_now = self._is_active_objective_completed()
+            if objective_completed_now:
+                reached = True
+                stop_reason = "objective_completed"
+                break
             if self._maybe_run_agent_heartbeat():
                 stop_reason = f"agent_heartbeat_replan({self._pending_heartbeat_reason or 'llm'})"
                 print_t(f"[QUEUE] clearing remaining statements due to replan")
@@ -1399,6 +1404,8 @@ class LLMController():
         return None
 
     def _should_abort_current_execution_for_replan(self) -> Tuple[bool, str]:
+        if self._is_active_objective_completed():
+            return False, ""
         if self._maybe_run_agent_heartbeat():
             print_t("[QUEUE] clearing remaining statements due to replan")
             return True, f"agent_heartbeat_replan:{self._pending_heartbeat_reason or 'llm'}"
