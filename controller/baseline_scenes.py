@@ -239,6 +239,8 @@ def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float) -> List
             else:
                 # Keep worker_2 exactly at the manual-control scene default/static location.
                 gt_x, gt_y = (float(obstacle.gt_x), float(obstacle.gt_y))
+        elif scene.id == "SCENE3":
+            gt_x, gt_y = (float(obstacle.gt_x), float(obstacle.gt_y))
         else:
             gt_x, gt_y = _scripted_worker_gt_xy(obstacle.id, now_s, fallback_xy=(obstacle.gt_x, obstacle.gt_y))
         gt = np.asarray([float(gt_x), float(gt_y), 0.0], dtype=float)
@@ -536,6 +538,60 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
             StaticObstacle("worker_3", 7.0, 3.7, cov_xy=((0.010, 0.000), (0.000, 0.008))),
         ),
         notes="worker_1 fixed at (3,4), worker_3 fixed at (7,3.7); worker_2 stays at manual-control default location.",
+    ),
+    "SCENE1": BaselineScene(
+        id="SCENE1",
+        drone_initial_pose=(4.0, 6.0, -1.5),
+        drone_initial_yaw_rad=0.0,
+        user_position=(10.8, 10.2, 0.0),
+        user_initial_yaw_rad=-2.0,
+        task_points=(
+            TaskPoint("A", 1.4, 10.6, -1.5),
+            TaskPoint("B", 7.4, 10.6, -1.5),
+            TaskPoint("C", 1.7, 4.2, -1.5),
+        ),
+        obstacles=(
+            StaticObstacle("worker_1", 1.5, 10.5, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("worker_2", 8.5, 7.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("worker_3", 2.0, 3.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+        ),
+        notes="scene1 based on SCENE_BENCHMARK_DEMO with UAV true start changed to (4,6).",
+    ),
+    "SCENE2": BaselineScene(
+        id="SCENE2",
+        drone_initial_pose=(6.0, 6.0, -1.5),
+        drone_initial_yaw_rad=0.0,
+        user_position=(10.8, 10.2, 0.0),
+        user_initial_yaw_rad=-2.0,
+        task_points=(
+            TaskPoint("A", 1.4, 10.6, -1.5),
+            TaskPoint("B", 7.4, 10.6, -1.5),
+            TaskPoint("C", 1.7, 4.2, -1.5),
+        ),
+        obstacles=(
+            StaticObstacle("worker_1", 1.5, 10.5, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("worker_2", 8.5, 7.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("worker_3", 2.0, 3.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+        ),
+        notes="scene2 based on SCENE_BENCHMARK_DEMO with UAV true start changed to (6,6).",
+    ),
+    "SCENE3": BaselineScene(
+        id="SCENE3",
+        drone_initial_pose=(1.0, 1.0, -1.5),
+        drone_initial_yaw_rad=0.0,
+        user_position=(10.8, 10.2, 0.0),
+        user_initial_yaw_rad=-2.0,
+        task_points=(
+            TaskPoint("A", 1.4, 10.6, -1.5),
+            TaskPoint("B", 7.4, 10.6, -1.5),
+            TaskPoint("C", 1.7, 4.2, -1.5),
+        ),
+        obstacles=(
+            StaticObstacle("worker_1", 4.5, 2.0, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("worker_2", 8.5, 4.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("worker_3", 7.0, 3.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+        ),
+        notes="scene3 based on SCENE_FIXED_W13_MANUAL_W2 with worker true positions overridden.",
     ),
     "SCENE_1_CLEAR_PATH": BaselineScene(
         id="SCENE_1_CLEAR_PATH",
