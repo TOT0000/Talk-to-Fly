@@ -298,6 +298,68 @@ def test_agent_heartbeat_replan_response_is_emitted_to_chat():
     assert any(str(msg).startswith("[AGENT-HEARTBEAT-REPLAN-PLAN]") for msg in displayed_messages)
 
 
+def test_pending_heartbeat_plan_clears_runtime_event_before_execute(monkeypatch):
+    pytest.importorskip("PIL")
+    from controller.llm_controller import LLMController
+
+    controller = LLMController.__new__(LLMController)
+    displayed_messages = []
+    planner_calls = []
+    executed_programs = []
+
+    class _Planner:
+        def plan(self, **kwargs):
+            planner_calls.append(kwargs)
+            return "gc('SHOULD_NOT_BE_USED');"
+
+    def _execute_minispec_stub(program_text, silent=False, allow_auto_interrupt=True):
+        executed_programs.append(program_text)
+        assert bool(controller._runtime_replan_event.is_set()) is False
+        return MiniSpecReturnValue("ok", False)
+
+    controller.replan_limit = 8
+    controller.controller_wait_takeoff = False
+    controller.message_queue = None
+    controller.execution_history = []
+    controller.current_plan = None
+    controller.framework_mode = "agent-heartbeat-soft"
+    controller.execution_mode = "Waiting"
+    controller.active_objective_set = {"active_checkpoint_ids": []}
+    controller.latest_benchmark_progress = {"completed": []}
+    controller._benchmark_plan_checkpoint_sequence = []
+    controller._task_id_counter = 0
+    controller.auto_replan_armed = True
+    controller.auto_replan_protection_remaining = 0
+    controller.planner_mode = "llm"
+    controller.planner = _Planner()
+    controller.task_run_logger = _NoopLogger()
+    controller.vision = SimpleNamespace(get_obj_list=lambda: "")
+    controller.enable_video = False
+    controller.state_provider = SimpleNamespace(debug_log_latest_localization_snapshot=lambda **kwargs: None)
+    controller.safety_assessor = SimpleNamespace(build_from_provider=lambda provider: None)
+    controller.append_message = displayed_messages.append
+    controller._resolve_active_objective_set = lambda task_text: {"active_checkpoint_ids": []}
+    controller._reset_benchmark_progress_tracking = lambda: None
+    controller._format_planner_location_info = lambda: "loc"
+    controller.get_live_ui_snapshot = lambda: {"safety_context": None, "benchmark_progress": {"completed": []}}
+    controller._debug_log_safety_context = lambda safety: None
+    controller._build_baseline_control_plan = lambda **kwargs: None
+    controller._sanitize_minispec_plan = lambda raw_plan: str(raw_plan)
+    controller.execute_minispec = _execute_minispec_stub
+    controller.get_active_scenario_name = lambda: "test"
+    controller._pending_heartbeat_replan_plan = "ml(0.3);gc('A2');d(2.0);"
+    controller._pending_heartbeat_reason = "geometry_risk"
+    controller._runtime_replan_event = __import__("threading").Event()
+    controller._runtime_replan_reason = "agent_heartbeat_replan:geometry_risk"
+    controller._runtime_replan_event.set()
+
+    monkeypatch.setattr("controller.llm_controller.AUTO_REPLAN_PROTECTION_STATEMENTS", 0)
+    controller.execute_task_description("run mission", framework_mode="agent-heartbeat-soft")
+
+    assert executed_programs[0] == "ml(0.3);gc('A2');d(2.0);"
+    assert len(planner_calls) == 0
+
+
 def test_agent_heartbeat_raw_response_is_emitted_even_when_non_json_continue():
     pytest.importorskip("PIL")
     from controller.llm_controller import LLMController

@@ -1226,12 +1226,15 @@ class LLMController():
             self._runtime_replan_reason = reason_text
         self._runtime_replan_event.set()
 
+    def _clear_runtime_replan_event(self):
+        self._runtime_replan_event.clear()
+        self._runtime_replan_reason = ""
+
     def _consume_runtime_replan_event(self) -> Tuple[bool, str]:
         if not self._runtime_replan_event.is_set():
             return False, ""
         reason = str(self._runtime_replan_reason or "runtime_replan_event")
-        self._runtime_replan_event.clear()
-        self._runtime_replan_reason = ""
+        self._clear_runtime_replan_event()
         return True, reason
 
     def _on_statement_executed_for_replan(self):
@@ -1723,6 +1726,7 @@ class LLMController():
                         self.current_plan = self._pending_heartbeat_replan_plan
                         self._pending_heartbeat_replan_plan = None
                         self._pending_heartbeat_reason = ""
+                        self._clear_runtime_replan_event()
                         llm_called = False
                         final_plan_source = "agent_heartbeat"
                     else:
