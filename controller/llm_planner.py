@@ -41,6 +41,11 @@ class LLMPlanner():
         self.agent_heartbeat_hardgate_prompt_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_heartbeat_hardgate_prompt.txt")
         self.agent_heartbeat_soft_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_heartbeat_soft_examples.txt")
         self.agent_heartbeat_hardgate_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_heartbeat_hardgate_examples.txt")
+        self.runtime_prompt_variant = "default"
+        self.runtime_example_variant = "default"
+        self.runtime_use_output_example = True
+        self._last_plan_trace = {}
+        self._last_heartbeat_trace = {}
         with open(self.prompt_plan_path, "r") as f:
             self.prompt_plan = f.read()
 
@@ -246,6 +251,23 @@ class LLMPlanner():
         )
     def set_model(self, model_name):
         self.model_name = model_name
+
+    def set_runtime_prompt_example_variant(
+        self,
+        *,
+        prompt_variant: str,
+        example_variant: str,
+        use_output_example: bool,
+    ):
+        self.runtime_prompt_variant = str(prompt_variant or "default")
+        self.runtime_example_variant = str(example_variant or "default")
+        self.runtime_use_output_example = bool(use_output_example)
+
+    def get_last_plan_trace(self) -> dict:
+        return dict(self._last_plan_trace or {})
+
+    def get_last_heartbeat_trace(self) -> dict:
+        return dict(self._last_heartbeat_trace or {})
 
     def init(self, low_level_skillset: SkillSet, vision_skill: VisionSkillWrapper):
         self.low_level_skillset = low_level_skillset
@@ -582,7 +604,17 @@ class LLMPlanner():
         if replan_history_block:
             print_debug(f"[P-REPLAN-HISTORY]\n{replan_history_block}")
         print_debug(f"[P] Full prompt debug log: {chat_log_path}")
-        return self.llm.request(prompt, self.model_name, stream=False)
+        raw_response = self.llm.request(prompt, self.model_name, stream=False)
+        self._last_plan_trace = {
+            "prompt": prompt,
+            "raw_response": raw_response,
+            "planning_stage": str(planning_stage or "initial"),
+            "prompt_variant": self.runtime_prompt_variant,
+            "example_variant": self.runtime_example_variant,
+            "use_output_example": bool(self.runtime_use_output_example),
+            "source": "plan",
+        }
+        return raw_response
 
     def plan_agent_heartbeat(
         self,
@@ -646,11 +678,16 @@ class LLMPlanner():
             queue_progress=benchmark_progress,
             execution_history=execution_history,
         )
+        examples_block = ""
+        if self.runtime_use_output_example:
+            examples_block = (
+                "Agent heartbeat examples:\n"
+                f"{agent_heartbeat_examples}\n\n"
+            )
         prompt = (
             f"{prompt}\n\n"
             f"Hard gate policy note: {hard_gate_rule}\n\n"
-            "Agent heartbeat examples:\n"
-            f"{agent_heartbeat_examples}\n\n"
+            f"{examples_block}"
             "Return JSON only."
         )
         print_debug(
@@ -666,13 +703,23 @@ class LLMPlanner():
         response = str(parsed.get("response", "continue")).strip().lower()
         if response not in {"continue", "full_replan_plan"}:
             response = "continue"
-        return {
+        result = {
             "response": response,
             "reason": str(parsed.get("reason", "")).strip(),
             "plan": str(parsed.get("plan", "")).strip(),
             "raw_response": raw,
             "parsed_ok": bool(parsed_ok),
         }
+        self._last_heartbeat_trace = {
+            "prompt": prompt,
+            "raw_response": raw,
+            "parsed_response": result,
+            "prompt_variant": self.runtime_prompt_variant,
+            "example_variant": self.runtime_example_variant,
+            "use_output_example": bool(self.runtime_use_output_example),
+            "source": "agent_heartbeat",
+        }
+        return result
 
     @staticmethod
     def _parse_heartbeat_response_json(raw: str) -> tuple[dict, bool]:
