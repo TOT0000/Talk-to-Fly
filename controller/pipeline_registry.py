@@ -37,7 +37,7 @@ PIPELINE_REGISTRY: Dict[str, PipelineConfig] = {
             "task_progress",
         ],
         use_output_example=True,
-        replan_cap=3,
+        replan_cap=8,
         archive_enabled_default=True,
     ),
     "baseline2": PipelineConfig(
@@ -58,16 +58,16 @@ PIPELINE_REGISTRY: Dict[str, PipelineConfig] = {
             "risk_summary",
         ],
         use_output_example=True,
-        replan_cap=3,
+        replan_cap=8,
         archive_enabled_default=True,
     ),
     "baseline3": PipelineConfig(
         id="baseline3",
         name="Event-PredRisk-0.5",
         description="Event trigger when predicted collision risk crosses threshold.",
-        base_mode="agent-heartbeat-soft",
+        base_mode="typefly-threshold-replan",
         trigger_type="event_predicted_collision_probability",
-        trigger_params={"predicted_collision_threshold": 0.5},
+        trigger_params={"predicted_collision_threshold": 0.5, "strictly_greater": True},
         prompt_variant="baseline3_prompt",
         example_variant="baseline3_example",
         state_fields=[
@@ -79,7 +79,7 @@ PIPELINE_REGISTRY: Dict[str, PipelineConfig] = {
             "risk_summary",
         ],
         use_output_example=True,
-        replan_cap=3,
+        replan_cap=8,
         archive_enabled_default=True,
     ),
 }

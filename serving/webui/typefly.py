@@ -187,10 +187,10 @@ class TypeFly:
                         value=self.selected_baseline_id,
                         label="Baseline Pipeline",
                     )
-                    self.archive_checkbox = gr.Checkbox(
-                        label="Save this run to archive",
-                        value=True,
-                    )
+                    self.postrun_summary = gr.Markdown(value="### Post-run archive\nNo finished run awaiting decision.")
+                    with gr.Row():
+                        self.save_run_btn = gr.Button("Save this run", variant="primary")
+                        self.discard_run_btn = gr.Button("Discard this run")
                     baseline_scene_choices = [
                         sid for sid in (
                             "SCENE_BENCHMARK_DEMO",
@@ -267,10 +267,15 @@ class TypeFly:
                 inputs=[self.baseline_selector],
                 outputs=[self.scenario_status],
             )
-            self.archive_checkbox.change(
-                fn=self.set_archive_enabled,
-                inputs=[self.archive_checkbox],
-                outputs=[self.scenario_status],
+            self.save_run_btn.click(
+                fn=self.save_last_run,
+                inputs=[],
+                outputs=[self.scenario_status, self.postrun_summary],
+            )
+            self.discard_run_btn.click(
+                fn=self.discard_last_run,
+                inputs=[],
+                outputs=[self.scenario_status, self.postrun_summary],
             )
             self.worker_selector.change(
                 fn=self.select_controlled_worker,
@@ -374,6 +379,7 @@ class TypeFly:
                     self.counter,
                     self.status_markdown,
                     self.entity_markdown,
+                    self.postrun_summary,
                 ]
             )
 
@@ -590,6 +596,8 @@ class TypeFly:
         try:
             with logger._lock:
                 logger._active = None
+                if hasattr(logger, "_pending_completed"):
+                    logger._pending_completed = None
         except Exception:
             pass
         for file_path in [
@@ -641,6 +649,24 @@ class TypeFly:
         self.archive_enabled = bool(enabled)
         self.llm_controller.set_archive_enabled(self.archive_enabled)
         return f"Archive logging {'enabled' if self.archive_enabled else 'disabled'} for next run."
+
+    def save_last_run(self):
+        logger = getattr(self.llm_controller, "task_run_logger", None)
+        if logger is None:
+            return "Save failed: logger unavailable.", self.render_postrun_summary()
+        saved = bool(getattr(logger, "save_pending_run", lambda: False)())
+        if not saved:
+            return "No finished run to save.", self.render_postrun_summary()
+        return "Run saved to formal archive.", self.render_postrun_summary()
+
+    def discard_last_run(self):
+        logger = getattr(self.llm_controller, "task_run_logger", None)
+        if logger is None:
+            return "Discard failed: logger unavailable.", self.render_postrun_summary()
+        discarded = bool(getattr(logger, "discard_pending_run", lambda: False)())
+        if not discarded:
+            return "No finished run to discard.", self.render_postrun_summary()
+        return "Discarded finished run (not written to formal archive).", self.render_postrun_summary()
 
     def _apply_mode_and_collect(self, scenario_name):
         normalized = normalize_scenario_name(scenario_name)
@@ -756,7 +782,6 @@ class TypeFly:
             self.mission_collision_count = 0
             framework_mode = str(getattr(self, "selected_framework_mode", MODE_TYPEFLY_ONESHOT))
             self.llm_controller.set_selected_pipeline(self.selected_baseline_id)
-            self.llm_controller.set_archive_enabled(self.archive_enabled)
             task_thread = Thread(
                 target=self.llm_controller.execute_task_description,
                 args=(message, framework_mode),
@@ -772,7 +797,7 @@ class TypeFly:
                         if self.mission_clock["is_running"]:
                             self.mission_clock["completed_at"] = time.time()
                             self.mission_clock["is_running"] = False
-                        return "Command Complete!"
+                        return "Command Complete! Please click 'Save this run' or 'Discard this run'."
                     if msg.startswith('[LOG]'):
                         complete_response += '\n'
                     if msg.endswith('\\\\'):
@@ -903,16 +928,40 @@ class TypeFly:
         global_xy, xy, x, y, z = self.update_position_plot(snapshot, show_error_ellipse=show_error_ellipse, show_raw_estimate=show_raw_estimate)
         status_md = self.render_status_markdown(snapshot)
         entity_md = self.render_entity_markdown(snapshot)
+        postrun_md = self.render_postrun_summary()
         counter += 1
         print_debug(
             "[UI-CALLBACK] "
-            "outputs=[anchor_3d,global_xy_plot,xy_plot,x_plot,y_plot,z_plot,counter,status,entity] "
+            "outputs=[anchor_3d,global_xy_plot,xy_plot,x_plot,y_plot,z_plot,counter,status,entity,postrun] "
             f"drone_gt={None if not snapshot else snapshot.get('drone_gt')} "
             f"drone_est={None if not snapshot else snapshot.get('drone_est')} "
             f"counter={counter}",
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
-        return anchor_plot, global_xy, xy, x, y, z, counter, status_md, entity_md
+        return anchor_plot, global_xy, xy, x, y, z, counter, status_md, entity_md, postrun_md
+
+    def render_postrun_summary(self):
+        logger = getattr(self.llm_controller, "task_run_logger", None)
+        if logger is None:
+            return "### Post-run archive\nLogger unavailable."
+        summary = getattr(logger, "get_pending_run_summary", lambda: {})() or {}
+        if not summary:
+            return "### Post-run archive\nNo finished run awaiting decision."
+        lines = [
+            "### Post-run archive (pending decision)",
+            f"- run_id: {summary.get('run_id', 'n/a')}",
+            f"- baseline: {summary.get('selected_baseline_id', 'n/a')} ({summary.get('selected_baseline_name', 'n/a')})",
+            f"- scene_id: {summary.get('scene_id', 'n/a')}",
+            f"- status: {summary.get('run_status', 'n/a')}",
+            f"- replan_count: {summary.get('replan_count', 0)}",
+            f"- collision_count: {summary.get('collision_count', 0)}",
+            f"- near_miss_count: {summary.get('near_miss_count', 0)}",
+            f"- completion_ratio: {float(summary.get('completion_ratio', 0.0)):.2f}",
+            f"- runtime_trace_count: {summary.get('runtime_trace_count', 0)}",
+            f"- planning_trace_count: {summary.get('planning_trace_count', 0)}",
+            "- action required: click **Save this run** or **Discard this run**.",
+        ]
+        return "\\n".join(lines)
 
     def _fmt_vec(self, value):
         if value is None:
@@ -1087,7 +1136,7 @@ class TypeFly:
             f"- current mode: {snapshot.get('execution_mode', 'Waiting')}",
             f"- selected baseline: {snapshot.get('selected_baseline_id', 'n/a')} ({snapshot.get('selected_baseline_name', 'n/a')})",
             f"- current scene: {snapshot.get('baseline_scene_id', 'n/a')}",
-            f"- archive enabled: {snapshot.get('archive_enabled', False)}",
+            f"- archive policy: post-run Save/Discard decision",
             f"- active zones: {', '.join(sorted(z.replace('zone_', '') for z in self.objective_state.get('active_zone_ids', set())))}",
             f"- active checkpoints: {len(active_ids)}",
             f"- predicted_collision_probability: {self._fmt_prob(getattr(safety_context, 'predicted_collision_probability', 0.0))}",
