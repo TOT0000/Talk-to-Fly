@@ -952,6 +952,9 @@ class TypeFly:
             f"- baseline: {summary.get('selected_baseline_id', 'n/a')} ({summary.get('selected_baseline_name', 'n/a')})",
             f"- scene_id: {summary.get('scene_id', 'n/a')}",
             f"- status: {summary.get('run_status', 'n/a')}",
+            f"- mission_success: {summary.get('mission_success', 'n/a')}",
+            f"- termination_reason: {summary.get('termination_reason', 'n/a')}",
+            f"- completion_time_mission_sec: {summary.get('completion_time_mission_sec', 'n/a')}",
             f"- replan_count: {summary.get('replan_count', 0)}",
             f"- collision_count: {summary.get('collision_count', 0)}",
             f"- near_miss_count: {summary.get('near_miss_count', 0)}",
@@ -1106,6 +1109,7 @@ class TypeFly:
         safety_context = snapshot.get("safety_context") if snapshot else None
         if safety_context is None:
             return "### Status\nWaiting for safety state..."
+        final_summary = dict((snapshot or {}).get("final_mission_summary") or {})
         active_ids = set(self.objective_state.get("active_checkpoint_ids", set()))
         completed_set = set(self.benchmark_progress["completed"])
         completed_active = len(completed_set.intersection(active_ids))
@@ -1128,11 +1132,20 @@ class TypeFly:
             end_for_elapsed = now_ts if self.mission_clock.get("is_running") else (completed_at or now_ts)
             elapsed_text = f"{max(0.0, end_for_elapsed - float(started_at)):.2f} s"
         completion_text = "n/a" if completed_at is None or started_at is None else f"{max(0.0, float(completed_at - started_at)):.2f} s"
+        if final_summary:
+            ctm = final_summary.get("completion_time_mission_sec")
+            completion_text = "n/a" if ctm is None else f"{float(ctm):.2f} s"
+        collision_count = int(final_summary.get("collision_count", snapshot.get("collision_count", 0)) or 0)
+        near_miss_count = int(final_summary.get("near_miss_count", snapshot.get("near_miss_count", 0)) or 0)
+        run_status = str(final_summary.get("run_status", "running"))
+        mission_success = bool(final_summary.get("mission_success", self.mission_clock.get("objective_completed", False)))
+        termination_reason = str(final_summary.get("termination_reason", ""))
+        final_execution_mode = str(final_summary.get("final_execution_mode", snapshot.get("execution_mode", "Waiting")))
 
         lines = [
             "### Status",
             f"- current framework: {snapshot.get('framework_name', 'n/a')}",
-            f"- current mode: {snapshot.get('execution_mode', 'Waiting')}",
+            f"- current mode: {final_execution_mode}",
             f"- selected baseline: {snapshot.get('selected_baseline_id', 'n/a')} ({snapshot.get('selected_baseline_name', 'n/a')})",
             f"- current scene: {snapshot.get('baseline_scene_id', 'n/a')}",
             f"- archive policy: post-run Save/Discard decision",
@@ -1143,10 +1156,12 @@ class TypeFly:
             f"- current target checkpoint: {target}",
             f"- checkpoint progress: {completed_active}/{total}",
             f"- zone progress: {', '.join(zone_parts) if zone_parts else 'n/a'}",
-            f"- mission collision count: {int(self.mission_collision_count)}",
-            f"- near-miss count: {int(snapshot.get('near_miss_count', 0) or 0)}",
+            f"- mission collision count: {collision_count}",
+            f"- near-miss count: {near_miss_count}",
             f"- replan count: {int(snapshot.get('replan_count', 0) or 0)}",
-            f"- mission completed: {self.mission_clock.get('objective_completed', False)}",
+            f"- run status: {run_status}",
+            f"- mission completed: {mission_success}",
+            f"- termination reason: {termination_reason if termination_reason else 'n/a'}",
             f"- mission elapsed time: {elapsed_text}",
             f"- mission completion time: {completion_text}",
         ]
