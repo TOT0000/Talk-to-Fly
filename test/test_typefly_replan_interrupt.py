@@ -129,7 +129,7 @@ def test_typefly_replan_uses_fresh_llm_response_and_discards_old_queue(monkeypat
     assert len(plan_markers) == 2
 
 
-def _build_minimal_controller_for_postcheck(plans, completed_after_exec, mode="typefly-threshold-replan", replan_limit=5):
+def _build_minimal_controller_for_postcheck(plans, completed_after_exec, mode="typefly-threshold-replan", replan_limit=8):
     pytest.importorskip("PIL")
     from controller.llm_controller import LLMController
 
@@ -191,7 +191,7 @@ def test_threshold_mode_postqueue_unfinished_does_not_trigger_auto_replan(monkey
         plans=["gc('A1');", "gc('A2');"],
         completed_after_exec=[["A1"], ["A1", "A2"]],
         mode="typefly-threshold-replan",
-        replan_limit=5,
+        replan_limit=8,
     )
     monkeypatch.setattr("controller.llm_controller.AUTO_REPLAN_PROTECTION_STATEMENTS", 0)
     controller.execute_task_description("run mission", framework_mode="typefly-threshold-replan")
@@ -206,7 +206,7 @@ def test_threshold_mode_no_postqueue_retry_loop(monkeypatch):
         plans=["gc('A1');", "gc('A1');", "gc('A2');"],
         completed_after_exec=[[], ["A1"], ["A1", "A2"]],
         mode="typefly-threshold-replan",
-        replan_limit=5,
+        replan_limit=8,
     )
     monkeypatch.setattr("controller.llm_controller.AUTO_REPLAN_PROTECTION_STATEMENTS", 0)
     controller.execute_task_description("run mission", framework_mode="typefly-threshold-replan")
@@ -219,7 +219,7 @@ def test_postqueue_auto_replan_not_applied_to_agent_modes(monkeypatch):
         plans=["gc('A1');", "gc('A2');"],
         completed_after_exec=[["A1"], ["A1", "A2"]],
         mode="agent-heartbeat-soft",
-        replan_limit=5,
+        replan_limit=8,
     )
     monkeypatch.setattr("controller.llm_controller.AUTO_REPLAN_PROTECTION_STATEMENTS", 0)
     controller.execute_task_description("run mission", framework_mode="agent-heartbeat-soft")
@@ -240,7 +240,7 @@ def test_agent_heartbeat_replan_response_is_emitted_to_chat():
     controller._pending_heartbeat_replan_plan = None
     controller._pending_heartbeat_reason = ""
     controller.last_heartbeat_ts = 0.0
-    controller.replan_limit = 5
+    controller.replan_limit = 8
     controller._replan_attempts = 0
     controller.current_task_description = "task"
     controller.execution_history = "history"
@@ -275,7 +275,7 @@ def test_agent_heartbeat_raw_response_is_emitted_even_when_non_json_continue():
     controller._pending_heartbeat_replan_plan = None
     controller._pending_heartbeat_reason = ""
     controller.last_heartbeat_ts = 0.0
-    controller.replan_limit = 5
+    controller.replan_limit = 8
     controller._replan_attempts = 0
     controller.current_task_description = "task"
     controller.execution_history = "history"
@@ -311,7 +311,7 @@ def test_agent_heartbeat_prompt_receives_replan_response_history():
     controller._pending_heartbeat_replan_plan = None
     controller._pending_heartbeat_reason = ""
     controller.last_heartbeat_ts = 0.0
-    controller.replan_limit = 5
+    controller.replan_limit = 8
     controller._replan_attempts = 3
     controller.current_task_description = "task"
     controller.execution_history = "gc('C1');d(2.0);"
@@ -355,7 +355,7 @@ def test_threshold_mode_does_not_interrupt_when_replan_limit_reached():
 
     controller = LLMController.__new__(LLMController)
     controller.framework_mode = "typefly-threshold-replan"
-    controller.replan_limit = 5
+    controller.replan_limit = 8
     controller._replan_attempts = 5
     controller.auto_replan_armed = True
     controller.auto_replan_protection_remaining = 0
@@ -377,7 +377,7 @@ def test_agent_heartbeat_stops_requesting_replan_after_limit_reached():
     controller._pending_heartbeat_replan_plan = None
     controller._pending_heartbeat_reason = ""
     controller.last_heartbeat_ts = 0.0
-    controller.replan_limit = 5
+    controller.replan_limit = 8
     controller._replan_attempts = 5
     controller.current_task_description = "task"
     controller.execution_history = "history"
@@ -410,7 +410,7 @@ def test_current_active_plan_matches_mission_original_when_no_full_replan(monkey
         def plan(self, **kwargs):
             return "gc('A1');d(2.0);gc('A2');d(2.0);"
 
-    controller.replan_limit = 5
+    controller.replan_limit = 8
     controller.controller_wait_takeoff = False
     controller.message_queue = None
     controller.execution_history = []
@@ -472,7 +472,7 @@ def test_current_active_plan_updates_after_full_replan(monkeypatch):
         controller.latest_benchmark_progress = {"completed": ["A1", "A2"]}
         return MiniSpecReturnValue("ok", False)
 
-    controller.replan_limit = 5
+    controller.replan_limit = 8
     controller.controller_wait_takeoff = False
     controller.message_queue = None
     controller.execution_history = []
