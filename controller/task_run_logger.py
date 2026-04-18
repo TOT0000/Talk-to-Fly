@@ -61,6 +61,23 @@ EVENT_COLUMNS = [
     "run_id", "event_timestamp", "event_type", "details",
 ]
 
+PLANNING_TRACE_ALLOWED_KEYS = {
+    "planning_stage",
+    "llm_call_purpose",
+    "plan_source",
+    "prompt_variant",
+    "example_variant",
+    "use_output_example",
+    "prompt",
+    "raw_response",
+    "parsed_plan",
+    "selected_baseline_id",
+    "selected_baseline_name",
+    "scene_id",
+    "trigger_reason",
+    "llm_called",
+}
+
 
 @dataclass
 class _RunRecord:
@@ -97,16 +114,17 @@ class _RunRecord:
 class TaskRunLogger:
     def __init__(self, excel_path: str = "logs/task_runs.xlsx"):
         self.excel_path = excel_path
+        self.archive_dir = os.path.dirname(self.excel_path) or "."
         self.debug_jsonl_path = os.path.join(
-            os.path.dirname(self.excel_path) or ".",
+            self.archive_dir,
             "task_runs_debug.jsonl",
         )
         self.runtime_trace_jsonl_path = os.path.join(
-            os.path.dirname(self.excel_path) or ".",
+            self.archive_dir,
             "task_runs_runtime_trace.jsonl",
         )
         self.planning_trace_jsonl_path = os.path.join(
-            os.path.dirname(self.excel_path) or ".",
+            self.archive_dir,
             "task_runs_planning_trace.jsonl",
         )
         self._lock = threading.Lock()
@@ -208,11 +226,11 @@ class TaskRunLogger:
             ws.append(expected_columns)
 
     def start_run(self, task_id: str, task_text: str, scenario_name: str, initial_snapshot: Dict, archive_enabled: bool = True, run_context: Optional[Dict] = None):
+        previous_pending = None
         with self._lock:
             if self._active is not None:
                 return
-            # previous completed run must be explicitly saved/discarded;
-            # if user starts a new run, drop the old staged one to keep formal archive clean.
+            previous_pending = self._pending_completed
             self._pending_completed = None
             now = time.time()
             self._active = _RunRecord(
@@ -226,6 +244,8 @@ class TaskRunLogger:
                 run_context=dict(run_context or {}),
             )
             self._consume_snapshot(initial_snapshot, now=now)
+        if previous_pending is not None and bool(previous_pending.archive_enabled):
+            self._persist_run(previous_pending)
 
     def update_plan_info(self, plan_text: str, generation_success: bool):
         with self._lock:
@@ -267,6 +287,7 @@ class TaskRunLogger:
             if self._active is None:
                 return
             payload = dict(trace or {})
+            payload = {k: payload.get(k) for k in PLANNING_TRACE_ALLOWED_KEYS if k in payload}
             payload["run_id"] = self._active.run_id
             payload["timestamp"] = self._to_iso(time.time())
             self._active.llm_call_count += 1
@@ -297,17 +318,24 @@ class TaskRunLogger:
 
     def _build_runtime_trace_row(self, snapshot: Dict, now: float) -> Dict:
         safety_context = snapshot.get("safety_context")
+        benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
+        completed_checkpoints = [str(v).upper() for v in list(benchmark_progress.get("completed") or [])]
+        checkpoint_order = [str(v).upper() for v in list(snapshot.get("checkpoint_order") or [])]
+        remaining_checkpoints = [cid for cid in checkpoint_order if cid not in set(completed_checkpoints)]
         return {
             "run_id": self._active.run_id if self._active else "",
             "timestamp": self._to_iso(now),
             "drone_gt": snapshot.get("drone_gt"),
             "drone_yaw_rad": snapshot.get("drone_yaw_rad"),
             "workers": snapshot.get("workers"),
-            "benchmark_progress": snapshot.get("benchmark_progress"),
+            "benchmark_progress": benchmark_progress,
+            "completed_checkpoints": completed_checkpoints,
+            "remaining_checkpoints": remaining_checkpoints,
             "execution_mode": snapshot.get("execution_mode"),
             "framework_name": snapshot.get("framework_name"),
             "triggered_for_replan": bool(snapshot.get("replan_count", 0)),
             "replan_count": int(snapshot.get("replan_count", 0) or 0),
+            "trigger_reason": snapshot.get("trigger_reason"),
             "predicted_collision_probability": None if safety_context is None else float(getattr(safety_context, "predicted_collision_probability", 0.0)),
             "per_worker_predicted_collision_probability": [] if safety_context is None else list(getattr(safety_context, "per_worker_collision_probabilities", []) or []),
             "dominant_risky_worker": None if safety_context is None else str(getattr(safety_context, "dominant_threat_id", "")),
@@ -323,6 +351,14 @@ class TaskRunLogger:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
             f.write(self._json_text(payload) + "\n")
+
+    def _write_json(self, path: str, payload: Dict):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+
+    def _run_file_path(self, run_id: str, suffix: str) -> str:
+        return os.path.join(self.archive_dir, f"{run_id}_{suffix}")
 
     def end_run(self, run_status: str, failure_reason: str = ""):
         with self._lock:
@@ -432,39 +468,67 @@ class TaskRunLogger:
             "generated_plan": active.actual_plan_text,
             "final_plan_source": planner_info.get("final_plan_source", ""),
         }
+        run_summary = {
+            "run_id": active.run_id,
+            "start_time": active.start_iso,
+            "end_time": self._to_iso(end_ts),
+            "duration_sec": round(end_ts - active.start_time, 3),
+            "run_status": active.run_status,
+            "scene_id": final.get("baseline_scene_id") or active.run_context.get("baseline_scene_id", ""),
+            "baseline_scene_id": active.run_context.get("baseline_scene_id", ""),
+            "selected_baseline_id": active.run_context.get("selected_baseline_id", ""),
+            "selected_baseline_name": active.run_context.get("selected_baseline_name", ""),
+            "trigger_type": active.run_context.get("trigger_type", ""),
+            "trigger_params": active.run_context.get("trigger_params", {}),
+            "prompt_variant": active.run_context.get("prompt_variant", ""),
+            "example_variant": active.run_context.get("example_variant", ""),
+            "state_fields": active.run_context.get("state_fields", []),
+            "use_output_example": bool(active.run_context.get("use_output_example", False)),
+            "completion_time_sec": round(end_ts - active.start_time, 3),
+            "replan_count": int((final or {}).get("replan_count", 0) or 0),
+            "llm_call_count": int(active.llm_call_count),
+            "collision_count": int((final or {}).get("collision_count", 0) or 0),
+            "near_miss_count": int((final or {}).get("near_miss_count", 0) or 0),
+            "min_uav_worker_distance_m": active.min_uav_worker_distance_m,
+            "completed_checkpoints": completed,
+            "completion_ratio": completion_ratio,
+            "runtime_trace_count": len(active.runtime_trace),
+            "planning_trace_count": len(active.planning_trace),
+        }
+        debug_payload = {
+            "run_id": active.run_id,
+            "timestamp": self._to_iso(end_ts),
+            "run_summary": run_summary,
+            "metrics": {
+                "near_miss_count": int(active.near_miss_count),
+                "min_uav_worker_distance_m": active.min_uav_worker_distance_m,
+                "collision_count": int((final or {}).get("collision_count", 0) or 0),
+                "replan_count": int((final or {}).get("replan_count", 0) or 0),
+            },
+            "runtime_trace_count": len(active.runtime_trace),
+            "planning_trace_count": len(active.planning_trace),
+        }
+
+        runtime_per_run_path = self._run_file_path(active.run_id, "runtime_trace.jsonl")
+        planning_per_run_path = self._run_file_path(active.run_id, "planning_trace.jsonl")
+        summary_per_run_path = self._run_file_path(active.run_id, "summary.json")
+        debug_per_run_path = self._run_file_path(active.run_id, "debug.json")
+
+        for trace_row in active.runtime_trace:
+            self._append_jsonl_line(runtime_per_run_path, trace_row)
+        for trace_row in active.planning_trace:
+            self._append_jsonl_line(planning_per_run_path, trace_row)
+        self._write_json(summary_per_run_path, run_summary)
+        self._write_json(debug_per_run_path, debug_payload)
 
         wb = self._load_workbook_resilient()
         if wb is not None:
             ws = wb[RUNS_SHEET]
             ws.append([row[col] for col in RUN_COLUMNS])
-            debug_payload = {
-                "run_id": active.run_id,
-                "task_id": active.task_id,
-                "task_text": active.task_text,
-                "run_status": active.run_status,
-                "failure_reason": active.failure_reason,
-                "planner_info": {
-                    "llm_called": planner_info.get("llm_called", False),
-                    "final_plan_source": planner_info.get("final_plan_source", ""),
-                },
-                "initial_snapshot": initial,
-                "final_snapshot": final,
-                "metrics": {
-                    "near_miss_count": int(active.near_miss_count),
-                    "min_uav_worker_distance_m": active.min_uav_worker_distance_m,
-                    "collision_count": int((final or {}).get("collision_count", 0) or 0),
-                    "replan_count": int((final or {}).get("replan_count", 0) or 0),
-                },
-                "run_context": active.run_context,
-                "runtime_trace_count": len(active.runtime_trace),
-                "planning_trace_count": len(active.planning_trace),
-            }
             ws_debug = wb[DEBUG_SHEET]
             ws_debug.append([active.run_id, self._to_iso(end_ts), self._json_text(debug_payload)])
             wb.save(self.excel_path)
-            os.makedirs(os.path.dirname(self.debug_jsonl_path) or ".", exist_ok=True)
-            with open(self.debug_jsonl_path, "a", encoding="utf-8") as f:
-                f.write(self._json_text(debug_payload) + "\n")
+        self._append_jsonl_line(self.debug_jsonl_path, debug_payload)
 
     def _warn_once_disabled(self):
         if self._warned_disabled:

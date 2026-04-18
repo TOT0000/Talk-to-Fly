@@ -238,6 +238,8 @@ class LLMController():
         self.last_heartbeat_ts = 0.0
         self._pending_heartbeat_replan_plan: Optional[str] = None
         self._pending_heartbeat_reason: str = ""
+        self._runtime_replan_event = threading.Event()
+        self._runtime_replan_reason: str = ""
         self._replan_response_history: list[dict] = []
         self._mission_original_plan: Optional[str] = None
         self._current_active_plan: Optional[str] = None
@@ -994,6 +996,36 @@ class LLMController():
         final_dist = None
         best_dist = float("inf")
         stop_reason = "max_iterations"
+        preempted_for_replan = False
+
+        def _should_preempt_for_replan(current_p: float) -> bool:
+            nonlocal reached, stop_reason, preempted_for_replan
+            event_triggered, event_reason = self._consume_runtime_replan_event()
+            if event_triggered:
+                stop_reason = str(event_reason or "runtime_replan_event")
+                print_t(f"[QUEUE] clearing remaining statements due to replan ({stop_reason})")
+                preempted_for_replan = True
+                return True
+            objective_completed_now = self._is_active_objective_completed()
+            if objective_completed_now:
+                reached = True
+                stop_reason = "objective_completed"
+                return True
+            if self._maybe_run_agent_heartbeat():
+                stop_reason = f"agent_heartbeat_replan({self._pending_heartbeat_reason or 'llm'})"
+                print_t(f"[QUEUE] clearing remaining statements due to replan")
+                preempted_for_replan = True
+                return True
+            if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
+                print_t(
+                    "[TYPEFLY-INTERRUPT] "
+                    f"predicted_collision_probability={current_p:.6f} > {self.predicted_collision_replan_threshold:.2f}, "
+                    "aborting current execution"
+                )
+                stop_reason = f"collision_probability_high({current_p:.3f})"
+                preempted_for_replan = True
+                return True
+            return False
 
         for idx in range(max_iterations):
             snapshot = self.get_live_ui_snapshot()
@@ -1010,22 +1042,7 @@ class LLMController():
             progress_target_match = bool(runtime_target == checkpoint.id)
             safety_context = snapshot.get("safety_context")
             current_p = 0.0 if safety_context is None else float(getattr(safety_context, "predicted_collision_probability", 0.0))
-            objective_completed_now = self._is_active_objective_completed()
-            if objective_completed_now:
-                reached = True
-                stop_reason = "objective_completed"
-                break
-            if self._maybe_run_agent_heartbeat():
-                stop_reason = f"agent_heartbeat_replan({self._pending_heartbeat_reason or 'llm'})"
-                print_t(f"[QUEUE] clearing remaining statements due to replan")
-                break
-            if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
-                print_t(
-                    "[TYPEFLY-INTERRUPT] "
-                    f"predicted_collision_probability={current_p:.6f} > {self.predicted_collision_replan_threshold:.2f}, "
-                    "aborting current execution"
-                )
-                stop_reason = f"collision_probability_high({current_p:.3f})"
+            if _should_preempt_for_replan(current_p):
                 break
 
             dx_w = float(checkpoint.x) - float(control_pos[0])
@@ -1077,20 +1094,28 @@ class LLMController():
                 yaw_error_deg = math.degrees(yaw_error)
                 align_threshold = heading_align_near_deg if dist_control < 0.8 else heading_align_far_deg
                 if abs(yaw_error_deg) > align_threshold:
+                    if _should_preempt_for_replan(current_p):
+                        break
                     turn_deg = int(max(5.0, min(float(max_turn_step_deg), abs(yaw_error_deg))))
-                    if yaw_error_deg > 0:
+                    turn_cmd = "turn_ccw" if yaw_error_deg > 0 else "turn_cw"
+                    if turn_cmd == "turn_ccw":
                         self.drone.turn_ccw(turn_deg)
-                        chosen_action = f"turn_ccw({turn_deg})"
                     else:
                         self.drone.turn_cw(turn_deg)
-                        chosen_action = f"turn_cw({turn_deg})"
+                    chosen_action = f"{turn_cmd}({turn_deg})"
+                    if _should_preempt_for_replan(current_p):
+                        break
                 else:
+                    if _should_preempt_for_replan(current_p):
+                        break
                     if is_px4_sim:
                         forward_step = min(local_step_cap, max(0.35, dist_control * 0.90))
                     else:
                         forward_step = min(local_step_cap, max(0.15, dist_control * 0.65))
                     self.drone.move_forward(forward_step)
                     chosen_action = f"move_forward({forward_step:.2f})"
+                    if _should_preempt_for_replan(current_p):
+                        break
 
             print_debug(
                 "[GC_DEBUG] "
@@ -1184,8 +1209,33 @@ class LLMController():
     def update_ui_collision_probability(self, predicted_collision_probability: Optional[float]):
         if predicted_collision_probability is None:
             return
-        self.latest_ui_collision_probability = float(predicted_collision_probability)
+        current_p = float(predicted_collision_probability)
+        self.latest_ui_collision_probability = current_p
         self.latest_ui_collision_timestamp = time.time()
+        if self._should_trigger_auto_replan(current_p, source="ui_event"):
+            self._set_runtime_replan_event(
+                reason=(
+                    f"predicted_collision_probability={current_p:.6f}>="
+                    f"{self.predicted_collision_replan_threshold:.2f}, source=ui_event"
+                )
+            )
+
+    def _set_runtime_replan_event(self, reason: str):
+        reason_text = str(reason or "runtime_replan_event")
+        if not self._runtime_replan_event.is_set():
+            self._runtime_replan_reason = reason_text
+        self._runtime_replan_event.set()
+
+    def _clear_runtime_replan_event(self):
+        self._runtime_replan_event.clear()
+        self._runtime_replan_reason = ""
+
+    def _consume_runtime_replan_event(self) -> Tuple[bool, str]:
+        if not self._runtime_replan_event.is_set():
+            return False, ""
+        reason = str(self._runtime_replan_reason or "runtime_replan_event")
+        self._clear_runtime_replan_event()
+        return True, reason
 
     def _on_statement_executed_for_replan(self):
         if self.auto_replan_protection_remaining > 0:
@@ -1280,6 +1330,9 @@ class LLMController():
             if plan_text:
                 self._pending_heartbeat_replan_plan = plan_text
                 self._pending_heartbeat_reason = reason
+                self._set_runtime_replan_event(
+                    reason=f"agent_heartbeat_replan:{reason if reason else 'llm'}"
+                )
                 self._record_replan_response(
                     source="agent_heartbeat_full_replan_response",
                     reason=reason,
@@ -1406,6 +1459,10 @@ class LLMController():
     def _should_abort_current_execution_for_replan(self) -> Tuple[bool, str]:
         if self._is_active_objective_completed():
             return False, ""
+        event_triggered, event_reason = self._consume_runtime_replan_event()
+        if event_triggered:
+            print_t("[QUEUE] clearing remaining statements due to replan")
+            return True, event_reason
         if self._maybe_run_agent_heartbeat():
             print_t("[QUEUE] clearing remaining statements due to replan")
             return True, f"agent_heartbeat_replan:{self._pending_heartbeat_reason or 'llm'}"
@@ -1615,6 +1672,8 @@ class LLMController():
         self._replan_attempts = 0
         self.auto_replan_armed = True
         self.auto_replan_protection_remaining = 0
+        self._runtime_replan_event.clear()
+        self._runtime_replan_reason = ""
         self.last_heartbeat_ts = 0.0
         self._pending_heartbeat_replan_plan = None
         self._pending_heartbeat_reason = ""
@@ -1667,6 +1726,7 @@ class LLMController():
                         self.current_plan = self._pending_heartbeat_replan_plan
                         self._pending_heartbeat_replan_plan = None
                         self._pending_heartbeat_reason = ""
+                        self._clear_runtime_replan_event()
                         llm_called = False
                         final_plan_source = "agent_heartbeat"
                     else:
