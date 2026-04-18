@@ -1,12 +1,9 @@
-{shared_opening_block}
+{BASELINE1_OPENING_BLOCK}
 
-{shared_runtime_context_block}
+{BASELINE1_RUNTIME_CONTEXT_BLOCK}
 
-This call is TypeFly REPLAN / CONTINUATION planning, not a fresh plan from zero.
+This call is Baseline 1 REPLAN / CONTINUATION planning, not a fresh plan from zero.
 Use continuation context, preserve completed progress, and re-optimize the remaining route safely.
-
-A TypeFly replan call means a potential collision event is predicted within the next 3 seconds.
-This trigger occurs because predicted_collision_probability has reached or exceeded 0.7.
 
 Continuation context:
 - previous plan: {previous_plan}
@@ -18,23 +15,17 @@ Continuation context:
 - replan runtime history:
 {replan_history_block}
 
-TypeFly replan requirements:
-- Explicit replan threshold = 0.7.
-- The predicted collision probability refers to the collision risk over the next 3 seconds, not only the current instant.
-- Since replan has already been triggered, first determine what preventive avoidance behavior is needed from the predicted collision probability and the current UAV-worker geometry.
-- Choose avoidance amplitude according to severity.
-- If the predicted collision probability is only mildly above threshold, a small preventive detour may be enough.
-- If the predicted collision probability is much higher or the geometry is clearly unsafe, use a larger and more conservative detour.
-- Do not begin a replan with direct gc(...) when the future 3-second risk is already elevated.
-- After avoidance, continue only the remaining checkpoints; never redo completed checkpoints.
-- Remaining checkpoint order may be re-sorted dynamically by safety, geometry, and efficiency.
-- The same ml/mr/mf/mb maps to different world directions under different headings; keep this heading-aware in replan.
+Baseline 1 replan requirements:
+- Keep geometry-first and minimal-complexity behavior.
+- Preserve completed checkpoints; never redo completed checkpoints.
+- Prefer small heading-aware shaping only when the direct approach is awkward.
+- Continue only remaining checkpoints and keep route efficient.
 
 Guides:
-{guides}
+{BASELINE1_GUIDES}
 
-TypeFly replan examples:
-{typefly_replan_examples}
+Baseline 1 replan examples:
+{BASELINE1_REPLAN_EXAMPLES}
 
 Task description:
 {task_description}
