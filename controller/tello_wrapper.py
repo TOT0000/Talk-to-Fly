@@ -1,3 +1,4 @@
+import os
 import time, cv2
 import numpy as np
 from typing import Tuple
@@ -67,6 +68,15 @@ class TelloWrapper(RobotWrapper):
         self.drone = Tello()
         self.active_count = 0
         self.stream_on = False
+        # Tello SDK motion commands are synchronous and already include command
+        # acknowledgment latency. Keep an additional (tunable) cooldown only for
+        # transport stability between back-to-back commands.
+        self.move_post_delay_s = max(0.0, float(os.getenv("TYPEFLY_TELLO_MOVE_POST_DELAY_S", "0.15")))
+        self.turn_post_delay_s = max(0.0, float(os.getenv("TYPEFLY_TELLO_TURN_POST_DELAY_S", "0.25")))
+
+    def _sleep_after_motion(self, delay_s: float):
+        if delay_s > 0:
+            time.sleep(delay_s)
 
     def keep_active(self):
         if self.active_count % 20 == 0:
@@ -102,48 +112,48 @@ class TelloWrapper(RobotWrapper):
     def move_forward(self, distance: int) -> Tuple[bool, bool]:
         self.drone.move_forward(cap_distance(distance))
         self.movement_x_accumulator += distance
-        time.sleep(0.5)
+        self._sleep_after_motion(self.move_post_delay_s)
         return True, distance > SCENE_CHANGE_DISTANCE
 
     def move_backward(self, distance: int) -> Tuple[bool, bool]:
         self.drone.move_back(cap_distance(distance))
         self.movement_x_accumulator -= distance
-        time.sleep(0.5)
+        self._sleep_after_motion(self.move_post_delay_s)
         return True, distance > SCENE_CHANGE_DISTANCE
 
     def move_left(self, distance: int) -> Tuple[bool, bool]:
         self.drone.move_left(cap_distance(distance))
         self.movement_y_accumulator += distance
-        time.sleep(0.5)
+        self._sleep_after_motion(self.move_post_delay_s)
         return True, distance > SCENE_CHANGE_DISTANCE
 
     def move_right(self, distance: int) -> Tuple[bool, bool]:
         self.drone.move_right(cap_distance(distance))
         self.movement_y_accumulator -= distance
-        time.sleep(0.5)
+        self._sleep_after_motion(self.move_post_delay_s)
         return True, distance > SCENE_CHANGE_DISTANCE
 
     def move_up(self, distance: int) -> Tuple[bool, bool]:
         self.drone.move_up(cap_distance(distance))
-        time.sleep(0.5)
+        self._sleep_after_motion(self.move_post_delay_s)
         return True, False
 
     def move_down(self, distance: int) -> Tuple[bool, bool]:
         self.drone.move_down(cap_distance(distance))
-        time.sleep(0.5)
+        self._sleep_after_motion(self.move_post_delay_s)
         return True, False
 
     def turn_ccw(self, degree: int) -> Tuple[bool, bool]:
         self.drone.rotate_counter_clockwise(degree)
         self.rotation_accumulator += degree
-        time.sleep(1)
+        self._sleep_after_motion(self.turn_post_delay_s)
         # return True, degree > SCENE_CHANGE_ANGLE
         return True, False
 
     def turn_cw(self, degree: int) -> Tuple[bool, bool]:
         self.drone.rotate_clockwise(degree)
         self.rotation_accumulator -= degree
-        time.sleep(1)
+        self._sleep_after_motion(self.turn_post_delay_s)
         # return True, degree > SCENE_CHANGE_ANGLE
         return True, False
     
