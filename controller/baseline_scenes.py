@@ -587,9 +587,9 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
             TaskPoint("C", 1.7, 4.2, -1.5),
         ),
         obstacles=(
-            StaticObstacle("worker_1", 4.5, 2.0, cov_xy=((0.010, 0.000), (0.000, 0.008))),
-            StaticObstacle("worker_2", 8.5, 4.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
-            StaticObstacle("worker_3", 7.0, 3.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("worker_1", 3.5, 3.0, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("worker_2", 9.5, 3.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("worker_3", 7.0, 2.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
         ),
         notes="scene3 based on SCENE_FIXED_W13_MANUAL_W2 with worker true positions overridden.",
     ),

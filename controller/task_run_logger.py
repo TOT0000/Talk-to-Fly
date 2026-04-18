@@ -61,6 +61,27 @@ EVENT_COLUMNS = [
     "run_id", "event_timestamp", "event_type", "details",
 ]
 
+PLANNING_TRACE_ALLOWED_KEYS = {
+    "planning_stage",
+    "llm_call_purpose",
+    "plan_source",
+    "prompt_variant",
+    "example_variant",
+    "use_output_example",
+    "prompt",
+    "raw_response",
+    "parsed_plan",
+    "selected_baseline_id",
+    "selected_baseline_name",
+    "scene_id",
+    "trigger_reason",
+    "llm_called",
+    "true_completed_checkpoints",
+    "true_remaining_checkpoints",
+    "current_target_checkpoint",
+    "completion_state_source",
+}
+
 
 @dataclass
 class _RunRecord:
@@ -92,21 +113,32 @@ class _RunRecord:
     llm_call_count: int = 0
     near_miss_count: int = 0
     min_uav_worker_distance_m: Optional[float] = None
+    mission_success: Optional[bool] = None
+    termination_reason: str = ""
+    queue_exhausted_with_unfinished: bool = False
+    ended_due_to_replan_interrupt: bool = False
+    true_completed_checkpoints: List[str] = field(default_factory=list)
+    true_remaining_checkpoints: List[str] = field(default_factory=list)
+    completion_state_source: str = "benchmark_progress/dwell_tracker"
+    current_target_checkpoint: Optional[str] = None
+    checkpoint_status_snapshot: Dict = field(default_factory=dict)
+    completion_time_sec: Optional[float] = None
 
 
 class TaskRunLogger:
     def __init__(self, excel_path: str = "logs/task_runs.xlsx"):
         self.excel_path = excel_path
+        self.archive_dir = os.path.dirname(self.excel_path) or "."
         self.debug_jsonl_path = os.path.join(
-            os.path.dirname(self.excel_path) or ".",
+            self.archive_dir,
             "task_runs_debug.jsonl",
         )
         self.runtime_trace_jsonl_path = os.path.join(
-            os.path.dirname(self.excel_path) or ".",
+            self.archive_dir,
             "task_runs_runtime_trace.jsonl",
         )
         self.planning_trace_jsonl_path = os.path.join(
-            os.path.dirname(self.excel_path) or ".",
+            self.archive_dir,
             "task_runs_planning_trace.jsonl",
         )
         self._lock = threading.Lock()
@@ -208,11 +240,11 @@ class TaskRunLogger:
             ws.append(expected_columns)
 
     def start_run(self, task_id: str, task_text: str, scenario_name: str, initial_snapshot: Dict, archive_enabled: bool = True, run_context: Optional[Dict] = None):
+        previous_pending = None
         with self._lock:
             if self._active is not None:
                 return
-            # previous completed run must be explicitly saved/discarded;
-            # if user starts a new run, drop the old staged one to keep formal archive clean.
+            previous_pending = self._pending_completed
             self._pending_completed = None
             now = time.time()
             self._active = _RunRecord(
@@ -226,6 +258,8 @@ class TaskRunLogger:
                 run_context=dict(run_context or {}),
             )
             self._consume_snapshot(initial_snapshot, now=now)
+        if previous_pending is not None and bool(previous_pending.archive_enabled):
+            self._persist_run(previous_pending)
 
     def update_plan_info(self, plan_text: str, generation_success: bool):
         with self._lock:
@@ -234,13 +268,48 @@ class TaskRunLogger:
             self._active.actual_plan_text = plan_text or ""
             self._active.plan_generation_success = bool(generation_success)
 
-    def update_execution_info(self, execution_success: bool, failure_reason: str = "", timeout_bool: bool = False, task_completed: bool = False):
+    def update_execution_info(
+        self,
+        execution_success: bool,
+        failure_reason: str = "",
+        timeout_bool: bool = False,
+        task_completed: bool = False,
+        mission_success: Optional[bool] = None,
+        termination_reason: str = "",
+        queue_exhausted_with_unfinished: bool = False,
+        ended_due_to_replan_interrupt: bool = False,
+        true_completed_checkpoints: Optional[List[str]] = None,
+        true_remaining_checkpoints: Optional[List[str]] = None,
+        completion_state_source: str = "benchmark_progress/dwell_tracker",
+        current_target_checkpoint: Optional[str] = None,
+        checkpoint_status_snapshot: Optional[Dict] = None,
+        completion_time_sec: Optional[float] = None,
+    ):
         with self._lock:
             if self._active is None:
                 return
             self._active.plan_execution_success = bool(execution_success)
             self._active.timeout_bool = bool(timeout_bool)
             self._active.task_completed_bool = bool(task_completed)
+            if mission_success is not None:
+                self._active.mission_success = bool(mission_success)
+            if termination_reason:
+                self._active.termination_reason = str(termination_reason)
+            self._active.queue_exhausted_with_unfinished = bool(queue_exhausted_with_unfinished)
+            self._active.ended_due_to_replan_interrupt = bool(ended_due_to_replan_interrupt)
+            if true_completed_checkpoints is not None:
+                self._active.true_completed_checkpoints = [str(v).upper() for v in list(true_completed_checkpoints)]
+            if true_remaining_checkpoints is not None:
+                self._active.true_remaining_checkpoints = [str(v).upper() for v in list(true_remaining_checkpoints)]
+            self._active.completion_state_source = str(completion_state_source or "benchmark_progress/dwell_tracker")
+            self._active.current_target_checkpoint = (
+                None if current_target_checkpoint is None else str(current_target_checkpoint).upper()
+            )
+            if checkpoint_status_snapshot is not None:
+                self._active.checkpoint_status_snapshot = dict(checkpoint_status_snapshot)
+            self._active.completion_time_sec = (
+                None if completion_time_sec is None else float(completion_time_sec)
+            )
             if failure_reason:
                 self._active.failure_reason = str(failure_reason)
 
@@ -267,6 +336,21 @@ class TaskRunLogger:
             if self._active is None:
                 return
             payload = dict(trace or {})
+            if not payload.get("planning_stage"):
+                purpose = str(payload.get("llm_call_purpose") or "").strip().lower()
+                payload["planning_stage"] = (
+                    "heartbeat" if "heartbeat" in purpose else ("replan" if "replan" in purpose else "initial")
+                )
+            if not payload.get("plan_source"):
+                candidate_source = payload.get("plan_source") or payload.get("source") or payload.get("final_plan_source")
+                if candidate_source:
+                    payload["plan_source"] = str(candidate_source)
+                else:
+                    stage = str(payload.get("planning_stage") or "").strip().lower()
+                    payload["plan_source"] = (
+                        "heartbeat_decision" if stage == "heartbeat" else ("llm_replan" if stage == "replan" else "llm_initial")
+                    )
+            payload = {k: payload.get(k) for k in PLANNING_TRACE_ALLOWED_KEYS if k in payload}
             payload["run_id"] = self._active.run_id
             payload["timestamp"] = self._to_iso(time.time())
             self._active.llm_call_count += 1
@@ -297,17 +381,31 @@ class TaskRunLogger:
 
     def _build_runtime_trace_row(self, snapshot: Dict, now: float) -> Dict:
         safety_context = snapshot.get("safety_context")
+        benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
+        completed_checkpoints = [str(v).upper() for v in list(benchmark_progress.get("completed") or [])]
+        checkpoint_order = [str(v).upper() for v in list(snapshot.get("checkpoint_order") or [])]
+        global_unfinished_checkpoints = [cid for cid in checkpoint_order if cid not in set(completed_checkpoints)]
+        active_checkpoint_ids = [
+            str(v).upper()
+            for v in list((snapshot.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])
+        ]
+        remaining_checkpoints = [cid for cid in active_checkpoint_ids if cid not in set(completed_checkpoints)]
         return {
             "run_id": self._active.run_id if self._active else "",
             "timestamp": self._to_iso(now),
             "drone_gt": snapshot.get("drone_gt"),
             "drone_yaw_rad": snapshot.get("drone_yaw_rad"),
             "workers": snapshot.get("workers"),
-            "benchmark_progress": snapshot.get("benchmark_progress"),
+            "benchmark_progress": benchmark_progress,
+            "completed_checkpoints": completed_checkpoints,
+            "remaining_checkpoints": remaining_checkpoints,
+            "active_checkpoint_ids": active_checkpoint_ids,
+            "global_unfinished_checkpoints": global_unfinished_checkpoints,
             "execution_mode": snapshot.get("execution_mode"),
             "framework_name": snapshot.get("framework_name"),
             "triggered_for_replan": bool(snapshot.get("replan_count", 0)),
             "replan_count": int(snapshot.get("replan_count", 0) or 0),
+            "trigger_reason": snapshot.get("trigger_reason"),
             "predicted_collision_probability": None if safety_context is None else float(getattr(safety_context, "predicted_collision_probability", 0.0)),
             "per_worker_predicted_collision_probability": [] if safety_context is None else list(getattr(safety_context, "per_worker_collision_probabilities", []) or []),
             "dominant_risky_worker": None if safety_context is None else str(getattr(safety_context, "dominant_threat_id", "")),
@@ -317,12 +415,21 @@ class TaskRunLogger:
             "min_uav_worker_distance_m": snapshot.get("min_uav_worker_distance_m"),
             "scene_id": snapshot.get("baseline_scene_id"),
             "selected_baseline_id": snapshot.get("selected_baseline_id"),
+            "completion_state_source": "benchmark_progress/dwell_tracker",
         }
 
     def _append_jsonl_line(self, path: str, payload: Dict):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
             f.write(self._json_text(payload) + "\n")
+
+    def _write_json(self, path: str, payload: Dict):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+
+    def _run_file_path(self, run_id: str, suffix: str) -> str:
+        return os.path.join(self.archive_dir, f"{run_id}_{suffix}")
 
     def end_run(self, run_status: str, failure_reason: str = ""):
         with self._lock:
@@ -346,11 +453,18 @@ class TaskRunLogger:
             return {}
         final = active.final_snapshot or active.initial_snapshot or {}
         progress = dict(final.get("benchmark_progress") or {})
-        completed = list(progress.get("completed") or [])
-        objective_ids = list((final.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])
+        objective_ids = [str(v).upper() for v in list((final.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])]
+        progress_completed = [str(v).upper() for v in list(progress.get("completed") or [])]
+        true_completed = [str(v).upper() for v in list(active.true_completed_checkpoints or [])]
+        if not true_completed:
+            true_completed = [cid for cid in progress_completed if (not objective_ids) or (cid in objective_ids)]
+        true_remaining = [str(v).upper() for v in list(active.true_remaining_checkpoints or [])]
+        if not true_remaining:
+            true_remaining = [cid for cid in objective_ids if cid not in set(true_completed)]
+        active_scope_ids = list(objective_ids or sorted(set(true_completed + true_remaining)))
         completion_ratio = 0.0
-        if objective_ids:
-            completion_ratio = float(len([cid for cid in completed if cid in objective_ids])) / float(len(objective_ids))
+        if active_scope_ids:
+            completion_ratio = float(len([cid for cid in true_completed if cid in set(active_scope_ids)])) / float(len(active_scope_ids))
         return {
             "run_id": active.run_id,
             "task_id": active.task_id,
@@ -358,10 +472,19 @@ class TaskRunLogger:
             "selected_baseline_name": active.run_context.get("selected_baseline_name", ""),
             "scene_id": final.get("baseline_scene_id") or active.run_context.get("baseline_scene_id", ""),
             "run_status": active.run_status,
+            "mission_success": active.mission_success,
+            "termination_reason": active.termination_reason,
+            "queue_exhausted_with_unfinished": bool(active.queue_exhausted_with_unfinished),
+            "ended_due_to_replan_interrupt": bool(active.ended_due_to_replan_interrupt),
+            "true_completed_checkpoints": list(true_completed),
+            "true_remaining_checkpoints": list(true_remaining),
+            "current_target_checkpoint": active.current_target_checkpoint,
+            "checkpoint_status_snapshot": dict(active.checkpoint_status_snapshot),
+            "completion_state_source": active.completion_state_source,
             "collision_count": int(final.get("collision_count", 0) or 0),
             "near_miss_count": int(final.get("near_miss_count", 0) or 0),
             "replan_count": int(final.get("replan_count", 0) or 0),
-            "completed_checkpoints": completed,
+            "completed_checkpoints": list(true_completed),
             "completion_ratio": completion_ratio,
             "runtime_trace_count": len(active.runtime_trace),
             "planning_trace_count": len(active.planning_trace),
@@ -387,11 +510,18 @@ class TaskRunLogger:
         initial = active.initial_snapshot
         final = active.final_snapshot or initial or {}
         progress = dict(final.get("benchmark_progress") or {})
-        completed = list(progress.get("completed") or [])
-        objective_ids = list((final.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])
+        objective_ids = [str(v).upper() for v in list((final.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])]
+        progress_completed = [str(v).upper() for v in list(progress.get("completed") or [])]
+        true_completed = [str(v).upper() for v in list(active.true_completed_checkpoints or [])]
+        if not true_completed:
+            true_completed = [cid for cid in progress_completed if (not objective_ids) or (cid in objective_ids)]
+        true_remaining = [str(v).upper() for v in list(active.true_remaining_checkpoints or [])]
+        if not true_remaining:
+            true_remaining = [cid for cid in objective_ids if cid not in set(true_completed)]
+        active_scope_ids = list(objective_ids or sorted(set(true_completed + true_remaining)))
         completion_ratio = 0.0
-        if objective_ids:
-            completion_ratio = float(len([cid for cid in completed if cid in objective_ids])) / float(len(objective_ids))
+        if active_scope_ids:
+            completion_ratio = float(len([cid for cid in true_completed if cid in set(active_scope_ids)])) / float(len(active_scope_ids))
 
         for row in active.runtime_trace:
             self._append_jsonl_line(self.runtime_trace_jsonl_path, row)
@@ -421,50 +551,91 @@ class TaskRunLogger:
             "saved_after_run": True,
             "task_success": bool(active.task_completed_bool and active.plan_execution_success),
             "failure_reason": active.failure_reason,
-            "completion_time_sec": round(end_ts - active.start_time, 3),
+            "completion_time_sec": (None if not bool(active.mission_success) else (
+                round(end_ts - active.start_time, 3) if active.completion_time_sec is None else float(active.completion_time_sec)
+            )),
             "total_replan_count": int((final or {}).get("replan_count", 0) or 0),
             "total_llm_call_count": int(active.llm_call_count),
             "collision_count": int((final or {}).get("collision_count", 0) or 0),
             "near_miss_count": int((final or {}).get("near_miss_count", 0) or 0),
             "min_uav_worker_distance_m": active.min_uav_worker_distance_m,
-            "completed_checkpoints": self._json_text(completed),
+            "completed_checkpoints": self._json_text(true_completed),
             "completion_ratio": completion_ratio,
             "generated_plan": active.actual_plan_text,
             "final_plan_source": planner_info.get("final_plan_source", ""),
         }
+        run_summary = {
+            "run_id": active.run_id,
+            "start_time": active.start_iso,
+            "end_time": self._to_iso(end_ts),
+            "duration_sec": round(end_ts - active.start_time, 3),
+            "run_status": active.run_status,
+            "mission_success": active.mission_success,
+            "termination_reason": active.termination_reason,
+            "queue_exhausted_with_unfinished": bool(active.queue_exhausted_with_unfinished),
+            "ended_due_to_replan_interrupt": bool(active.ended_due_to_replan_interrupt),
+            "scene_id": final.get("baseline_scene_id") or active.run_context.get("baseline_scene_id", ""),
+            "baseline_scene_id": active.run_context.get("baseline_scene_id", ""),
+            "selected_baseline_id": active.run_context.get("selected_baseline_id", ""),
+            "selected_baseline_name": active.run_context.get("selected_baseline_name", ""),
+            "trigger_type": active.run_context.get("trigger_type", ""),
+            "trigger_params": active.run_context.get("trigger_params", {}),
+            "prompt_variant": active.run_context.get("prompt_variant", ""),
+            "example_variant": active.run_context.get("example_variant", ""),
+            "state_fields": active.run_context.get("state_fields", []),
+            "use_output_example": bool(active.run_context.get("use_output_example", False)),
+            "completion_time_sec": (None if not bool(active.mission_success) else (
+                round(end_ts - active.start_time, 3) if active.completion_time_sec is None else float(active.completion_time_sec)
+            )),
+            "replan_count": int((final or {}).get("replan_count", 0) or 0),
+            "llm_call_count": int(active.llm_call_count),
+            "collision_count": int((final or {}).get("collision_count", 0) or 0),
+            "near_miss_count": int((final or {}).get("near_miss_count", 0) or 0),
+            "min_uav_worker_distance_m": active.min_uav_worker_distance_m,
+            "completed_checkpoints": list(true_completed),
+            "completion_ratio": completion_ratio,
+            "true_completed_checkpoints": list(true_completed),
+            "true_remaining_checkpoints": list(true_remaining),
+            "current_target_checkpoint": active.current_target_checkpoint,
+            "checkpoint_status_snapshot": dict(active.checkpoint_status_snapshot),
+            "completion_state_source": active.completion_state_source,
+            "runtime_trace_count": len(active.runtime_trace),
+            "planning_trace_count": len(active.planning_trace),
+        }
+        debug_payload = {
+            "run_id": active.run_id,
+            "timestamp": self._to_iso(end_ts),
+            "run_summary": run_summary,
+            "metrics": {
+                "near_miss_count": int(active.near_miss_count),
+                "min_uav_worker_distance_m": active.min_uav_worker_distance_m,
+                "collision_count": int((final or {}).get("collision_count", 0) or 0),
+                "replan_count": int((final or {}).get("replan_count", 0) or 0),
+            },
+            "runtime_trace_count": len(active.runtime_trace),
+            "planning_trace_count": len(active.planning_trace),
+        }
+
+        runtime_per_run_path = self._run_file_path(active.run_id, "runtime_trace.jsonl")
+        planning_per_run_path = self._run_file_path(active.run_id, "planning_trace.jsonl")
+        summary_per_run_path = self._run_file_path(active.run_id, "summary.json")
+        debug_per_run_path = self._run_file_path(active.run_id, "debug.json")
+
+        for trace_row in active.runtime_trace:
+            self._append_jsonl_line(runtime_per_run_path, trace_row)
+        for trace_row in active.planning_trace:
+            self._append_jsonl_line(planning_per_run_path, trace_row)
+        self._write_json(summary_per_run_path, run_summary)
+        self._write_json(debug_per_run_path, debug_payload)
 
         wb = self._load_workbook_resilient()
         if wb is not None:
             ws = wb[RUNS_SHEET]
             ws.append([row[col] for col in RUN_COLUMNS])
-            debug_payload = {
-                "run_id": active.run_id,
-                "task_id": active.task_id,
-                "task_text": active.task_text,
-                "run_status": active.run_status,
-                "failure_reason": active.failure_reason,
-                "planner_info": {
-                    "llm_called": planner_info.get("llm_called", False),
-                    "final_plan_source": planner_info.get("final_plan_source", ""),
-                },
-                "initial_snapshot": initial,
-                "final_snapshot": final,
-                "metrics": {
-                    "near_miss_count": int(active.near_miss_count),
-                    "min_uav_worker_distance_m": active.min_uav_worker_distance_m,
-                    "collision_count": int((final or {}).get("collision_count", 0) or 0),
-                    "replan_count": int((final or {}).get("replan_count", 0) or 0),
-                },
-                "run_context": active.run_context,
-                "runtime_trace_count": len(active.runtime_trace),
-                "planning_trace_count": len(active.planning_trace),
-            }
             ws_debug = wb[DEBUG_SHEET]
             ws_debug.append([active.run_id, self._to_iso(end_ts), self._json_text(debug_payload)])
             wb.save(self.excel_path)
-            os.makedirs(os.path.dirname(self.debug_jsonl_path) or ".", exist_ok=True)
-            with open(self.debug_jsonl_path, "a", encoding="utf-8") as f:
-                f.write(self._json_text(debug_payload) + "\n")
+        self._append_jsonl_line(self.debug_jsonl_path, debug_payload)
 
     def _warn_once_disabled(self):
         if self._warned_disabled:
