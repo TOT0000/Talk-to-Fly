@@ -1739,35 +1739,17 @@ class LLMController():
                 if isinstance(ret_val, tuple) and len(ret_val) >= 2:
                     execution_success = bool(ret_val[0] is not False)
                 if hasattr(ret_val, "replan") and bool(ret_val.replan):
-                    replan_source = "interpreter_return_flag"
                     replan_value = str(getattr(ret_val, "value", "") or "")
-                    if "interrupted for replan" in replan_value:
-                        replan_source = "collision_threshold_callback"
-                    elif "High-level skill" in replan_value:
-                        replan_source = "high_level_skill_failure"
-                    print_debug(f"[REPLAN_DEBUG] source={replan_source} ret_val={replan_value}", env_var="TYPEFLY_VERBOSE_DEBUG")
-                    if selected_framework == MODE_TYPEFLY_ONESHOT:
-                        raise RuntimeError("TypeFly-OneShot does not permit replan.")
-                    replan_attempts += 1
-                    self._replan_attempts = replan_attempts
-                    if replan_source == "collision_threshold_callback":
-                        print_t(
-                            f"[TYPEFLY-INTERRUPT-REPLAN] triggered by predicted_collision_probability > "
-                            f"{self.predicted_collision_replan_threshold:.1f}"
-                        )
-                    print_t(f"[FULL-REPLAN] mode={selected_framework} count={replan_attempts}")
-                    print_t(f"[REPLAN-COUNT] current={replan_attempts} limit={max_replan_attempts}")
-                    self.task_run_logger.update_execution_info(
-                        execution_success=False,
-                        failure_reason="replan_requested",
-                        task_completed=False,
+                    print_debug(
+                        f"[REPLAN_DEBUG] ret_val.replan disabled value={replan_value}",
+                        env_var="TYPEFLY_VERBOSE_DEBUG",
                     )
-                    if replan_attempts > max_replan_attempts:
-                        print_t(f"[REPLAN-COUNT] current={replan_attempts} limit={max_replan_attempts}")
-                        raise RuntimeError(f"Exceeded max replan attempts ({max_replan_attempts})")
-                    self.append_message(f"[LOG] Replan requested, attempt={replan_attempts}")
-                    self.execution_mode = "Planning"
-                    continue
+                    self.append_message(
+                        "[LOG] ret_val.replan mechanism disabled; request ignored."
+                    )
+                    raise RuntimeError(
+                        f"ret_val.replan mechanism disabled: {replan_value if replan_value else 'no detail'}"
+                    )
                 self.task_run_logger.update_execution_info(
                     execution_success=execution_success,
                     task_completed=task_completed,
