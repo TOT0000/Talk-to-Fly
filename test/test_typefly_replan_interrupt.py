@@ -64,6 +64,60 @@ def test_gc_replan_interrupt_clears_remaining_queue_and_skips_following_statemen
     assert Statement.execution_queue.empty()
 
 
+def test_gc_ui_event_interrupt_requests_replan_and_skips_following_delay():
+    pytest.importorskip("PIL")
+    from controller.llm_controller import LLMController
+
+    controller = LLMController.__new__(LLMController)
+    call_order = []
+
+    class _Drone:
+        def turn_ccw(self, degree):
+            call_order.append(f"turn_ccw({degree})")
+            return True, False
+
+        def turn_cw(self, degree):
+            call_order.append(f"turn_cw({degree})")
+            return True, False
+
+        def move_forward(self, step):
+            call_order.append(f"move_forward({step})")
+            return True, False
+
+    controller.drone = _Drone()
+    controller._benchmark_executed_gc_sequence = []
+    controller.set_benchmark_progress_focus_checkpoint = lambda _cid: None
+    controller._is_active_objective_completed = lambda: False
+    controller._maybe_run_agent_heartbeat = lambda: False
+    controller._should_trigger_auto_replan = lambda _p, source="": False
+    controller._pending_heartbeat_reason = ""
+    controller._runtime_replan_reason = "predicted_collision_probability=0.763122>=0.50, source=ui_event"
+    controller._runtime_replan_event = __import__("threading").Event()
+    controller._runtime_replan_event.set()
+    controller._clear_runtime_replan_event = lambda: (controller._runtime_replan_event.clear(), setattr(controller, "_runtime_replan_reason", ""))
+    controller._consume_runtime_replan_event = lambda: (
+        (True, "predicted_collision_probability=0.763122>=0.50, source=ui_event")
+        if controller._runtime_replan_event.is_set()
+        else (False, "")
+    )
+    controller.predicted_collision_replan_threshold = 0.5
+    controller._statement_end_reason = ""
+    controller.get_live_ui_snapshot = lambda: {
+        "drone_gt": (0.0, 0.0, 0.0),
+        "drone_est": (0.0, 0.0, 0.0),
+        "drone_est_bias_corrected": (0.0, 0.0, 0.0),
+        "drone_yaw_rad": 0.0,
+        "benchmark_progress": {"completed": [], "current_target": "A1", "in_radius": False},
+        "safety_context": None,
+    }
+
+    summary, should_replan = controller.skill_go_checkpoint("A1")
+
+    assert "stop_reason=predicted_collision_probability=0.763122>=0.50, source=ui_event" in summary
+    assert should_replan is True
+    assert call_order == []
+
+
 def test_interpreter_abort_callback_before_execute_has_ret_queue_ready():
     _install_minimal_skillset(gc_replan=False)
     interpreter = MiniSpecInterpreter(

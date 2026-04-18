@@ -240,6 +240,14 @@ class LLMController():
         self._pending_heartbeat_reason: str = ""
         self._runtime_replan_event = threading.Event()
         self._runtime_replan_reason: str = ""
+        self._statement_end_reason: str = ""
+        self._interrupted_for_replan: bool = False
+        self._entered_awaiting_replan_response: bool = False
+        self._old_queue_drained: bool = False
+        self._next_statement_executed_after_interrupt: bool = False
+        self._replan_wait_start_ts: Optional[float] = None
+        self._replan_response_commit_ts: Optional[float] = None
+        self._execution_resumed_from_new_plan: bool = False
         self._replan_response_history: list[dict] = []
         self._mission_original_plan: Optional[str] = None
         self._current_active_plan: Optional[str] = None
@@ -1003,6 +1011,7 @@ class LLMController():
             event_triggered, event_reason = self._consume_runtime_replan_event()
             if event_triggered:
                 stop_reason = str(event_reason or "runtime_replan_event")
+                self._statement_end_reason = stop_reason
                 print_t(f"[QUEUE] clearing remaining statements due to replan ({stop_reason})")
                 preempted_for_replan = True
                 return True
@@ -1010,9 +1019,11 @@ class LLMController():
             if objective_completed_now:
                 reached = True
                 stop_reason = "objective_completed"
+                self._statement_end_reason = stop_reason
                 return True
             if self._maybe_run_agent_heartbeat():
                 stop_reason = f"agent_heartbeat_replan({self._pending_heartbeat_reason or 'llm'})"
+                self._statement_end_reason = stop_reason
                 print_t(f"[QUEUE] clearing remaining statements due to replan")
                 preempted_for_replan = True
                 return True
@@ -1023,6 +1034,7 @@ class LLMController():
                     "aborting current execution"
                 )
                 stop_reason = f"collision_probability_high({current_p:.3f})"
+                self._statement_end_reason = stop_reason
                 preempted_for_replan = True
                 return True
             return False
@@ -1154,9 +1166,11 @@ class LLMController():
             f"event=gc_end checkpoint={checkpoint.id} reached={reached} stop_reason={stop_reason}",
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
-        should_request_replan = bool(
+        self._statement_end_reason = str(stop_reason)
+        should_request_replan = bool(preempted_for_replan) or bool(
             str(stop_reason).startswith("collision_probability_high")
             or str(stop_reason).startswith("agent_heartbeat_replan")
+            or str(stop_reason).startswith("predicted_collision_probability=")
         )
         # Keep gc non-replan on pure kinematic convergence limits (e.g. max_iterations).
         return summary, should_request_replan
@@ -1245,6 +1259,8 @@ class LLMController():
                 f"protection_window_active remaining_statements={self.auto_replan_protection_remaining}",
                 env_var="TYPEFLY_VERBOSE_DEBUG",
             )
+        if bool(self._entered_awaiting_replan_response):
+            self._next_statement_executed_after_interrupt = True
 
     def _normalize_framework_mode(self, framework_mode: str) -> str:
         normalized = str(framework_mode or MODE_TYPEFLY_ONESHOT).strip().lower()
@@ -1684,6 +1700,14 @@ class LLMController():
         self.auto_replan_protection_remaining = 0
         self._runtime_replan_event.clear()
         self._runtime_replan_reason = ""
+        self._statement_end_reason = ""
+        self._interrupted_for_replan = False
+        self._entered_awaiting_replan_response = False
+        self._old_queue_drained = False
+        self._next_statement_executed_after_interrupt = False
+        self._replan_wait_start_ts = None
+        self._replan_response_commit_ts = None
+        self._execution_resumed_from_new_plan = False
         self.last_heartbeat_ts = 0.0
         self._pending_heartbeat_replan_plan = None
         self._pending_heartbeat_reason = ""
@@ -1737,6 +1761,9 @@ class LLMController():
                         self._pending_heartbeat_replan_plan = None
                         self._pending_heartbeat_reason = ""
                         self._clear_runtime_replan_event()
+                        self._entered_awaiting_replan_response = False
+                        self._replan_response_commit_ts = time.time()
+                        self._execution_resumed_from_new_plan = True
                         current_progress = dict(self.latest_benchmark_progress or {})
                         completed_now = [str(v).upper() for v in list(current_progress.get("completed") or [])]
                         active_now = [str(v).upper() for v in list(self.active_objective_set.get("active_checkpoint_ids") or [])]
@@ -1820,6 +1847,10 @@ class LLMController():
                 self.append_message(f'[Plan]: \\\\')
                 print_t(f"[PLAN-DISPLAY] {self.current_plan}")
                 self.execution_time = time.time()
+                if self._entered_awaiting_replan_response:
+                    self._entered_awaiting_replan_response = False
+                    self._replan_response_commit_ts = time.time()
+                    self._execution_resumed_from_new_plan = True
                 self.execution_mode = "Executing"
                 self.auto_replan_protection_remaining = int(AUTO_REPLAN_PROTECTION_STATEMENTS)
                 self.auto_replan_armed = True
@@ -1852,6 +1883,13 @@ class LLMController():
                             replan_attempts += 1
                             self._replan_attempts = replan_attempts
                             self.execution_mode = "Planning"
+                            self._interrupted_for_replan = True
+                            self._entered_awaiting_replan_response = True
+                            self._old_queue_drained = True
+                            self._replan_wait_start_ts = time.time()
+                            self._execution_resumed_from_new_plan = False
+                            self._next_statement_executed_after_interrupt = False
+                            self._statement_end_reason = replan_value if replan_value else "replan_interrupt"
                             self.append_message(
                                 "[TYPEFLY-INTERRUPT] statement requested replan, aborting current execution: "
                                 f"{replan_value if replan_value else 'no detail'}"
@@ -2537,6 +2575,14 @@ class LLMController():
             "original_planned_path": None,
             "updated_path": None,
             "replan_count": int(getattr(self, "_replan_attempts", 0)),
+            "statement_end_reason": str(getattr(self, "_statement_end_reason", "") or ""),
+            "interrupted_for_replan": bool(getattr(self, "_interrupted_for_replan", False)),
+            "entered_awaiting_replan_response": bool(getattr(self, "_entered_awaiting_replan_response", False)),
+            "old_queue_drained": bool(getattr(self, "_old_queue_drained", False)),
+            "next_statement_executed_after_interrupt": bool(getattr(self, "_next_statement_executed_after_interrupt", False)),
+            "replan_wait_start_ts": getattr(self, "_replan_wait_start_ts", None),
+            "replan_response_commit_ts": getattr(self, "_replan_response_commit_ts", None),
+            "execution_resumed_from_new_plan": bool(getattr(self, "_execution_resumed_from_new_plan", False)),
         }
         self._update_proximity_metrics(snapshot)
         if safety_state is not None and safety_context is not None:
