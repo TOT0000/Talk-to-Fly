@@ -198,6 +198,7 @@ class LLMController():
         self._latest_near_miss_events = []
         self.predicted_collision_replan_threshold = float(PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD)
         self.predicted_collision_rearm_threshold = float(PREDICTED_COLLISION_PROBABILITY_REARM_THRESHOLD)
+        self.heartbeat_interval_seconds = float(AGENT_HEARTBEAT_INTERVAL_SECONDS)
         self.active_objective_set = self._default_active_objective_set()
         self.latest_benchmark_progress = {
             "completed": [],
@@ -1237,7 +1238,7 @@ class LLMController():
             )
             return False
         now = time.time()
-        if (not force) and (now - float(self.last_heartbeat_ts) < float(AGENT_HEARTBEAT_INTERVAL_SECONDS)):
+        if (not force) and (now - float(self.last_heartbeat_ts) < float(self.heartbeat_interval_seconds)):
             return False
         self.last_heartbeat_ts = now
         if getattr(self, "_replan_attempts", 0) >= int(self.replan_limit):
@@ -1842,9 +1843,11 @@ class LLMController():
             threshold = float(config.trigger_params.get("predicted_collision_threshold", PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD))
             self.predicted_collision_replan_threshold = threshold
             self.predicted_collision_rearm_threshold = max(0.0, threshold - 0.05)
+            self.heartbeat_interval_seconds = float(AGENT_HEARTBEAT_INTERVAL_SECONDS)
         else:
             self.predicted_collision_replan_threshold = float(PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD)
             self.predicted_collision_rearm_threshold = float(PREDICTED_COLLISION_PROBABILITY_REARM_THRESHOLD)
+            self.heartbeat_interval_seconds = float(config.trigger_params.get("heartbeat_seconds", AGENT_HEARTBEAT_INTERVAL_SECONDS))
         self.planner.set_runtime_prompt_example_variant(
             prompt_variant=config.prompt_variant,
             example_variant=config.example_variant,
