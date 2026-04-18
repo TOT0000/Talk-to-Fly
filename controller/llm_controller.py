@@ -994,6 +994,30 @@ class LLMController():
         final_dist = None
         best_dist = float("inf")
         stop_reason = "max_iterations"
+        preempted_for_replan = False
+
+        def _should_preempt_for_replan(current_p: float) -> bool:
+            nonlocal reached, stop_reason, preempted_for_replan
+            objective_completed_now = self._is_active_objective_completed()
+            if objective_completed_now:
+                reached = True
+                stop_reason = "objective_completed"
+                return True
+            if self._maybe_run_agent_heartbeat():
+                stop_reason = f"agent_heartbeat_replan({self._pending_heartbeat_reason or 'llm'})"
+                print_t(f"[QUEUE] clearing remaining statements due to replan")
+                preempted_for_replan = True
+                return True
+            if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
+                print_t(
+                    "[TYPEFLY-INTERRUPT] "
+                    f"predicted_collision_probability={current_p:.6f} > {self.predicted_collision_replan_threshold:.2f}, "
+                    "aborting current execution"
+                )
+                stop_reason = f"collision_probability_high({current_p:.3f})"
+                preempted_for_replan = True
+                return True
+            return False
 
         for idx in range(max_iterations):
             snapshot = self.get_live_ui_snapshot()
@@ -1010,22 +1034,7 @@ class LLMController():
             progress_target_match = bool(runtime_target == checkpoint.id)
             safety_context = snapshot.get("safety_context")
             current_p = 0.0 if safety_context is None else float(getattr(safety_context, "predicted_collision_probability", 0.0))
-            objective_completed_now = self._is_active_objective_completed()
-            if objective_completed_now:
-                reached = True
-                stop_reason = "objective_completed"
-                break
-            if self._maybe_run_agent_heartbeat():
-                stop_reason = f"agent_heartbeat_replan({self._pending_heartbeat_reason or 'llm'})"
-                print_t(f"[QUEUE] clearing remaining statements due to replan")
-                break
-            if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
-                print_t(
-                    "[TYPEFLY-INTERRUPT] "
-                    f"predicted_collision_probability={current_p:.6f} > {self.predicted_collision_replan_threshold:.2f}, "
-                    "aborting current execution"
-                )
-                stop_reason = f"collision_probability_high({current_p:.3f})"
+            if _should_preempt_for_replan(current_p):
                 break
 
             dx_w = float(checkpoint.x) - float(control_pos[0])
@@ -1077,20 +1086,39 @@ class LLMController():
                 yaw_error_deg = math.degrees(yaw_error)
                 align_threshold = heading_align_near_deg if dist_control < 0.8 else heading_align_far_deg
                 if abs(yaw_error_deg) > align_threshold:
+                    if _should_preempt_for_replan(current_p):
+                        break
                     turn_deg = int(max(5.0, min(float(max_turn_step_deg), abs(yaw_error_deg))))
-                    if yaw_error_deg > 0:
+                    turn_cmd = "turn_ccw" if yaw_error_deg > 0 else "turn_cw"
+                    if turn_cmd == "turn_ccw":
                         self.drone.turn_ccw(turn_deg)
-                        chosen_action = f"turn_ccw({turn_deg})"
                     else:
                         self.drone.turn_cw(turn_deg)
-                        chosen_action = f"turn_cw({turn_deg})"
+                    chosen_action = f"{turn_cmd}({turn_deg})"
                 else:
+                    if _should_preempt_for_replan(current_p):
+                        break
                     if is_px4_sim:
                         forward_step = min(local_step_cap, max(0.35, dist_control * 0.90))
                     else:
                         forward_step = min(local_step_cap, max(0.15, dist_control * 0.65))
-                    self.drone.move_forward(forward_step)
-                    chosen_action = f"move_forward({forward_step:.2f})"
+                    if is_px4_sim:
+                        remaining_forward = float(forward_step)
+                        forward_chunk_m = 0.30
+                        moved_forward = 0.0
+                        while remaining_forward > 1e-6:
+                            if _should_preempt_for_replan(current_p):
+                                break
+                            step_forward = float(min(float(forward_chunk_m), float(remaining_forward)))
+                            self.drone.move_forward(step_forward)
+                            moved_forward += step_forward
+                            remaining_forward -= step_forward
+                            chosen_action = f"move_forward({moved_forward:.2f}/{forward_step:.2f})"
+                        if preempted_for_replan:
+                            break
+                    else:
+                        self.drone.move_forward(forward_step)
+                        chosen_action = f"move_forward({forward_step:.2f})"
 
             print_debug(
                 "[GC_DEBUG] "
