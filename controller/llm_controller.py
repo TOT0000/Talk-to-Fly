@@ -1742,16 +1742,30 @@ class LLMController():
                     execution_success = bool(ret_val[0] is not False)
                 if hasattr(ret_val, "replan") and bool(ret_val.replan):
                     replan_value = str(getattr(ret_val, "value", "") or "")
-                    print_debug(
-                        f"[REPLAN_DEBUG] ret_val.replan disabled value={replan_value}",
-                        env_var="TYPEFLY_VERBOSE_DEBUG",
-                    )
-                    self.append_message(
-                        "[LOG] ret_val.replan mechanism disabled; request ignored."
-                    )
-                    raise RuntimeError(
-                        f"ret_val.replan mechanism disabled: {replan_value if replan_value else 'no detail'}"
-                    )
+                    if selected_framework == MODE_TYPEFLY_ONESHOT:
+                        print_debug(
+                            f"[REPLAN_DEBUG] ret_val.replan ignored in oneshot mode value={replan_value}",
+                            env_var="TYPEFLY_VERBOSE_DEBUG",
+                        )
+                    else:
+                        if replan_attempts >= max_replan_attempts:
+                            print_t(f"[REPLAN-COUNT] current={replan_attempts} limit={max_replan_attempts}")
+                            self.append_message(
+                                f"[LOG] Replan requested but limit reached ({replan_attempts}/{max_replan_attempts})."
+                            )
+                        else:
+                            replan_attempts += 1
+                            self._replan_attempts = replan_attempts
+                            self.execution_mode = "Planning"
+                            self.append_message(
+                                "[TYPEFLY-INTERRUPT] statement requested replan, aborting current execution: "
+                                f"{replan_value if replan_value else 'no detail'}"
+                            )
+                            print_t(
+                                "[TYPEFLY-INTERRUPT] statement requested replan, aborting current execution: "
+                                f"{replan_value if replan_value else 'no detail'}"
+                            )
+                            continue
                 self.task_run_logger.update_execution_info(
                     execution_success=execution_success,
                     task_completed=task_completed,
