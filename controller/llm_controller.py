@@ -30,6 +30,7 @@ from .sim_state_provider import SimStateProvider
 from .scenario_manager import ScenarioManager
 from .safety_context import SafetyContext
 from .task_run_logger import TaskRunLogger
+from .pipeline_registry import get_pipeline_config, normalize_pipeline_id
 from .baseline_scenes import (
     BASELINE_SCENES,
     BaselineScene,
@@ -54,6 +55,8 @@ from .benchmark_layout import (
     BENCHMARK_CHECKPOINTS_BY_ID,
     BENCHMARK_CHECKPOINTS,
     BENCHMARK_ZONES,
+    UAV_RADIUS_M,
+    WORKER_RADIUS_M,
 )
 from .langgraph_agent import LangGraphOrchestrationRunner
 
@@ -63,6 +66,8 @@ PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD = TYPEFLY_REPLAN_THRESHOLD
 PREDICTED_COLLISION_PROBABILITY_REARM_THRESHOLD = TYPEFLY_REPLAN_THRESHOLD
 AUTO_REPLAN_PROTECTION_STATEMENTS = 2
 COLLISION_RISK_WORKER_IDS = ("worker_1", "worker_2", "worker_3")
+NEAR_MISS_ENTER_DISTANCE_M = 1.0
+NEAR_MISS_EXIT_DISTANCE_M = 1.05
 
 MODE_TYPEFLY_ONESHOT = "typefly-oneshot"
 MODE_TYPEFLY_THRESHOLD_REPLAN = "typefly-threshold-replan"
@@ -183,6 +188,17 @@ class LLMController():
         self.latest_baseline_decision = None
         self.execution_mode = "Waiting"
         self.framework_mode = MODE_TYPEFLY_ONESHOT
+        self.selected_pipeline_id = normalize_pipeline_id(os.getenv("TYPEFLY_BASELINE_ID", "baseline1"))
+        self.archive_enabled = True
+        self.near_miss_count = 0
+        self.collision_count = 0
+        self.min_uav_worker_distance_m: Optional[float] = None
+        self._near_miss_active_by_worker = {wid: False for wid in COLLISION_RISK_WORKER_IDS}
+        self._collision_active_by_worker = {wid: False for wid in COLLISION_RISK_WORKER_IDS}
+        self._latest_near_miss_events = []
+        self.predicted_collision_replan_threshold = float(PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD)
+        self.predicted_collision_rearm_threshold = float(PREDICTED_COLLISION_PROBABILITY_REARM_THRESHOLD)
+        self.heartbeat_interval_seconds = float(AGENT_HEARTBEAT_INTERVAL_SECONDS)
         self.active_objective_set = self._default_active_objective_set()
         self.latest_benchmark_progress = {
             "completed": [],
@@ -226,6 +242,7 @@ class LLMController():
         self._current_active_plan: Optional[str] = None
         self._latest_full_replan_response: Optional[str] = None
         self.langgraph_runner = LangGraphOrchestrationRunner(self)
+        self.set_selected_pipeline(self.selected_pipeline_id)
 
         # PX4_SIM optional managed user-position publisher lifecycle
         self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
@@ -999,7 +1016,7 @@ class LLMController():
             if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
                 print_t(
                     "[TYPEFLY-INTERRUPT] "
-                    f"predicted_collision_probability={current_p:.6f} > {PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}, "
+                    f"predicted_collision_probability={current_p:.6f} > {self.predicted_collision_replan_threshold:.2f}, "
                     "aborting current execution"
                 )
                 stop_reason = f"collision_probability_high({current_p:.3f})"
@@ -1221,7 +1238,7 @@ class LLMController():
             )
             return False
         now = time.time()
-        if (not force) and (now - float(self.last_heartbeat_ts) < float(AGENT_HEARTBEAT_INTERVAL_SECONDS)):
+        if (not force) and (now - float(self.last_heartbeat_ts) < float(self.heartbeat_interval_seconds)):
             return False
         self.last_heartbeat_ts = now
         if getattr(self, "_replan_attempts", 0) >= int(self.replan_limit):
@@ -1238,6 +1255,14 @@ class LLMController():
             latest_full_replan_response=self._latest_full_replan_response,
             full_replan_count=int(getattr(self, "_replan_attempts", 0)),
             hard_gate=(self.framework_mode == MODE_AGENT_HEARTBEAT_HARDGATE),
+        )
+        self.task_run_logger.append_planning_trace(
+            trace={
+                **self.planner.get_last_heartbeat_trace(),
+                "llm_call_purpose": "heartbeat",
+                "selected_baseline_id": self.selected_pipeline_id,
+                "scene_id": self.baseline_scene_id,
+            }
         )
         raw_response = str(response.get("raw_response", "") or "").strip()
         if raw_response:
@@ -1276,8 +1301,10 @@ class LLMController():
             )
             return False
         predicted_p = float(predicted_p)
+        threshold = float(self.predicted_collision_replan_threshold)
+        rearm_threshold = float(self.predicted_collision_rearm_threshold)
         if self.auto_replan_protection_remaining > 0:
-            if str(source) == "go_checkpoint_loop" and predicted_p >= PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD:
+            if str(source) == "go_checkpoint_loop" and predicted_p >= threshold:
                 print_debug(
                     "[REPLAN_DEBUG] "
                     f"protection_window_bypassed_for_gc p={predicted_p:.6f} "
@@ -1294,12 +1321,12 @@ class LLMController():
                 return False
 
         if not self.auto_replan_armed:
-            if predicted_p <= PREDICTED_COLLISION_PROBABILITY_REARM_THRESHOLD:
+            if predicted_p <= rearm_threshold:
                 self.auto_replan_armed = True
                 print_debug(
                     "[REPLAN_DEBUG] "
                     f"auto_replan_rearmed p={predicted_p:.6f} "
-                    f"threshold={PREDICTED_COLLISION_PROBABILITY_REARM_THRESHOLD:.2f}",
+                    f"threshold={rearm_threshold:.2f}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
             else:
@@ -1310,12 +1337,12 @@ class LLMController():
                 )
             return False
 
-        if predicted_p >= PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD:
+        if predicted_p >= threshold:
             self.auto_replan_armed = False
             print_debug(
                 "[REPLAN_DEBUG] "
                 f"auto_replan_triggered p={predicted_p:.6f} armed=True source={source} "
-                f"trigger_threshold={PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}",
+                f"trigger_threshold={threshold:.2f}",
                 env_var="TYPEFLY_VERBOSE_DEBUG",
             )
             print_debug("[REPLAN_DEBUG] auto_replan_armed=False", env_var="TYPEFLY_VERBOSE_DEBUG")
@@ -1393,7 +1420,7 @@ class LLMController():
             ui_p_text = "n/a" if ui_p is None else f"{float(ui_p):.6f}"
             print_t(
                 "[TYPEFLY-INTERRUPT] "
-                f"predicted_collision_probability={current_p:.6f} > {PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}, "
+                f"predicted_collision_probability={current_p:.6f} > {self.predicted_collision_replan_threshold:.2f}, "
                 "aborting current execution"
             )
             print_t(
@@ -1402,13 +1429,13 @@ class LLMController():
                 f"ui_pc={ui_p_text} "
                 f"callback_pc={callback_p:.6f} "
                 f"decision_pc={current_p:.6f} "
-                f"threshold={PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD:.6f} "
+                f"threshold={self.predicted_collision_replan_threshold:.6f} "
                 f"should_abort={should_abort} "
                 f"dominant={dominant}"
             )
             return True, (
                 f"predicted_collision_probability={current_p:.6f}>="
-                f"{PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD:.2f}, dominant={dominant}"
+                f"{self.predicted_collision_replan_threshold:.2f}, dominant={dominant}"
             )
         return False, ""
 
@@ -1527,8 +1554,20 @@ class LLMController():
         if self.controller_wait_takeoff:
             self.append_message("[Warning] Controller is waiting for takeoff...")
             return
+        pipeline = self.get_selected_pipeline_config()
+        if pipeline.id in {"baseline1", "baseline2"}:
+            framework_mode = MODE_AGENT_HEARTBEAT_SOFT
+        elif pipeline.id == "baseline3":
+            framework_mode = MODE_TYPEFLY_THRESHOLD_REPLAN
         selected_framework = self._normalize_framework_mode(framework_mode)
         self.framework_mode = selected_framework
+        self.set_selected_pipeline(pipeline.id)
+        self.near_miss_count = 0
+        self.collision_count = 0
+        self.min_uav_worker_distance_m = None
+        self._near_miss_active_by_worker = {wid: False for wid in COLLISION_RISK_WORKER_IDS}
+        self._collision_active_by_worker = {wid: False for wid in COLLISION_RISK_WORKER_IDS}
+        self._latest_near_miss_events = []
         self.current_task_description = str(task_description or "")
         print_t(f"[MODE] selected={selected_framework}")
         self.execution_mode = "Planning"
@@ -1542,6 +1581,21 @@ class LLMController():
             task_text=task_description,
             scenario_name=self.get_active_scenario_name(),
             initial_snapshot=initial_snapshot,
+            archive_enabled=bool(self.archive_enabled),
+            run_context={
+                "selected_baseline_id": pipeline.id,
+                "selected_baseline_name": pipeline.name,
+                "trigger_type": pipeline.trigger_type,
+                "trigger_params": dict(pipeline.trigger_params),
+                "prompt_variant": pipeline.prompt_variant,
+                "example_variant": pipeline.example_variant,
+                "state_fields": list(pipeline.state_fields),
+                "use_output_example": bool(pipeline.use_output_example),
+                "archive_enabled": bool(self.archive_enabled),
+                "scene_id": self.baseline_scene_id,
+                "baseline_scene_id": self.baseline_scene_id,
+                "framework_mode": selected_framework,
+            },
         )
         self.append_message('[TASK]: ' + task_description)
         ret_val = None
@@ -1618,6 +1672,16 @@ class LLMController():
                         )
                         llm_called = True
                         final_plan_source = "llm"
+                        self.task_run_logger.append_planning_trace(
+                            trace={
+                                **self.planner.get_last_plan_trace(),
+                                "plan_source": final_plan_source,
+                                "llm_call_purpose": planning_stage,
+                                "parsed_plan": self.current_plan,
+                                "selected_baseline_id": pipeline.id,
+                                "scene_id": self.baseline_scene_id,
+                            }
+                        )
                 self.current_plan = self._sanitize_minispec_plan(self.current_plan)
                 if replan_attempts > 0 and llm_called:
                     self._record_replan_response(
@@ -1689,7 +1753,7 @@ class LLMController():
                     if replan_source == "collision_threshold_callback":
                         print_t(
                             f"[TYPEFLY-INTERRUPT-REPLAN] triggered by predicted_collision_probability > "
-                            f"{PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD:.1f}"
+                            f"{self.predicted_collision_replan_threshold:.1f}"
                         )
                     print_t(f"[FULL-REPLAN] mode={selected_framework} count={replan_attempts}")
                     print_t(f"[REPLAN-COUNT] current={replan_attempts} limit={max_replan_attempts}")
@@ -1767,6 +1831,32 @@ class LLMController():
 
     def get_active_scenario_name(self) -> str:
         return self.scenario_manager.selected_name()
+
+    def set_archive_enabled(self, enabled: bool):
+        self.archive_enabled = bool(enabled)
+
+    def set_selected_pipeline(self, pipeline_id: str) -> str:
+        self.selected_pipeline_id = normalize_pipeline_id(pipeline_id)
+        config = get_pipeline_config(self.selected_pipeline_id)
+        self.replan_limit = int(config.replan_cap)
+        if config.trigger_type == "event_predicted_collision_probability":
+            threshold = float(config.trigger_params.get("predicted_collision_threshold", PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD))
+            self.predicted_collision_replan_threshold = threshold
+            self.predicted_collision_rearm_threshold = max(0.0, threshold - 0.05)
+            self.heartbeat_interval_seconds = float(AGENT_HEARTBEAT_INTERVAL_SECONDS)
+        else:
+            self.predicted_collision_replan_threshold = float(PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD)
+            self.predicted_collision_rearm_threshold = float(PREDICTED_COLLISION_PROBABILITY_REARM_THRESHOLD)
+            self.heartbeat_interval_seconds = float(config.trigger_params.get("heartbeat_seconds", AGENT_HEARTBEAT_INTERVAL_SECONDS))
+        self.planner.set_runtime_prompt_example_variant(
+            prompt_variant=config.prompt_variant,
+            example_variant=config.example_variant,
+            use_output_example=bool(config.use_output_example),
+        )
+        return self.selected_pipeline_id
+
+    def get_selected_pipeline_config(self):
+        return get_pipeline_config(self.selected_pipeline_id)
 
     def get_baseline_scene(self) -> BaselineScene:
         return BASELINE_SCENES[self.baseline_scene_id]
@@ -2307,6 +2397,9 @@ class LLMController():
             "candidate_path_summaries": candidate_path_summaries,
             "baseline_decision": self.latest_baseline_decision,
             "framework_name": str(self.framework_mode),
+            "selected_baseline_id": self.selected_pipeline_id,
+            "selected_baseline_name": self.get_selected_pipeline_config().name,
+            "archive_enabled": bool(self.archive_enabled),
             "mode_name": self.get_active_scenario_name(),
             "execution_mode": self.execution_mode,
             "active_objective_set": dict(self.active_objective_set),
@@ -2322,7 +2415,9 @@ class LLMController():
             ],
             "original_planned_path": None,
             "updated_path": None,
+            "replan_count": int(getattr(self, "_replan_attempts", 0)),
         }
+        self._update_proximity_metrics(snapshot)
         if safety_state is not None and safety_context is not None:
             consistency_from_gap = bool(float(safety_state.envelope_gap_m) < 0.0)
             print_debug(
@@ -2346,6 +2441,48 @@ class LLMController():
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
         return snapshot
+
+    def _update_proximity_metrics(self, snapshot: dict):
+        drone_gt = snapshot.get("drone_gt")
+        workers = list(snapshot.get("workers") or [])
+        events = []
+        if drone_gt is None:
+            snapshot["near_miss_count"] = int(self.near_miss_count)
+            snapshot["collision_count"] = int(self.collision_count)
+            snapshot["near_miss_events"] = events
+            snapshot["min_uav_worker_distance_m"] = self.min_uav_worker_distance_m
+            return
+        collision_distance = float(UAV_RADIUS_M + WORKER_RADIUS_M)
+        for worker in workers:
+            wid = str(worker.get("id"))
+            if wid not in self._near_miss_active_by_worker:
+                self._near_miss_active_by_worker[wid] = False
+                self._collision_active_by_worker[wid] = False
+            worker_xy = worker.get("gt_xy")
+            if worker_xy is None:
+                continue
+            d = float(math.hypot(float(drone_gt[0]) - float(worker_xy[0]), float(drone_gt[1]) - float(worker_xy[1])))
+            if self.min_uav_worker_distance_m is None or d < self.min_uav_worker_distance_m:
+                self.min_uav_worker_distance_m = d
+            colliding = bool(d <= collision_distance)
+            if colliding and not self._collision_active_by_worker.get(wid, False):
+                self.collision_count += 1
+                events.append({"worker_id": wid, "event": "collision_enter", "distance_m": d})
+            self._collision_active_by_worker[wid] = colliding
+
+            near_active = bool(self._near_miss_active_by_worker.get(wid, False))
+            if (not colliding) and (d <= NEAR_MISS_ENTER_DISTANCE_M) and (not near_active):
+                self.near_miss_count += 1
+                self._near_miss_active_by_worker[wid] = True
+                events.append({"worker_id": wid, "event": "near_miss_enter", "distance_m": d})
+            elif near_active and (d > NEAR_MISS_EXIT_DISTANCE_M):
+                self._near_miss_active_by_worker[wid] = False
+                events.append({"worker_id": wid, "event": "near_miss_exit", "distance_m": d})
+        self._latest_near_miss_events = list(events)
+        snapshot["near_miss_count"] = int(self.near_miss_count)
+        snapshot["collision_count"] = int(self.collision_count)
+        snapshot["near_miss_events"] = events
+        snapshot["min_uav_worker_distance_m"] = self.min_uav_worker_distance_m
 
     def _debug_log_collision_probability_pipeline(self, snapshot: dict):
         if not isinstance(snapshot, dict):

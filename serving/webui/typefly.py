@@ -33,6 +33,7 @@ from controller.llm_controller import (
 )
 from controller.experiment_scenarios import SCENARIOS, normalize_scenario_name
 from controller.baseline_scenes import BASELINE_SCENES, normalize_baseline_scene_id
+from controller.pipeline_registry import PIPELINE_REGISTRY, normalize_pipeline_id
 from controller.anchor_provider import AnchorGeometryProvider
 from controller.benchmark_layout import (
     WORKSPACE_SIZE_M,
@@ -61,6 +62,8 @@ class TypeFly:
         controller_robot_type = RobotType.PX4_SIM if backend == "sim" else robot_type
         self.llm_controller = LLMController(controller_robot_type, self.virtual_queue, use_http, self.message_queue, enable_video=enable_video)
         self.llm_controller.register_position_callback(self.receive_position)
+        self.llm_controller.set_selected_pipeline(normalize_pipeline_id(os.getenv("TYPEFLY_BASELINE_ID", "baseline1")))
+        self.llm_controller.set_archive_enabled(True)
         self.active_scenario = self.llm_controller.set_active_scenario(initial_scenario)
         self.active_baseline_scene = self.llm_controller.set_baseline_scene(
             normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_BENCHMARK_DEMO"))
@@ -100,6 +103,8 @@ class TypeFly:
         self.use_llama3 = False
         self.robot_type = controller_robot_type
         self.selected_framework_mode = MODE_TYPEFLY_ONESHOT
+        self.selected_baseline_id = normalize_pipeline_id(os.getenv("TYPEFLY_BASELINE_ID", "baseline1"))
+        self.archive_enabled = True
         self.selected_worker_move_step = 0.5
         self.selected_worker_turn_step = 15.0
 
@@ -177,11 +182,23 @@ class TypeFly:
                         value=MODE_TYPEFLY_ONESHOT,
                         label="Execution Mode",
                     )
+                    self.baseline_selector = gr.Dropdown(
+                        choices=list(PIPELINE_REGISTRY.keys()),
+                        value=self.selected_baseline_id,
+                        label="Baseline Pipeline",
+                    )
+                    self.archive_checkbox = gr.Checkbox(
+                        label="Save this run to archive",
+                        value=True,
+                    )
                     baseline_scene_choices = [
                         sid for sid in (
                             "SCENE_BENCHMARK_DEMO",
                             "SCENE_MANUAL_WORKER_CONTROL",
                             "SCENE_FIXED_W13_MANUAL_W2",
+                            "SCENE1",
+                            "SCENE2",
+                            "SCENE3",
                         ) if sid in BASELINE_SCENES
                     ]
                     self.baseline_scene_selector = gr.Dropdown(
@@ -243,6 +260,16 @@ class TypeFly:
             self.framework_mode_selector.change(
                 fn=self.set_framework_mode,
                 inputs=[self.framework_mode_selector],
+                outputs=[self.scenario_status],
+            )
+            self.baseline_selector.change(
+                fn=self.set_selected_baseline,
+                inputs=[self.baseline_selector],
+                outputs=[self.scenario_status],
+            )
+            self.archive_checkbox.change(
+                fn=self.set_archive_enabled,
+                inputs=[self.archive_checkbox],
                 outputs=[self.scenario_status],
             )
             self.worker_selector.change(
@@ -568,6 +595,8 @@ class TypeFly:
         for file_path in [
             getattr(logger, "excel_path", None),
             getattr(logger, "debug_jsonl_path", None),
+            getattr(logger, "runtime_trace_jsonl_path", None),
+            getattr(logger, "planning_trace_jsonl_path", None),
         ]:
             if not file_path:
                 continue
@@ -601,6 +630,17 @@ class TypeFly:
         self.selected_framework_mode = normalized
         print_t(f"[MODE] selected={normalized}")
         return f"Execution mode switched to `{normalized}`."
+
+    def set_selected_baseline(self, baseline_id: str):
+        normalized = self.llm_controller.set_selected_pipeline(baseline_id)
+        self.selected_baseline_id = normalized
+        cfg = PIPELINE_REGISTRY[normalized]
+        return f"Baseline switched to `{cfg.id}` ({cfg.name})."
+
+    def set_archive_enabled(self, enabled: bool):
+        self.archive_enabled = bool(enabled)
+        self.llm_controller.set_archive_enabled(self.archive_enabled)
+        return f"Archive logging {'enabled' if self.archive_enabled else 'disabled'} for next run."
 
     def _apply_mode_and_collect(self, scenario_name):
         normalized = normalize_scenario_name(scenario_name)
@@ -715,6 +755,8 @@ class TypeFly:
             self.worker_collision_active = {k: False for k in self.worker_collision_active.keys()}
             self.mission_collision_count = 0
             framework_mode = str(getattr(self, "selected_framework_mode", MODE_TYPEFLY_ONESHOT))
+            self.llm_controller.set_selected_pipeline(self.selected_baseline_id)
+            self.llm_controller.set_archive_enabled(self.archive_enabled)
             task_thread = Thread(
                 target=self.llm_controller.execute_task_description,
                 args=(message, framework_mode),
@@ -1043,6 +1085,9 @@ class TypeFly:
             "### Status",
             f"- current framework: {snapshot.get('framework_name', 'n/a')}",
             f"- current mode: {snapshot.get('execution_mode', 'Waiting')}",
+            f"- selected baseline: {snapshot.get('selected_baseline_id', 'n/a')} ({snapshot.get('selected_baseline_name', 'n/a')})",
+            f"- current scene: {snapshot.get('baseline_scene_id', 'n/a')}",
+            f"- archive enabled: {snapshot.get('archive_enabled', False)}",
             f"- active zones: {', '.join(sorted(z.replace('zone_', '') for z in self.objective_state.get('active_zone_ids', set())))}",
             f"- active checkpoints: {len(active_ids)}",
             f"- predicted_collision_probability: {self._fmt_prob(getattr(safety_context, 'predicted_collision_probability', 0.0))}",
@@ -1051,6 +1096,8 @@ class TypeFly:
             f"- checkpoint progress: {completed_active}/{total}",
             f"- zone progress: {', '.join(zone_parts) if zone_parts else 'n/a'}",
             f"- mission collision count: {int(self.mission_collision_count)}",
+            f"- near-miss count: {int(snapshot.get('near_miss_count', 0) or 0)}",
+            f"- replan count: {int(snapshot.get('replan_count', 0) or 0)}",
             f"- mission completed: {self.mission_clock.get('objective_completed', False)}",
             f"- mission elapsed time: {elapsed_text}",
             f"- mission completion time: {completion_text}",
