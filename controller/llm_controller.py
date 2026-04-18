@@ -198,6 +198,7 @@ class LLMController():
         self._latest_near_miss_events = []
         self.predicted_collision_replan_threshold = float(PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD)
         self.predicted_collision_rearm_threshold = float(PREDICTED_COLLISION_PROBABILITY_REARM_THRESHOLD)
+        self.predicted_collision_replan_strictly_greater = False
         self.heartbeat_interval_seconds = float(AGENT_HEARTBEAT_INTERVAL_SECONDS)
         self.active_objective_set = self._default_active_objective_set()
         self.latest_benchmark_progress = {
@@ -1337,7 +1338,8 @@ class LLMController():
                 )
             return False
 
-        if predicted_p >= threshold:
+        trigger_replan = (predicted_p > threshold) if bool(self.predicted_collision_replan_strictly_greater) else (predicted_p >= threshold)
+        if trigger_replan:
             self.auto_replan_armed = False
             print_debug(
                 "[REPLAN_DEBUG] "
@@ -1825,10 +1827,12 @@ class LLMController():
             threshold = float(config.trigger_params.get("predicted_collision_threshold", PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD))
             self.predicted_collision_replan_threshold = threshold
             self.predicted_collision_rearm_threshold = max(0.0, threshold - 0.05)
+            self.predicted_collision_replan_strictly_greater = bool(config.trigger_params.get("strictly_greater", True))
             self.heartbeat_interval_seconds = float(AGENT_HEARTBEAT_INTERVAL_SECONDS)
         else:
             self.predicted_collision_replan_threshold = float(PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD)
             self.predicted_collision_rearm_threshold = float(PREDICTED_COLLISION_PROBABILITY_REARM_THRESHOLD)
+            self.predicted_collision_replan_strictly_greater = False
             self.heartbeat_interval_seconds = float(config.trigger_params.get("heartbeat_seconds", AGENT_HEARTBEAT_INTERVAL_SECONDS))
         self.planner.set_runtime_prompt_example_variant(
             prompt_variant=config.prompt_variant,
