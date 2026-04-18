@@ -601,10 +601,6 @@ class MiniSpecInterpreter:
             raise Exception('Statement: Skillset is not initialized')
         self.should_abort = should_abort
         self.on_statement_executed = on_statement_executed
-        
-        Statement.execution_queue = Queue()
-        self.execution_thread = Thread(target=self.executor)
-        self.execution_thread.start()
 
         self.timestamp_get_plan = None
         self.timestamp_start_execution = None
@@ -613,6 +609,10 @@ class MiniSpecInterpreter:
         self.ret_queue = Queue()
         self.message_queue = message_queue
         self.should_abort = should_abort
+
+        Statement.execution_queue = Queue()
+        self.execution_thread = Thread(target=self.executor)
+        self.execution_thread.start()
 
     def _drain_execution_queue(self) -> int:
         drained = 0

@@ -64,6 +64,18 @@ def test_gc_replan_interrupt_clears_remaining_queue_and_skips_following_statemen
     assert Statement.execution_queue.empty()
 
 
+def test_interpreter_abort_callback_before_execute_has_ret_queue_ready():
+    _install_minimal_skillset(gc_replan=False)
+    interpreter = MiniSpecInterpreter(
+        message_queue=None,
+        should_abort=lambda: (True, "pre_execute_abort"),
+    )
+
+    ret_val = interpreter.ret_queue.get(timeout=1.0)
+    assert ret_val.replan is True
+    assert "pre_execute_abort" in str(ret_val.value)
+
+
 def test_typefly_replan_uses_fresh_llm_response_and_discards_old_queue(monkeypatch):
     pytest.importorskip("PIL")
     from controller.llm_controller import LLMController
