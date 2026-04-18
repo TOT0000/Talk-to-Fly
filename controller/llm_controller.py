@@ -1804,7 +1804,7 @@ class LLMController():
                 allow_auto_interrupt = selected_framework != MODE_TYPEFLY_ONESHOT
                 ret_val = self.execute_minispec(self.current_plan, allow_auto_interrupt=allow_auto_interrupt)
                 execution_success = True
-                task_completed = True
+                task_completed = False
                 if isinstance(ret_val, tuple) and len(ret_val) >= 2:
                     execution_success = bool(ret_val[0] is not False)
                 if hasattr(ret_val, "replan") and bool(ret_val.replan):
@@ -1833,10 +1833,6 @@ class LLMController():
                                 f"{replan_value if replan_value else 'no detail'}"
                             )
                             continue
-                self.task_run_logger.update_execution_info(
-                    execution_success=execution_success,
-                    task_completed=task_completed,
-                )
                 completed_set = set(str(v).upper() for v in (self.latest_benchmark_progress.get("completed") or []))
                 planned_sequence = list(self._benchmark_plan_checkpoint_sequence)
                 missing_from_plan = [cid for cid in planned_sequence if cid not in completed_set]
@@ -1856,6 +1852,27 @@ class LLMController():
                         f"missing={missing_from_plan if missing_from_plan else '[]'}"
                     )
                 remaining_active = sorted(cid for cid in active_ids if cid not in completed_set)
+                task_completed = (len(remaining_active) == 0)
+                termination_reason = (
+                    "mission_completed_all_active_checkpoints"
+                    if task_completed
+                    else "queue_exhausted_with_unfinished_checkpoints"
+                )
+                queue_exhausted_with_unfinished = bool((not task_completed) and bool(remaining_active))
+                self.task_run_logger.update_execution_info(
+                    execution_success=execution_success,
+                    task_completed=task_completed,
+                    mission_success=task_completed,
+                    termination_reason=termination_reason,
+                    queue_exhausted_with_unfinished=queue_exhausted_with_unfinished,
+                    ended_due_to_replan_interrupt=False,
+                    true_completed_checkpoints=sorted(completed_set),
+                    true_remaining_checkpoints=remaining_active,
+                    current_target_checkpoint=self.latest_benchmark_progress.get("current_target"),
+                    checkpoint_status_snapshot=dict(self.latest_benchmark_progress),
+                    completion_state_source="benchmark_progress/dwell_tracker",
+                    completion_time_sec=(time.time() - self.execution_time) if task_completed else None,
+                )
                 # TypeFly post-check auto repair removed by design:
                 # completion mismatch is logged only; no queue-finished auto replan.
             except Exception as e:
@@ -1881,9 +1898,18 @@ class LLMController():
                 return
 
             break
+        completed_set = set(str(v).upper() for v in (self.latest_benchmark_progress.get("completed") or []))
+        active_ids = set(str(v).upper() for v in self.active_objective_set.get("active_checkpoint_ids", []))
+        remaining_active = sorted(cid for cid in active_ids if cid not in completed_set)
+        mission_success = (len(remaining_active) == 0)
+        run_status = "completed" if mission_success else "incomplete"
+        if not mission_success:
+            self.append_message(
+                f"[LOG] Mission incomplete: queue exhausted with unfinished checkpoints={remaining_active}"
+            )
         self.execution_mode = "Completed"
         self.task_run_logger.consume_runtime_snapshot(self.get_live_ui_snapshot())
-        self.task_run_logger.end_run(run_status="completed")
+        self.task_run_logger.end_run(run_status=run_status)
         monitor_stop.set()
         if monitor_thread is not None:
             monitor_thread.join(timeout=1.0)
