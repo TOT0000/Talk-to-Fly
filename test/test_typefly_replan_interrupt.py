@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import threading
 
 import pytest
 
@@ -127,6 +128,27 @@ def test_typefly_replan_uses_fresh_llm_response_and_discards_old_queue(monkeypat
     assert queued_programs[1] != queued_programs[0]
     plan_markers = [msg for msg in displayed_messages if isinstance(msg, str) and msg.startswith("[Plan]:")]
     assert len(plan_markers) == 2
+
+
+def test_ui_collision_event_triggers_runtime_replan_abort():
+    pytest.importorskip("PIL")
+    from controller.llm_controller import LLMController
+
+    controller = LLMController.__new__(LLMController)
+    controller._runtime_replan_event = threading.Event()
+    controller._runtime_replan_reason = ""
+    controller.latest_ui_collision_probability = None
+    controller.latest_ui_collision_timestamp = 0.0
+    controller.predicted_collision_replan_threshold = 0.7
+    controller._is_active_objective_completed = lambda: False
+    controller._maybe_run_agent_heartbeat = lambda: False
+    controller._should_trigger_auto_replan = lambda p, source="": float(p) >= 0.7
+
+    controller.update_ui_collision_probability(0.9)
+    should_abort, reason = controller._should_abort_current_execution_for_replan()
+
+    assert should_abort is True
+    assert "source=ui_event" in str(reason)
 
 
 def _build_minimal_controller_for_postcheck(plans, completed_after_exec, mode="typefly-threshold-replan", replan_limit=8):
