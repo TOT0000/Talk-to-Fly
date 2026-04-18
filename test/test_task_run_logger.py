@@ -134,3 +134,30 @@ def test_planning_trace_defaults_stage_and_source(tmp_path):
     payload = json.loads(planning_lines[-1])
     assert payload["planning_stage"] == "heartbeat"
     assert payload["plan_source"] == "heartbeat_decision"
+
+
+def test_summary_completed_fields_follow_true_completion_state(tmp_path):
+    excel_path = tmp_path / "logs" / "task_runs.xlsx"
+    logger = TaskRunLogger(excel_path=str(excel_path))
+    logger.start_run(
+        task_id="task-true-completion",
+        task_text="true completion sync",
+        scenario_name="scene-sync",
+        initial_snapshot={
+            "benchmark_progress": {"completed": ["A1", "A2", "A3"]},
+            "active_objective_set": {"active_checkpoint_ids": ["A1", "A2", "A4"]},
+        },
+    )
+    logger.update_execution_info(
+        execution_success=True,
+        mission_success=False,
+        termination_reason="queue_exhausted_with_unfinished_checkpoints",
+        true_completed_checkpoints=["A1", "A2"],
+        true_remaining_checkpoints=["A4"],
+    )
+    logger.end_run(run_status="incomplete")
+    pending = logger.get_pending_run_summary()
+
+    assert pending["completed_checkpoints"] == ["A1", "A2"]
+    assert pending["true_completed_checkpoints"] == ["A1", "A2"]
+    assert pending["completion_ratio"] == 2.0 / 3.0

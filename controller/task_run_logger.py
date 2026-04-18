@@ -453,11 +453,18 @@ class TaskRunLogger:
             return {}
         final = active.final_snapshot or active.initial_snapshot or {}
         progress = dict(final.get("benchmark_progress") or {})
-        completed = list(progress.get("completed") or [])
-        objective_ids = list((final.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])
+        objective_ids = [str(v).upper() for v in list((final.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])]
+        progress_completed = [str(v).upper() for v in list(progress.get("completed") or [])]
+        true_completed = [str(v).upper() for v in list(active.true_completed_checkpoints or [])]
+        if not true_completed:
+            true_completed = [cid for cid in progress_completed if (not objective_ids) or (cid in objective_ids)]
+        true_remaining = [str(v).upper() for v in list(active.true_remaining_checkpoints or [])]
+        if not true_remaining:
+            true_remaining = [cid for cid in objective_ids if cid not in set(true_completed)]
+        active_scope_ids = list(objective_ids or sorted(set(true_completed + true_remaining)))
         completion_ratio = 0.0
-        if objective_ids:
-            completion_ratio = float(len([cid for cid in completed if cid in objective_ids])) / float(len(objective_ids))
+        if active_scope_ids:
+            completion_ratio = float(len([cid for cid in true_completed if cid in set(active_scope_ids)])) / float(len(active_scope_ids))
         return {
             "run_id": active.run_id,
             "task_id": active.task_id,
@@ -469,15 +476,15 @@ class TaskRunLogger:
             "termination_reason": active.termination_reason,
             "queue_exhausted_with_unfinished": bool(active.queue_exhausted_with_unfinished),
             "ended_due_to_replan_interrupt": bool(active.ended_due_to_replan_interrupt),
-            "true_completed_checkpoints": list(active.true_completed_checkpoints),
-            "true_remaining_checkpoints": list(active.true_remaining_checkpoints),
+            "true_completed_checkpoints": list(true_completed),
+            "true_remaining_checkpoints": list(true_remaining),
             "current_target_checkpoint": active.current_target_checkpoint,
             "checkpoint_status_snapshot": dict(active.checkpoint_status_snapshot),
             "completion_state_source": active.completion_state_source,
             "collision_count": int(final.get("collision_count", 0) or 0),
             "near_miss_count": int(final.get("near_miss_count", 0) or 0),
             "replan_count": int(final.get("replan_count", 0) or 0),
-            "completed_checkpoints": completed,
+            "completed_checkpoints": list(true_completed),
             "completion_ratio": completion_ratio,
             "runtime_trace_count": len(active.runtime_trace),
             "planning_trace_count": len(active.planning_trace),
@@ -503,11 +510,18 @@ class TaskRunLogger:
         initial = active.initial_snapshot
         final = active.final_snapshot or initial or {}
         progress = dict(final.get("benchmark_progress") or {})
-        completed = list(progress.get("completed") or [])
-        objective_ids = list((final.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])
+        objective_ids = [str(v).upper() for v in list((final.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])]
+        progress_completed = [str(v).upper() for v in list(progress.get("completed") or [])]
+        true_completed = [str(v).upper() for v in list(active.true_completed_checkpoints or [])]
+        if not true_completed:
+            true_completed = [cid for cid in progress_completed if (not objective_ids) or (cid in objective_ids)]
+        true_remaining = [str(v).upper() for v in list(active.true_remaining_checkpoints or [])]
+        if not true_remaining:
+            true_remaining = [cid for cid in objective_ids if cid not in set(true_completed)]
+        active_scope_ids = list(objective_ids or sorted(set(true_completed + true_remaining)))
         completion_ratio = 0.0
-        if objective_ids:
-            completion_ratio = float(len([cid for cid in completed if cid in objective_ids])) / float(len(objective_ids))
+        if active_scope_ids:
+            completion_ratio = float(len([cid for cid in true_completed if cid in set(active_scope_ids)])) / float(len(active_scope_ids))
 
         for row in active.runtime_trace:
             self._append_jsonl_line(self.runtime_trace_jsonl_path, row)
@@ -545,7 +559,7 @@ class TaskRunLogger:
             "collision_count": int((final or {}).get("collision_count", 0) or 0),
             "near_miss_count": int((final or {}).get("near_miss_count", 0) or 0),
             "min_uav_worker_distance_m": active.min_uav_worker_distance_m,
-            "completed_checkpoints": self._json_text(completed),
+            "completed_checkpoints": self._json_text(true_completed),
             "completion_ratio": completion_ratio,
             "generated_plan": active.actual_plan_text,
             "final_plan_source": planner_info.get("final_plan_source", ""),
@@ -578,10 +592,10 @@ class TaskRunLogger:
             "collision_count": int((final or {}).get("collision_count", 0) or 0),
             "near_miss_count": int((final or {}).get("near_miss_count", 0) or 0),
             "min_uav_worker_distance_m": active.min_uav_worker_distance_m,
-            "completed_checkpoints": completed,
+            "completed_checkpoints": list(true_completed),
             "completion_ratio": completion_ratio,
-            "true_completed_checkpoints": list(active.true_completed_checkpoints),
-            "true_remaining_checkpoints": list(active.true_remaining_checkpoints),
+            "true_completed_checkpoints": list(true_completed),
+            "true_remaining_checkpoints": list(true_remaining),
             "current_target_checkpoint": active.current_target_checkpoint,
             "checkpoint_status_snapshot": dict(active.checkpoint_status_snapshot),
             "completion_state_source": active.completion_state_source,
