@@ -1,4 +1,5 @@
 import os
+import json
 
 import pytest
 
@@ -23,3 +24,67 @@ def test_end_run_recovers_if_workbook_deleted(tmp_path):
     logger.end_run(run_status="completed")
 
     assert excel_path.exists()
+
+
+def test_start_run_autopersists_previous_pending_run(tmp_path):
+    excel_path = tmp_path / "logs" / "task_runs.xlsx"
+    logger = TaskRunLogger(excel_path=str(excel_path))
+
+    logger.start_run(
+        task_id="task-1",
+        task_text="run one",
+        scenario_name="scene-a",
+        initial_snapshot={"benchmark_progress": {"completed": []}, "checkpoint_order": ["A1"]},
+    )
+    logger.end_run(run_status="completed")
+    pending_summary = logger.get_pending_run_summary()
+    first_run_id = str(pending_summary.get("run_id"))
+    assert first_run_id
+
+    logger.start_run(
+        task_id="task-2",
+        task_text="run two",
+        scenario_name="scene-b",
+        initial_snapshot={"benchmark_progress": {"completed": []}, "checkpoint_order": ["A1"]},
+    )
+
+    runtime_lines = (tmp_path / "logs" / "task_runs_runtime_trace.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert any(first_run_id in line for line in runtime_lines)
+    assert (tmp_path / "logs" / f"{first_run_id}_summary.json").exists()
+
+
+def test_planning_trace_filters_legacy_fields(tmp_path):
+    excel_path = tmp_path / "logs" / "task_runs.xlsx"
+    logger = TaskRunLogger(excel_path=str(excel_path))
+    logger.start_run(
+        task_id="task-legacy",
+        task_text="legacy fields",
+        scenario_name="scene-clean",
+        initial_snapshot={"benchmark_progress": {"completed": []}, "checkpoint_order": ["A1"]},
+    )
+    logger.append_planning_trace(
+        {
+            "planning_stage": "initial",
+            "llm_call_purpose": "initial",
+            "prompt": "p",
+            "raw_response": "r",
+            "parsed_plan": "gc('A1');",
+            "scene_id": "SCENE_X",
+            "selected_baseline_id": "baseline1",
+            "path_clear": False,
+            "blocking_entity": "worker_1",
+            "candidate_targets": [{"id": "A1"}],
+            "generated_control_plan": "legacy",
+        }
+    )
+    logger.end_run(run_status="completed")
+    assert logger.save_pending_run() is True
+
+    planning_lines = (tmp_path / "logs" / "task_runs_planning_trace.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    payload = json.loads(planning_lines[-1])
+    assert "planning_stage" in payload
+    assert "prompt" in payload
+    assert "path_clear" not in payload
+    assert "blocking_entity" not in payload
+    assert "candidate_targets" not in payload
+    assert "generated_control_plan" not in payload
