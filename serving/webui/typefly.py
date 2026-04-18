@@ -5,6 +5,7 @@ import asyncio
 import io, time
 import math
 import glob
+import socket
 from collections import deque
 import gradio as gr
 import argparse
@@ -628,8 +629,7 @@ class TypeFly:
             self.llm_controller._reset_benchmark_progress_tracking()
             self.llm_controller.apply_baseline_scene()
             self._reset_runtime_records()
-            self._reset_persisted_logs()
-            return "System reset complete: drone/workers repositioned, runtime progress cleared, and log records deleted."
+            return "System reset complete: drone/workers repositioned and runtime progress cleared (archive logs retained)."
         except Exception as e:
             return f"System reset failed: {e}"
 
@@ -859,7 +859,14 @@ class TypeFly:
             flask_thread = None
 
         self.chat.queue()
-        self.ui.launch(server_port=50001, prevent_thread_lock=True, css=self.ui_css)
+        preferred_gradio_port = int(os.environ.get("GRADIO_SERVER_PORT", 50001))
+        gradio_port = self._find_available_port(preferred_gradio_port)
+        if gradio_port != preferred_gradio_port:
+            print_t(
+                f"[WARN] Preferred Gradio port {preferred_gradio_port} is occupied. "
+                f"Falling back to {gradio_port}."
+            )
+        self.ui.launch(server_port=gradio_port, prevent_thread_lock=True, css=self.ui_css)
 
         while not self.system_stop:
             time.sleep(1)
@@ -880,6 +887,29 @@ class TypeFly:
 
         for file in os.listdir(self.cache_folder):
             os.remove(os.path.join(self.cache_folder, file))
+
+    @staticmethod
+    def _find_available_port(preferred_port: int) -> int:
+        def _is_available(port: int) -> bool:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    sock.bind(("127.0.0.1", int(port)))
+                    return True
+                except OSError:
+                    return False
+
+        if _is_available(preferred_port):
+            return int(preferred_port)
+
+        for offset in range(1, 101):
+            candidate = int(preferred_port) + offset
+            if _is_available(candidate):
+                return candidate
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
 
     def create_blank_plot(self, title="Empty Plot", xlabel="X", ylabel="Y", xlim=(0, 1), ylim=(0, 1), figsize=(5, 4)):
         fig, ax = plt.subplots(figsize=figsize)
