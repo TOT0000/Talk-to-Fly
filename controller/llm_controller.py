@@ -951,10 +951,15 @@ class LLMController():
             f"event=gc_begin checkpoint={checkpoint_key} executed_gc={self._benchmark_executed_gc_sequence}",
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
+        # Keep an explicit robot-mode flag in scope for gc() diagnostics and to
+        # avoid NameError regressions when instrumenting this block.
+        is_px4_sim = isinstance(self.drone, Px4SimRobotWrapper)
 
         max_step_m = 1.0
-        heading_align_far_deg = 14.0
-        heading_align_near_deg = 7.0
+        # gc policy: align to checkpoint heading first, then move straight forward.
+        # Use tighter alignment thresholds to avoid diagonal-looking trajectories.
+        heading_align_far_deg = 8.0
+        heading_align_near_deg = 5.0
         max_turn_step_deg = 28
 
         initial_snapshot = self.get_live_ui_snapshot()
@@ -1071,6 +1076,7 @@ class LLMController():
                 f"yaw={yaw:.3f} "
                 f"body_forward={body_forward:.3f} body_right={body_right:.3f} "
                 f"runtime_target={runtime_target} "
+                f"is_px4_sim={is_px4_sim} "
                 f"action={chosen_action} "
                 f"stop_condition={stop_condition} completion_state={completion_state} "
                 f"dist_trend={dist_trend} "
