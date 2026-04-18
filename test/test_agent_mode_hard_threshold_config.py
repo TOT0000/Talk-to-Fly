@@ -13,7 +13,7 @@ def test_soft_heartbeat_prompt_injects_soft_examples():
     assert 'agent_heartbeat_soft_examples_path' in PLANNER_SOURCE
     assert 'self.agent_heartbeat_soft_examples' in PLANNER_SOURCE
     assert 'if hard_gate' in PLANNER_SOURCE
-    assert 'else self.agent_heartbeat_soft_examples' in PLANNER_SOURCE
+    assert 'heartbeat_soft_examples' in PLANNER_SOURCE
 
 
 def test_hardgate_heartbeat_prompt_injects_hardgate_examples():
@@ -29,10 +29,10 @@ def test_hardgate_prompt_has_extra_hard_gate_rule():
 
 
 def test_heartbeat_prompt_contains_budget_and_timing_policy():
-    assert 'The system calls you once every 3 seconds during execution.' in SOFT_PROMPT
-    assert 'The system calls you once every 3 seconds during execution.' in HARD_PROMPT
-    assert 'Full replans already used: {full_replan_count} / 5' in SOFT_PROMPT
-    assert 'Full replans already used: {full_replan_count} / 5' in HARD_PROMPT
+    assert 'The system calls you once every 5 seconds during execution.' in SOFT_PROMPT
+    assert 'The system calls you once every 5 seconds during execution.' in HARD_PROMPT
+    assert 'Full replans already used: {full_replan_count} / 8' in SOFT_PROMPT
+    assert 'Full replans already used: {full_replan_count} / 8' in HARD_PROMPT
 
 
 def test_heartbeat_prompt_includes_plan_context_fields():

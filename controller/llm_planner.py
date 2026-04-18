@@ -71,6 +71,7 @@ class LLMPlanner():
             self.prompt_plan_initial = f.read()
         with open(self.prompt_plan_replan_path, "r") as f:
             self.prompt_plan_replan = f.read()
+        self.baseline_context_assets = self._build_baseline_context_assets(type_folder_name)
         self.prompt_variant_assets = self._build_prompt_variant_assets(type_folder_name)
         self.example_variant_assets = self._build_example_variant_assets(type_folder_name)
         self.prompt_langgraph_decomposition = (
@@ -289,8 +290,8 @@ class LLMPlanner():
                     continue
                 payload["plan_initial_prompt"] = self._read_text(init_path)
                 payload["plan_replan_prompt"] = self._read_text(replan_path)
-                # baseline3 does not keep a dedicated heartbeat-soft prompt.
-                payload["heartbeat_soft_prompt"] = self.agent_heartbeat_soft_prompt
+                if os.path.exists(hb_soft_path):
+                    payload["heartbeat_soft_prompt"] = self._read_text(hb_soft_path)
             variants[key] = payload
         return variants
 
@@ -324,10 +325,32 @@ class LLMPlanner():
                     continue
                 payload["initial_examples"] = self._read_text(init_ex_path)
                 payload["replan_examples"] = self._read_text(replan_ex_path)
-                # baseline3 does not keep dedicated heartbeat-soft examples.
-                payload["heartbeat_soft_examples"] = self.agent_heartbeat_soft_examples
+                if os.path.exists(hb_soft_ex_path):
+                    payload["heartbeat_soft_examples"] = self._read_text(hb_soft_ex_path)
             variants[key] = payload
         return variants
+
+    def _build_baseline_context_assets(self, type_folder_name: str) -> dict:
+        base_dir = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}")
+        default = {
+            "opening_block": "",
+            "runtime_context_block": "",
+            "guides": self.guides,
+        }
+        assets = {"default": default}
+        for baseline_id in ("baseline1", "baseline2", "baseline3"):
+            payload = dict(default)
+            opening_path = os.path.join(base_dir, f"{baseline_id}_opening_block.txt")
+            runtime_path = os.path.join(base_dir, f"{baseline_id}_runtime_context_block.txt")
+            guides_path = os.path.join(base_dir, f"{baseline_id}_guides.txt")
+            if os.path.exists(opening_path):
+                payload["opening_block"] = self._read_text(opening_path)
+            if os.path.exists(runtime_path):
+                payload["runtime_context_block"] = self._read_text(runtime_path)
+            if os.path.exists(guides_path):
+                payload["guides"] = self._read_text(guides_path)
+            assets[baseline_id] = payload
+        return assets
 
     def _get_prompt_variant_payload(self) -> dict:
         return dict(self.prompt_variant_assets.get(self.runtime_prompt_variant) or self.prompt_variant_assets["default"])
@@ -397,6 +420,24 @@ class LLMPlanner():
             "If the risk appears severe or geometry is very close, you should prefer a larger and more conservative detour. "
             "The overall goal is to complete the mission with no collisions while keeping mission time as low as possible."
         )
+
+    def _get_baseline_id_from_variant(self) -> str:
+        variant = str(self.runtime_prompt_variant or "")
+        if variant.startswith("baseline1_"):
+            return "baseline1"
+        if variant.startswith("baseline2_"):
+            return "baseline2"
+        if variant.startswith("baseline3_"):
+            return "baseline3"
+        return "default"
+
+    def _build_opening_block(self) -> str:
+        baseline_id = self._get_baseline_id_from_variant()
+        payload = self.baseline_context_assets.get(baseline_id) or self.baseline_context_assets["default"]
+        text = str(payload.get("opening_block") or "").strip()
+        if text:
+            return text
+        return self._build_shared_opening_block()
 
     def _build_shared_runtime_context_block(
         self,
@@ -506,6 +547,41 @@ class LLMPlanner():
             f"- dominant risky worker: {dominant_worker}\n"
         )
 
+    def _build_runtime_context_block(
+        self,
+        safety_context: Optional[SafetyContext],
+        *,
+        snapshot: Optional[dict] = None,
+    ) -> str:
+        baseline_id = self._get_baseline_id_from_variant()
+        payload = self.baseline_context_assets.get(baseline_id) or self.baseline_context_assets["default"]
+        runtime_intro = str(payload.get("runtime_context_block") or "").strip()
+        if baseline_id == "baseline1":
+            context_block = self._build_shared_runtime_context_block_without_risk(safety_context, snapshot=snapshot)
+        else:
+            context_block = self._build_shared_runtime_context_block(safety_context, snapshot=snapshot)
+        if runtime_intro:
+            return f"{runtime_intro}\n\n{context_block}"
+        return context_block
+
+    def _build_shared_runtime_context_block_without_risk(
+        self,
+        safety_context: Optional[SafetyContext],
+        *,
+        snapshot: Optional[dict] = None,
+    ) -> str:
+        base_block = self._build_shared_runtime_context_block(safety_context, snapshot=snapshot)
+        marker = "\nRisk context:\n"
+        if marker in base_block:
+            base_block = base_block.split(marker, 1)[0].rstrip()
+        return base_block
+
+    def _get_guides_text(self) -> str:
+        baseline_id = self._get_baseline_id_from_variant()
+        payload = self.baseline_context_assets.get(baseline_id) or self.baseline_context_assets["default"]
+        text = str(payload.get("guides") or "").strip()
+        return text if text else self.guides
+
     def _extract_completed_checkpoints_from_history(self, execution_history) -> list[str]:
         if execution_history is None:
             return []
@@ -529,9 +605,11 @@ class LLMPlanner():
         safety_context: Optional[SafetyContext],
         active_checkpoint_ids: list[str],
         benchmark_progress: Optional[dict] = None,
+        trigger_threshold: Optional[float] = None,
     ) -> str:
+        threshold = float(COLLISION_PROBABILITY_REPLAN_THRESHOLD if trigger_threshold is None else trigger_threshold)
         predicted_collision_probability = 0.0 if safety_context is None else float(safety_context.predicted_collision_probability)
-        if predicted_collision_probability < float(COLLISION_PROBABILITY_REPLAN_THRESHOLD):
+        if predicted_collision_probability < threshold:
             return ""
         if previous_plan is None and execution_history is None:
             return ""
@@ -572,7 +650,7 @@ class LLMPlanner():
             f"- remaining checkpoints: {remaining if remaining else ['(none)']}\n"
             f"- current target checkpoint: {current_target}\n"
             "- replan trigger reason:\n"
-            f"  - predicted collision probability > {float(COLLISION_PROBABILITY_REPLAN_THRESHOLD):.2f} "
+            f"  - predicted collision probability > {threshold:.2f} "
             f"(current={predicted_collision_probability:.6f})\n"
             f"  - dominant risky worker = {dominant_worker}"
         )
@@ -624,8 +702,8 @@ class LLMPlanner():
                 snapshot = self.controller.get_live_ui_snapshot() or {}
             except Exception:
                 snapshot = {}
-        shared_opening_block = self._build_shared_opening_block()
-        shared_runtime_context_block = self._build_shared_runtime_context_block(
+        shared_opening_block = self._build_opening_block()
+        shared_runtime_context_block = self._build_runtime_context_block(
             safety_context,
             snapshot=snapshot,
         )
@@ -633,6 +711,7 @@ class LLMPlanner():
         active_checkpoint_ids = [str(v) for v in objective.get("active_checkpoint_ids", [])]
         benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
         predicted_collision_probability = 0.0 if safety_context is None else float(safety_context.predicted_collision_probability)
+        trigger_threshold = float(getattr(self.controller, "predicted_collision_replan_threshold", COLLISION_PROBABILITY_REPLAN_THRESHOLD))
         is_replan_call = str(planning_stage or "initial").strip().lower() == "replan"
         replan_history_block = self._build_replan_history_block(
             task_description=task_description,
@@ -641,6 +720,7 @@ class LLMPlanner():
             safety_context=safety_context,
             active_checkpoint_ids=active_checkpoint_ids,
             benchmark_progress=benchmark_progress,
+            trigger_threshold=trigger_threshold,
         )
         prompt_template = (self.prompt_plan_replan if is_replan_call else self.prompt_plan_initial)
         prompt_variant_payload = self._get_prompt_variant_payload()
@@ -654,9 +734,24 @@ class LLMPlanner():
         mission_progress_block = (benchmark_progress if is_replan_call else None)
         prompt = prompt_template.format(
             system_skill_description_low=self.low_level_skillset,
-            guides=self.guides,
+            guides=self._get_guides_text(),
             typefly_initial_examples=example_variant_payload["initial_examples"],
             typefly_replan_examples=example_variant_payload["replan_examples"],
+            BASELINE1_OPENING_BLOCK=shared_opening_block,
+            BASELINE2_OPENING_BLOCK=shared_opening_block,
+            BASELINE3_OPENING_BLOCK=shared_opening_block,
+            BASELINE1_RUNTIME_CONTEXT_BLOCK=shared_runtime_context_block,
+            BASELINE2_RUNTIME_CONTEXT_BLOCK=shared_runtime_context_block,
+            BASELINE3_RUNTIME_CONTEXT_BLOCK=shared_runtime_context_block,
+            BASELINE1_GUIDES=self._get_guides_text(),
+            BASELINE2_GUIDES=self._get_guides_text(),
+            BASELINE3_GUIDES=self._get_guides_text(),
+            BASELINE1_INITIAL_EXAMPLES=example_variant_payload["initial_examples"],
+            BASELINE2_INITIAL_EXAMPLES=example_variant_payload["initial_examples"],
+            BASELINE3_INITIAL_EXAMPLES=example_variant_payload["initial_examples"],
+            BASELINE1_REPLAN_EXAMPLES=example_variant_payload["replan_examples"],
+            BASELINE2_REPLAN_EXAMPLES=example_variant_payload["replan_examples"],
+            BASELINE3_REPLAN_EXAMPLES=example_variant_payload["replan_examples"],
             error_message=error_message,
             scene_description=full_scene,
             task_description=task_description,
@@ -749,8 +844,23 @@ class LLMPlanner():
             else self._get_prompt_variant_payload().get("heartbeat_soft_prompt", self.agent_heartbeat_soft_prompt)
         )
         prompt = heartbeat_prompt_template.format(
-            shared_opening_block=self._build_shared_opening_block(),
-            shared_runtime_context_block=self._build_shared_runtime_context_block(
+            shared_opening_block=self._build_opening_block(),
+            shared_runtime_context_block=self._build_runtime_context_block(
+                safety_context,
+                snapshot=(snapshot if isinstance(snapshot, dict) else {}),
+            ),
+            BASELINE1_OPENING_BLOCK=self._build_opening_block(),
+            BASELINE2_OPENING_BLOCK=self._build_opening_block(),
+            BASELINE3_OPENING_BLOCK=self._build_opening_block(),
+            BASELINE1_RUNTIME_CONTEXT_BLOCK=self._build_runtime_context_block(
+                safety_context,
+                snapshot=(snapshot if isinstance(snapshot, dict) else {}),
+            ),
+            BASELINE2_RUNTIME_CONTEXT_BLOCK=self._build_runtime_context_block(
+                safety_context,
+                snapshot=(snapshot if isinstance(snapshot, dict) else {}),
+            ),
+            BASELINE3_RUNTIME_CONTEXT_BLOCK=self._build_runtime_context_block(
                 safety_context,
                 snapshot=(snapshot if isinstance(snapshot, dict) else {}),
             ),
