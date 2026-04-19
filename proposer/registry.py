@@ -20,10 +20,13 @@ ALLOWED_MUTATION_FILES = {
     "proposer_note.txt",
     "parent_diff.patch",
     "proposer_tool_audit.json",
+    "runtime_wiring_verification.json",
 }
 
 TRACKED_CONTRACT_FILES = {
-    x for x in ALLOWED_MUTATION_FILES if x not in {"parent_diff.patch", "proposer_tool_audit.json"}
+    x
+    for x in ALLOWED_MUTATION_FILES
+    if x not in {"parent_diff.patch", "proposer_tool_audit.json", "runtime_wiring_verification.json"}
 }
 
 
