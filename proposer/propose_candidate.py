@@ -546,6 +546,14 @@ def _normalize_generated_text(text: str) -> str:
     return out
 
 
+def _guess_error_file_from_text(text: str) -> str:
+    raw = str(text or "")
+    m = re.search(r"([A-Za-z0-9_./-]+\.py)", raw)
+    if not m:
+        return ""
+    return Path(m.group(1)).name
+
+
 def _build_file_generation_prompt(
     *,
     parent_harness_id: str,
@@ -953,6 +961,9 @@ def propose_next_candidate(
             review = _extract_json_object(str(llm.request(prompt=review_prompt, model_name=proposer_model or MODEL_NAME, stream=False) or "{}"))
             status = str(review.get("status") or "").strip().lower()
             files_to_revise = [Path(str(x)).name for x in list(review.get("files_to_modify") or []) if Path(str(x)).name in ALLOWED_MUTATION_FILES]
+            error_file = _guess_error_file_from_text(last_error)
+            if error_file and error_file in ALLOWED_MUTATION_FILES and error_file not in files_to_revise:
+                files_to_revise.insert(0, error_file)
             if not last_error and status == "pass":
                 return candidate_dir
             if _round >= max(0, int(max_revision_rounds)):

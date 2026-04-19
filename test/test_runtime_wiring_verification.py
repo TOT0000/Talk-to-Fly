@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 from proposer.prompts import build_self_review_prompt
-from proposer.propose_candidate import _build_change_semantics, _runtime_wiring_smoke_verification
+from proposer.propose_candidate import _build_change_semantics, _guess_error_file_from_text, _runtime_wiring_smoke_verification
 from proposer.registry import ALLOWED_MUTATION_FILES, TRACKED_CONTRACT_FILES
 
 
@@ -181,3 +181,8 @@ def test_source_records_runtime_metadata_semantic_fields():
     assert "runtime_effect_changed_files" in src
     assert "supporting_generated_files" in src
     assert "hypothesis_target_modules" in src
+
+
+def test_guess_error_file_from_traceback_text():
+    text = 'File "/tmp/candidate_0003/prompt_composer.py", line 37\\nSyntaxError: unterminated f-string'
+    assert _guess_error_file_from_text(text) == "prompt_composer.py"
