@@ -152,6 +152,7 @@ def build_self_review_prompt(*, proposal_contract_json: str, candidate_spec_json
         f"Candidate spec:\n{candidate_spec_json}\n\n"
         f"Detected changed files:\n{changed_files_json}\n\n"
         f"Last guardrail/smoke error (if any):\n{last_error}\n\n"
+        "Review focus: runtime-effect modules, wiring consistency, smoke evidence sufficiency, and honest handling of evidence limitations.\n\n"
         f"{SELF_REVIEW_CONTRACT}"
     )
 
