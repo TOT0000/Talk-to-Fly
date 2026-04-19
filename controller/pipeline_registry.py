@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional
 
 
@@ -18,71 +20,58 @@ class PipelineConfig:
     use_output_example: bool
     replan_cap: int
     archive_enabled_default: Optional[bool] = None
+    harness_spec_path: Optional[str] = None
 
 
-PIPELINE_REGISTRY: Dict[str, PipelineConfig] = {
-    "baseline1": PipelineConfig(
-        id="baseline1",
-        name="Periodic-Minimal",
-        description="Heartbeat periodic trigger with minimal state payload.",
-        base_mode="agent-heartbeat-soft",
-        trigger_type="periodic",
-        trigger_params={"heartbeat_seconds": 5.0},
-        prompt_variant="baseline1_prompt",
-        example_variant="baseline1_example",
-        state_fields=[
-            "uav_pose_heading",
-            "worker_positions",
-            "remaining_checkpoints",
-            "task_progress",
-        ],
-        use_output_example=True,
-        replan_cap=8,
-        archive_enabled_default=True,
-    ),
-    "baseline2": PipelineConfig(
-        id="baseline2",
-        name="Periodic-InfoAware",
-        description="Heartbeat periodic trigger with risk-aware state payload.",
-        base_mode="agent-heartbeat-soft",
-        trigger_type="periodic",
-        trigger_params={"heartbeat_seconds": 5.0},
-        prompt_variant="baseline2_prompt",
-        example_variant="baseline2_example",
-        state_fields=[
-            "uav_pose_heading",
-            "worker_positions",
-            "remaining_checkpoints",
-            "task_progress",
-            "predicted_collision_probability",
-            "risk_summary",
-        ],
-        use_output_example=True,
-        replan_cap=8,
-        archive_enabled_default=True,
-    ),
-    "baseline3": PipelineConfig(
-        id="baseline3",
-        name="Event-PredRisk-0.5",
-        description="Event trigger when predicted collision risk crosses threshold.",
-        base_mode="typefly-threshold-replan",
-        trigger_type="event_predicted_collision_probability",
-        trigger_params={"predicted_collision_threshold": 0.5, "strictly_greater": True},
-        prompt_variant="baseline3_prompt",
-        example_variant="baseline3_example",
-        state_fields=[
-            "uav_pose_heading",
-            "worker_positions",
-            "remaining_checkpoints",
-            "task_progress",
-            "predicted_collision_probability",
-            "risk_summary",
-        ],
-        use_output_example=True,
-        replan_cap=8,
-        archive_enabled_default=True,
-    ),
-}
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _load_pipeline_registry_from_harness_specs() -> Dict[str, PipelineConfig]:
+    registry: Dict[str, PipelineConfig] = {}
+    harness_root = _repo_root() / "harnesses"
+    for spec_path in sorted(harness_root.glob("baseline*/spec.json")):
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        runtime = dict(spec.get("runtime") or {})
+        trigger = dict(spec.get("trigger_policy") or {})
+        state_encoder = dict(spec.get("state_encoder") or {})
+        pipeline = PipelineConfig(
+            id=str(spec["id"]),
+            name=str(spec.get("name") or spec["id"]),
+            description=str(spec.get("description") or ""),
+            base_mode=str(spec.get("base_mode") or "agent-heartbeat-soft"),
+            trigger_type=str(trigger.get("type") or "periodic"),
+            trigger_params={k: v for k, v in trigger.items() if isinstance(v, (int, float, bool))},
+            prompt_variant=str(runtime.get("prompt_variant") or "default"),
+            example_variant=str(runtime.get("example_variant") or "default"),
+            state_fields=list(state_encoder.get("include_fields") or []),
+            use_output_example=bool(runtime.get("use_output_example", True)),
+            replan_cap=int(runtime.get("replan_cap", 8)),
+            archive_enabled_default=True,
+            harness_spec_path=str(spec_path),
+        )
+        registry[pipeline.id] = pipeline
+    return registry
+
+
+PIPELINE_REGISTRY: Dict[str, PipelineConfig] = _load_pipeline_registry_from_harness_specs()
+if not PIPELINE_REGISTRY:
+    PIPELINE_REGISTRY = {
+        "baseline1": PipelineConfig(
+            id="baseline1",
+            name="Periodic-Minimal",
+            description="Heartbeat periodic trigger with minimal state payload.",
+            base_mode="agent-heartbeat-soft",
+            trigger_type="periodic",
+            trigger_params={"heartbeat_seconds": 5.0},
+            prompt_variant="baseline1_prompt",
+            example_variant="baseline1_example",
+            state_fields=["uav_pose_heading", "worker_positions", "remaining_checkpoints", "task_progress"],
+            use_output_example=True,
+            replan_cap=8,
+            archive_enabled_default=True,
+        ),
+    }
 
 
 def normalize_pipeline_id(pipeline_id: Optional[str]) -> str:

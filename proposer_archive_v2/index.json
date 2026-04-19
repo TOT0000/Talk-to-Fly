@@ -1,0 +1,167 @@
+{
+  "archive_version": "proposer_archive_v2",
+  "evaluation_protocol": {
+    "version": "uav_search_v1",
+    "scene_to_task_zone": {
+      "SCENE1": "zoneA",
+      "SCENE2": "zoneB",
+      "SCENE3": "zoneC"
+    }
+  },
+  "entries": [
+    {
+      "harness_id": "baseline1",
+      "kind": "baseline",
+      "path": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline1",
+      "metrics": {
+        "mission_success_rate": 1.0,
+        "collision_count_avg": 1.9583333333333333,
+        "near_miss_count_avg": 2.2916666666666665,
+        "completion_time_sec_avg": 113.84545833333334,
+        "llm_call_count_avg": 20.208333333333332,
+        "replan_count_avg": 0.041666666666666664
+      },
+      "status": "evaluated_from_archive",
+      "per_scene_metrics": {
+        "SCENE1": {
+          "task_zone": "zoneA",
+          "runs": 8,
+          "mission_success_rate": 1.0,
+          "collision_count_avg": 1.25,
+          "near_miss_count_avg": 3,
+          "completion_time_sec_avg": 92.802375,
+          "llm_call_count_avg": 16.25,
+          "replan_count_avg": 0
+        },
+        "SCENE2": {
+          "task_zone": "zoneB",
+          "runs": 8,
+          "mission_success_rate": 1.0,
+          "collision_count_avg": 1.5,
+          "near_miss_count_avg": 1.375,
+          "completion_time_sec_avg": 92.409375,
+          "llm_call_count_avg": 16.625,
+          "replan_count_avg": 0
+        },
+        "SCENE3": {
+          "task_zone": "zoneC",
+          "runs": 8,
+          "mission_success_rate": 1.0,
+          "collision_count_avg": 3.125,
+          "near_miss_count_avg": 2.5,
+          "completion_time_sec_avg": 156.324625,
+          "llm_call_count_avg": 27.75,
+          "replan_count_avg": 0.125
+        }
+      },
+      "trace_dir": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline1/traces",
+      "pareto_frontier": true
+    },
+    {
+      "harness_id": "baseline2",
+      "kind": "baseline",
+      "path": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline2",
+      "metrics": {
+        "mission_success_rate": 1.0,
+        "collision_count_avg": 2.3333333333333335,
+        "near_miss_count_avg": 3.7083333333333335,
+        "completion_time_sec_avg": 148.26279166666666,
+        "llm_call_count_avg": 29.291666666666668,
+        "replan_count_avg": 3.7916666666666665
+      },
+      "status": "evaluated_from_archive",
+      "per_scene_metrics": {
+        "SCENE1": {
+          "task_zone": "zoneA",
+          "runs": 8,
+          "mission_success_rate": 1.0,
+          "collision_count_avg": 3.875,
+          "near_miss_count_avg": 5.75,
+          "completion_time_sec_avg": 136.786375,
+          "llm_call_count_avg": 28.375,
+          "replan_count_avg": 3.75
+        },
+        "SCENE2": {
+          "task_zone": "zoneB",
+          "runs": 8,
+          "mission_success_rate": 1.0,
+          "collision_count_avg": 0.75,
+          "near_miss_count_avg": 0.875,
+          "completion_time_sec_avg": 101.663375,
+          "llm_call_count_avg": 19.25,
+          "replan_count_avg": 1.375
+        },
+        "SCENE3": {
+          "task_zone": "zoneC",
+          "runs": 8,
+          "mission_success_rate": 1.0,
+          "collision_count_avg": 2.375,
+          "near_miss_count_avg": 4.5,
+          "completion_time_sec_avg": 206.338625,
+          "llm_call_count_avg": 40.25,
+          "replan_count_avg": 6.25
+        }
+      },
+      "trace_dir": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline2/traces",
+      "pareto_frontier": false
+    },
+    {
+      "harness_id": "baseline3",
+      "kind": "baseline",
+      "path": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline3",
+      "metrics": {
+        "mission_success_rate": 0.9583333333333334,
+        "collision_count_avg": 2.2083333333333335,
+        "near_miss_count_avg": 4.666666666666667,
+        "completion_time_sec_avg": 41666812.647625,
+        "llm_call_count_avg": 6.833333333333333,
+        "replan_count_avg": 5.833333333333333
+      },
+      "status": "evaluated_from_archive",
+      "per_scene_metrics": {
+        "SCENE1": {
+          "task_zone": "zoneA",
+          "runs": 8,
+          "mission_success_rate": 0.875,
+          "collision_count_avg": 3.5,
+          "near_miss_count_avg": 6.875,
+          "completion_time_sec_avg": 125000133.80675,
+          "llm_call_count_avg": 7,
+          "replan_count_avg": 6
+        },
+        "SCENE2": {
+          "task_zone": "zoneB",
+          "runs": 8,
+          "mission_success_rate": 1.0,
+          "collision_count_avg": 0.75,
+          "near_miss_count_avg": 2.375,
+          "completion_time_sec_avg": 119.56875,
+          "llm_call_count_avg": 5.125,
+          "replan_count_avg": 4.125
+        },
+        "SCENE3": {
+          "task_zone": "zoneC",
+          "runs": 8,
+          "mission_success_rate": 1.0,
+          "collision_count_avg": 2.375,
+          "near_miss_count_avg": 4.75,
+          "completion_time_sec_avg": 184.567375,
+          "llm_call_count_avg": 8.375,
+          "replan_count_avg": 7.375
+        }
+      },
+      "trace_dir": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline3/traces",
+      "pareto_frontier": true
+    },
+    {
+      "harness_id": "candidate_0001",
+      "kind": "candidate",
+      "path": "/workspace/Talk-to-Fly/proposer_archive_v2/candidates/candidate_0001",
+      "metrics": {},
+      "status": "pending_execution",
+      "per_scene_metrics": {},
+      "trace_dir": "/workspace/Talk-to-Fly/proposer_archive_v2/candidates/candidate_0001/traces",
+      "pareto_frontier": false
+    }
+  ]
+}
