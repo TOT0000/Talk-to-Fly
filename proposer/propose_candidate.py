@@ -253,6 +253,7 @@ def _prepare_proposal_contract(proposal: Dict) -> Dict:
     normalized["implementation_contract"] = implementation_contract
     normalized["invariants"] = invariants
     normalized["sandbox_modules_to_modify"] = [Path(str(v)).name for v in list(proposal.get("sandbox_modules_to_modify") or [])]
+    normalized["hypothesis_target_modules"] = list(normalized["sandbox_modules_to_modify"])
     normalized["changed_files"] = [Path(str(v)).name for v in list(proposal.get("changed_files") or [])]
     normalized["runtime_wiring_plan"] = dict(proposal.get("runtime_wiring_plan") or {})
     normalized["smoke_test_evidence_to_check"] = dict(proposal.get("smoke_test_evidence_to_check") or {})
@@ -321,6 +322,9 @@ def _build_grounded_note(*, contract: Dict, spec: Dict, changed_files: Set[str])
                 f"template_family={prompt_cfg.get('template_family')}, include_example={prompt_cfg.get('include_example')}"
             ),
             f"Changed files: {sorted(changed_files)}",
+            f"Hypothesis target modules: {contract.get('hypothesis_target_modules')}",
+            f"Runtime-effect changed files: {contract.get('runtime_effect_changed_files')}",
+            f"Supporting generated files: {contract.get('supporting_generated_files')}",
             f"Contract invariants: {contract.get('invariants')}",
             f"Sandbox modules: {contract.get('sandbox_modules_to_modify')}",
         ]
@@ -384,6 +388,44 @@ def _run_import_checks(candidate_dir: Path) -> None:
         spec.loader.exec_module(mod)
 
 
+def _runtime_effect_modules_for_candidate(candidate_dir: Path) -> Set[str]:
+    default = {"state_features.py", "trigger_logic.py", "prompt_composer.py", "state_encoder.py", "trigger_policy.py", "prompt_builder.py"}
+    rules_path = candidate_dir / "validator_rules.py"
+    if not rules_path.exists():
+        return default
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("candidate_validator_rules_meta", str(rules_path))
+        if spec is None or spec.loader is None:
+            return default
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        fn = getattr(mod, "runtime_effect_modules", None)
+        if callable(fn):
+            out = {Path(str(x)).name for x in list(fn() or [])}
+            if out:
+                return out
+    except Exception:
+        return default
+    return default
+
+
+def _build_change_semantics(*, proposal_contract: Dict, changed_files: Set[str], runtime_effect_modules: Set[str]) -> Dict:
+    changed = {Path(str(x)).name for x in set(changed_files or set())}
+    primary_claims = [Path(str(x)).name for x in list(proposal_contract.get("hypothesis_target_modules") or proposal_contract.get("sandbox_modules_to_modify") or [])]
+    primary_claims = sorted([x for x in primary_claims if x])
+    runtime_effect_changed = sorted(changed.intersection(set(runtime_effect_modules)))
+    supporting = sorted(changed - set(runtime_effect_changed))
+    return {
+        "hypothesis_target_modules": primary_claims,
+        "runtime_effect_changed_files": runtime_effect_changed,
+        "supporting_generated_files": supporting,
+        "full_diff_files": sorted(changed),
+        "editable_allowed_files": sorted(ALLOWED_MUTATION_FILES),
+    }
+
+
 def _runtime_wiring_smoke_verification(*, candidate_dir: Path, proposal_contract: Dict, changed_files: Set[str]) -> Dict:
     try:
         profile = load_harness_sandbox_profile(str((candidate_dir / "spec.json").as_posix()))
@@ -412,7 +454,10 @@ def _runtime_wiring_smoke_verification(*, candidate_dir: Path, proposal_contract
     trigger = dict(profile.get("trigger_logic") or {})
     state = dict(profile.get("state_features") or {})
     prompt = dict(profile.get("prompt_composer") or {})
-    claimed = {Path(str(x)).name for x in list(proposal_contract.get("sandbox_modules_to_modify") or [])}
+    claimed = {
+        Path(str(x)).name
+        for x in list(proposal_contract.get("hypothesis_target_modules") or proposal_contract.get("sandbox_modules_to_modify") or [])
+    }
     changed = {Path(str(x)).name for x in set(changed_files or set())}
     manifest_active = {Path(str(x)).name for x in list(((profile.get("spec") or {}).get("manifest") or {}).get("active_sandbox_modules") or [])}
 
@@ -444,9 +489,11 @@ def _runtime_wiring_smoke_verification(*, candidate_dir: Path, proposal_contract
 
     def _alignment(item: Dict) -> bool | None:
         expected = item["module"]
-        is_claimed = bool(item["claim"]) or (expected in changed)
+        is_claimed = bool(item["claim"])
         if not is_claimed:
-            notes.append(f"{expected}: not claimed/changed; skipped strict alignment check")
+            if expected in changed:
+                notes.append(f"{expected}: runtime-effect file changed but not in primary hypothesis_target_modules")
+            notes.append(f"{expected}: not in primary claim; skipped strict alignment check")
             return None
         module_ok = item["loaded_module"] == expected
         fn_ok = bool(item["loaded_function"])
@@ -734,6 +781,7 @@ def propose_next_candidate(
             "expected_tradeoff": str(proposal.get("expected_tradeoff") or ""),
             "expected_runtime_effect": str(proposal.get("expected_runtime_effect") or ""),
             "sandbox_modules_to_modify": list(proposal.get("sandbox_modules_to_modify") or []),
+            "hypothesis_target_modules": list(proposal.get("sandbox_modules_to_modify") or []),
             "files_to_create_or_modify": normalized_target_files,
             "changed_files": list(proposal.get("changed_files") or []),
             "runtime_wiring_plan": dict(proposal.get("runtime_wiring_plan") or {}),
@@ -761,13 +809,25 @@ def propose_next_candidate(
             encoding="utf-8",
         )
         spec = _load_json(candidate_dir / "spec.json")
-        spec["proposal_contract"]["files_to_create_or_modify"] = sorted(changed_files)
+        change_semantics = _build_change_semantics(
+            proposal_contract=dict(spec.get("proposal_contract") or {}),
+            changed_files=changed_files,
+            runtime_effect_modules=_runtime_effect_modules_for_candidate(candidate_dir),
+        )
+        spec["proposal_contract"]["full_diff_files"] = list(change_semantics["full_diff_files"])
+        spec["proposal_contract"]["runtime_effect_changed_files"] = list(change_semantics["runtime_effect_changed_files"])
+        spec["proposal_contract"]["supporting_generated_files"] = list(change_semantics["supporting_generated_files"])
+        spec["proposal_contract"]["hypothesis_target_modules"] = list(change_semantics["hypothesis_target_modules"])
         parent_commit = _git_parent_commit(repo_root)
         spec["runtime_metadata"] = {
             "parent_harness": parent_id,
             "parent_commit": parent_commit,
             "candidate_created_at_utc": datetime.now(timezone.utc).isoformat(),
             "changed_files": sorted(changed_files),
+            "full_diff_files": list(change_semantics["full_diff_files"]),
+            "runtime_effect_changed_files": list(change_semantics["runtime_effect_changed_files"]),
+            "supporting_generated_files": list(change_semantics["supporting_generated_files"]),
+            "hypothesis_target_modules": list(change_semantics["hypothesis_target_modules"]),
             "diff_path": "parent_diff.patch",
             "candidate_branch_hint": f"candidate/{candidate_id}",
             "agent_loop_meta": dict(agent_meta or {}),
@@ -822,13 +882,25 @@ def propose_next_candidate(
                 encoding="utf-8",
             )
             spec = _load_json(candidate_dir / "spec.json")
-            spec["proposal_contract"]["files_to_create_or_modify"] = sorted(changed_files)
+            change_semantics = _build_change_semantics(
+                proposal_contract=dict(spec.get("proposal_contract") or {}),
+                changed_files=changed_files,
+                runtime_effect_modules=_runtime_effect_modules_for_candidate(candidate_dir),
+            )
+            spec["proposal_contract"]["full_diff_files"] = list(change_semantics["full_diff_files"])
+            spec["proposal_contract"]["runtime_effect_changed_files"] = list(change_semantics["runtime_effect_changed_files"])
+            spec["proposal_contract"]["supporting_generated_files"] = list(change_semantics["supporting_generated_files"])
+            spec["proposal_contract"]["hypothesis_target_modules"] = list(change_semantics["hypothesis_target_modules"])
             parent_commit = _git_parent_commit(repo_root)
             spec["runtime_metadata"] = {
                 "parent_harness": parent_id,
                 "parent_commit": parent_commit,
                 "candidate_created_at_utc": datetime.now(timezone.utc).isoformat(),
                 "changed_files": sorted(changed_files),
+                "full_diff_files": list(change_semantics["full_diff_files"]),
+                "runtime_effect_changed_files": list(change_semantics["runtime_effect_changed_files"]),
+                "supporting_generated_files": list(change_semantics["supporting_generated_files"]),
+                "hypothesis_target_modules": list(change_semantics["hypothesis_target_modules"]),
                 "diff_path": "parent_diff.patch",
                 "candidate_branch_hint": f"candidate/{candidate_id}",
                 "agent_loop_meta": dict(agent_meta or {}),

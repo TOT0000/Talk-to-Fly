@@ -65,6 +65,22 @@ Required proposal keys (14 total):
 - `proposer_note_text`
 - `implementation_contract`
 - `invariants`
+- `hypothesis_target_modules` (runtime-generated semantic mirror of primary claim; defaults to `sandbox_modules_to_modify`)
+
+## Metadata semantics (to avoid changed-files ambiguity)
+
+Generated candidate metadata distinguishes:
+
+- `hypothesis_target_modules`:
+  - primary runtime hypothesis scope.
+- `runtime_effect_changed_files`:
+  - changed files that are runtime-effect modules.
+- `supporting_generated_files`:
+  - changed files created for packaging/record/sync.
+- `full_diff_files`:
+  - complete parent->candidate changed file set.
+
+`files_to_create_or_modify` remains a generation/requested-edit boundary field; do not treat it alone as research primary hypothesis scope.
 
 ## Workflow integration
 

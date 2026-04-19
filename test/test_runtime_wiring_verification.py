@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 from proposer.prompts import build_self_review_prompt
-from proposer.propose_candidate import _runtime_wiring_smoke_verification
+from proposer.propose_candidate import _build_change_semantics, _runtime_wiring_smoke_verification
 from proposer.registry import ALLOWED_MUTATION_FILES, TRACKED_CONTRACT_FILES
 
 
@@ -122,3 +122,45 @@ def test_runtime_metadata_records_wiring_verification_artifact_path():
 def test_wiring_artifact_allowed_in_boundary_but_not_tracked_as_contract_diff():
     assert "runtime_wiring_verification.json" in ALLOWED_MUTATION_FILES
     assert "runtime_wiring_verification.json" not in TRACKED_CONTRACT_FILES
+
+
+def test_change_semantics_trigger_only_case():
+    out = _build_change_semantics(
+        proposal_contract={"hypothesis_target_modules": ["trigger_logic.py"]},
+        changed_files={"trigger_logic.py", "spec.json", "proposer_note.txt"},
+        runtime_effect_modules={"trigger_logic.py", "state_features.py", "prompt_composer.py"},
+    )
+    assert out["hypothesis_target_modules"] == ["trigger_logic.py"]
+    assert out["runtime_effect_changed_files"] == ["trigger_logic.py"]
+    assert set(out["supporting_generated_files"]) == {"proposer_note.txt", "spec.json"}
+
+
+def test_change_semantics_multi_primary_lines():
+    out = _build_change_semantics(
+        proposal_contract={"hypothesis_target_modules": ["trigger_logic.py", "state_features.py"]},
+        changed_files={"trigger_logic.py", "state_features.py", "spec.json"},
+        runtime_effect_modules={"trigger_logic.py", "state_features.py", "prompt_composer.py"},
+    )
+    assert out["hypothesis_target_modules"] == ["state_features.py", "trigger_logic.py"]
+    assert out["runtime_effect_changed_files"] == ["state_features.py", "trigger_logic.py"]
+    assert out["supporting_generated_files"] == ["spec.json"]
+
+
+def test_runtime_wiring_checks_primary_claim_only_not_all_loaded_lines(tmp_path):
+    cdir = _make_candidate_dir(tmp_path)
+    proposal = {"hypothesis_target_modules": ["trigger_logic.py"]}
+    out = _runtime_wiring_smoke_verification(
+        candidate_dir=cdir,
+        proposal_contract=proposal,
+        changed_files={"trigger_logic.py", "spec.json"},
+    )
+    assert out["trigger_alignment_ok"] is True
+    assert out["state_alignment_ok"] is None
+    assert out["prompt_alignment_ok"] is None
+
+
+def test_source_records_runtime_metadata_semantic_fields():
+    src = inspect.getsource(__import__("proposer.propose_candidate", fromlist=["propose_next_candidate"]))
+    assert "runtime_effect_changed_files" in src
+    assert "supporting_generated_files" in src
+    assert "hypothesis_target_modules" in src

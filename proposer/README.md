@@ -147,12 +147,39 @@ Accepted candidates now persist the following in `spec.json`:
 - `runtime_metadata.diff_path`
 - `runtime_metadata.proposer_tool_audit_path`
 - `runtime_metadata.proposer_tool_event_count`
+- `runtime_metadata.hypothesis_target_modules`
+- `runtime_metadata.runtime_effect_changed_files`
+- `runtime_metadata.supporting_generated_files`
+- `runtime_metadata.full_diff_files`
 
 And each accepted candidate writes:
 - `parent_diff.patch` (code diff)
 - `proposer_tool_audit.json` (actual tool-call audit trail, including trace search/snippet reads)
 
 for rollback/review without auto-push or auto-merge.
+
+### Metadata semantics for research analysis (primary vs supporting)
+
+To avoid ambiguity between hypothesis scope and packaging artifacts:
+
+- `proposal_contract.hypothesis_target_modules`:
+  - primary runtime-effect module lines this candidate intends to test.
+- `proposal_contract.runtime_effect_changed_files`:
+  - actually changed files that belong to runtime-effect module set.
+- `proposal_contract.supporting_generated_files`:
+  - changed files produced for packaging/metadata (e.g. `spec.json`, `proposer_note.txt`) rather than primary hypothesis line.
+- `proposal_contract.full_diff_files`:
+  - full parent->candidate changed file set.
+
+Runtime metadata mirrors the same semantics:
+- `runtime_metadata.hypothesis_target_modules`
+- `runtime_metadata.runtime_effect_changed_files`
+- `runtime_metadata.supporting_generated_files`
+- `runtime_metadata.full_diff_files`
+
+Legacy/compatibility field interpretation:
+- `files_to_create_or_modify`: generation-time requested/allowed write target list (not the primary hypothesis scope by itself).
+- `runtime_metadata.changed_files`: backward-compatible changed file list; prefer `runtime_effect_changed_files` + `supporting_generated_files` for analysis.
 
 ## 如何確認 proposer 真的有調閱紀錄檔
 
