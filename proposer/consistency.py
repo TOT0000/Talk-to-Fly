@@ -80,6 +80,20 @@ def _validate_required_artifacts(candidate_dir: Path, spec: Dict) -> None:
     _assert(isinstance(runtime_meta.get("changed_files"), list), "runtime_metadata.changed_files is required")
     _assert(str(runtime_meta.get("diff_path") or "").strip(), "runtime_metadata.diff_path is required")
     _assert((candidate_dir / str(runtime_meta.get("diff_path"))).exists(), "diff artifact missing")
+    wiring_path = str(runtime_meta.get("runtime_wiring_verification_path") or "").strip()
+    _assert(wiring_path, "runtime_metadata.runtime_wiring_verification_path is required")
+    _assert((candidate_dir / wiring_path).exists(), "runtime wiring verification artifact missing")
+    wiring_obj = _load_json(candidate_dir / wiring_path)
+    _assert(isinstance(wiring_obj.get("passed"), bool), "runtime wiring verification must include boolean 'passed'")
+    for key in [
+        "loaded_trigger_module",
+        "loaded_state_module",
+        "loaded_prompt_module",
+        "loaded_trigger_function",
+        "loaded_state_function",
+        "loaded_prompt_function",
+    ]:
+        _assert(key in wiring_obj, f"runtime wiring verification missing key: {key}")
 
 
 def _validate_runtime_wiring(candidate_dir: Path, spec: Dict) -> None:

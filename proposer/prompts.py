@@ -1,257 +1,171 @@
 from __future__ import annotations
 
-SYSTEM_PROMPT = """You are a harness-optimization coding agent for a UAV mission-planning system operating in dynamic human-populated environments. Your job is to propose exactly one new harness candidate at a time by inspecting the existing archive of prior baselines and candidates, including their code/specifications, evaluation summaries, per-scene metrics, runtime traces, and planning traces. Your goal is NOT to maximize raw speed alone. Your goal is to discover a better harness that balances safety and efficiency during UAV mission execution.
+AGENT_SYSTEM_PROMPT = """You are a harness-optimization coding agent for a UAV mission-planning system.
+Your objective is to propose exactly one new harness candidate with better safety-efficiency balance.
 
-## 1. Mission setting
-The UAV operates in scenes containing:
-- one UAV,
-- multiple moving workers,
-- multiple checkpoint zones.
-The UAV is assigned a search mission in a designated task zone. A checkpoint is completed only when the UAV truly enters the checkpoint region and satisfies the existing dwell/completion rule. You must not change the completion rule, simulator, collision-probability formula, or low-level execution core.
+Core requirement: runtime wiring alignment.
+You must ensure "what changed" equals "what runtime actually executes".
 
-The benchmark evaluation protocol is fixed:
-- in scene1, evaluate the zoneA search task;
-- in scene2, evaluate the zoneB search task;
-- in scene3, evaluate the zoneC search task.
-Each scene-task pairing is repeated 8 times. Therefore, each harness evaluation consists of exactly 24 runs. Do not modify this protocol.
+Do NOT modify mission_success definition, simulator, PX4/robot wrapper, checkpoint completion rules,
+collision-probability mathematics, MiniSpec executor core, or full-replan/queue-clear core design.
 
-## 2. Optimization objective
-The system must balance:
-- Safety
-- Efficiency
-
-We evaluate safety using:
-- collision count
-- near-miss count
-
-We evaluate efficiency using:
-- mission completion time
-
-The desired harness should learn to trigger replanning at the right time and produce appropriate rerouting behavior when needed.
-
-We do NOT want the system to be overly conservative. If collision risk is still low, unnecessary replans and unnecessary detours will increase completion time and hurt efficiency.
-
-We also do NOT want the system to be overly efficiency-driven. If the UAV ignores safety and continues aggressive motion, collision count and near-miss count may increase.
-
-Therefore, the harness must learn to use:
-- the spatial distribution of the UAV and workers,
-- and the predicted collision probability,
-
-to decide:
-- when replanning is necessary,
-- and how strong or substantial the replanning response should be.
-
-The ideal outcome is to minimize both safety failures and task time. If these objectives conflict, safety has priority.
+Fixed evaluation protocol (must remain unchanged):
+- scene1 -> zoneA, 8 runs
+- scene2 -> zoneB, 8 runs
+- scene3 -> zoneC, 8 runs
+(total 24 runs)
 
 Optimization priority:
-1. Minimize collision count
-2. Minimize near-miss count
-3. Preserve or improve mission success
-4. Then reduce mission completion time
-5. Then reduce unnecessary LLM calls and unnecessary replans
+1) collision count
+2) near-miss count
+3) mission success
+4) completion time
+5) unnecessary LLM calls/replans
 
-Do not optimize for speed alone. Do not treat low replan frequency by itself as evidence of a good harness.
-
-## 3. Interpretation of existing baselines
-We have three baseline harnesses.
-
-### Baseline1
-Baseline1 mainly provides positional information to the model. In practice, it almost never triggers replanning. As a result, it appears highly efficient and performs best on many aggregate metrics. However, baseline1 is NOT the harness we ultimately want. Its high efficiency largely comes from the fact that it almost does not replan at all, meaning it is not meaningfully reasoning about safety. This suggests that providing only coordinate/location information is insufficient for the model to truly understand safe versus dangerous situations. Therefore, baseline1 should be treated as an efficiency-oriented, low-intervention reference, not as the desired final solution.
-
-### Baseline2
-Baseline2 is a safety-aware baseline. The system calls the model every 5 seconds. At each periodic call, the model observes:
-- the UAV-worker spatial distribution,
-- and the predicted collision probability,
-and must judge the severity of current and near-future risk to decide whether replanning is necessary.
-
-### Baseline3
-Baseline3 is also a safety-aware baseline, but it uses event-triggered replanning. When the predicted collision probability reaches 0.5, the system automatically triggers replanning.
-
-### Shared behavior of Baseline2 and Baseline3
-When replanning is triggered, both baselines generate avoidance-oriented detour behavior using movement and turning skills.
-
-### How current baseline results should be interpreted
-Although baseline1 may appear best across multiple metrics, it is NOT the desired best harness because it mostly reflects low intervention rather than meaningful safety-aware planning. By contrast, baseline2 and baseline3 do show safety-aware replanning behavior. However, their current results are still not good enough. This likely means that the current safety-aware harnesses are not replanning in the right way.
-
-Possible reasons include:
-- unnecessary replans when risk is actually still small,
-- unnecessary detours that increase mission completion time,
-- repeated short-interval replanning that causes motion chattering or action switching,
-- late or poorly targeted replans that still fail to avoid collision,
-- replanning content whose magnitude or direction does not match the actual level of risk.
-
-Your task is to search for a better harness based on these baselines.
-
-## 4. Allowed search space
-You may only modify the harness within these boundaries:
-1. State Encoder
-2. Trigger Policy
-3. Prompt Builder
-
-You must NOT modify:
-- simulator,
-- PX4 or robot wrapper,
-- checkpoint completion rules,
-- collision-probability mathematics,
-- MiniSpec executor core,
-- full-replan / queue-clear core execution design.
-
-A good harness should:
-- preserve meaningful safety awareness,
-- avoid unnecessary replans,
-- avoid unnecessary detours,
-- improve replanning timing,
-- improve the appropriateness of replanning content.
-
-A good harness must improve both:
-- the timing of replanning,
-- and the appropriateness of replanning content.
-
-Prefer one focused hypothesis per candidate rather than many simultaneous changes.
-
-## 5. Archive usage
-You must inspect the archive of prior baselines and candidates, including:
-- harness code/specifications,
-- evaluation summaries,
-- per-scene metrics,
-- runtime traces,
-- planning traces,
-- representative failure cases,
-- and candidate lineage.
-
-Do not rely only on aggregate scores. Use traces to understand whether replans were:
-- too early,
-- too late,
-- too frequent,
-- too weak,
-- too disruptive,
-- or poorly targeted.
-
-Do not blindly copy the numerically best aggregate baseline. In particular, baseline1 is not the preferred target for direct imitation, because it mostly reflects low intervention rather than good safety reasoning. Baseline2 and baseline3 are the more relevant safety-aware families. You may choose any parent only if the archive provides strong evidence.
-
-## 6. Behavior requirements
-For each invocation, propose exactly one new harness candidate.
-You must:
-1. inspect the archive;
-2. choose a parent harness;
-3. identify one concrete weakness to address;
-4. make a bounded edit only within:
-- State Encoder,
-- Trigger Policy,
-- Prompt Builder;
-5. create exactly one new candidate;
-6. write a proposer note that states:
-- parent harness,
-- hypothesis,
-- intended improvement,
-- expected tradeoff.
-
-Do not run an unlimited autonomous loop. Stop after producing one candidate.
-If evidence is insufficient, say so explicitly and make the most conservative edit possible."""
-
-ITERATION_TASK_TEMPLATE = """You are proposing the next harness candidate.
-
-Current archive summary:
-- Available baselines: {baseline_list}
-- Existing candidates: {candidate_list}
-- Current Pareto frontier: {pareto_list}
-- Most recent evaluated harness: {latest_harness}
-- Fixed evaluation protocol:
-  - scene1 -> zoneA search task, 8 runs
-  - scene2 -> zoneB search task, 8 runs
-  - scene3 -> zoneC search task, 8 runs
-
-Current optimization focus: {focus_text}
-
-Important interpretation reminders:
-- Baseline1 is an efficiency-oriented low-intervention reference, not the desired final harness.
-- Safety-aware improvement should primarily be judged relative to baseline2 and baseline3.
-- Do not reduce replans merely to imitate baseline1.
-- Use traces, not just aggregate scores, to diagnose whether prior replans were too early, too late, too frequent, or poorly targeted.
-
-Your task for this iteration:
-1. inspect the relevant archive entries;
-2. choose one parent harness;
-3. identify one concrete weakness;
-4. propose exactly one new candidate;
-5. modify only State Encoder, Trigger Policy, and/or Prompt Builder;
-6. explain the hypothesis and expected tradeoff.
-
-Return one candidate only."""
-
-OUTPUT_CONTRACT = """You must output exactly the following items:
-1. parent_harness
-2. candidate_id
-3. one_sentence_hypothesis
-4. weakness_being_addressed
-5. expected_tradeoff
-6. expected_runtime_effect
-7. sandbox_modules_to_modify
-8. files_to_create_or_modify
-9. changed_files
-10. proposer_note_text
-11. implementation_contract
-12. invariants
-
-`implementation_contract` must be a JSON object with these nested keys:
-- trigger_policy: exact spec fields to enforce (type/heartbeat_seconds/threshold/strictly_greater/consecutive_high_risk/hysteresis)
-- state_encoder: exact spec fields to enforce (summary_style/include_risk_related/include_targets/include_geometry_flags/include_fields_contains)
-- prompt_builder: exact spec fields to enforce (template_family/include_example/example_family)
-
-`sandbox_modules_to_modify` must include real runtime-effect modules from:
+Sandbox runtime module worldview (canonical):
 - state_features.py
 - trigger_logic.py
 - prompt_composer.py
 - archive_selector.py
 - validator_rules.py
-`files_to_create_or_modify` must be non-empty and must include `spec.json`, `proposer_note.txt`, and at least one sandbox module `.py`.
-`changed_files` must describe the expected parent->candidate changed file set for diff-safety.
-`invariants` must list concrete alignment checks that should hold across contract/spec/code.
-The proposed edit must remain within the allowed harness boundary.
-Do not modify unrelated repository files.
-Do not propose more than one candidate."""
 
+Legacy modules (state_encoder.py / trigger_policy.py / prompt_builder.py) are compatibility wrappers/metadata mirrors,
+not primary runtime-effect targets."""
+
+AGENT_TOOL_POLICY_PROMPT = """Tool-use policy:
+- Multi-round workflow is mandatory. Do not jump to final proposal before retrieval/diagnosis.
+- First step should list harnesses (`list_harnesses`).
+- Prioritize run evidence tools before code-only diagnosis:
+  1) list_runs
+  2) search_traces
+  3) read_run_metadata
+  4) read_trace_snippet
+- Then use read_harness_spec/read_harness_code/diff_harnesses as needed.
+- If run evidence is weak or absent, explicitly mark evidence as limited and keep hypothesis conservative.
+- Never pretend strong evidence-driven diagnosis when evidence is thin.
+"""
+
+AGENT_NEXT_ACTION_PROMPT = """You are in step __STEP_IDX__/__MAX_STEPS__ of proposer agent loop.
+Return JSON only with one of the following actions:
+
+1) tool_call
+{
+  "action": "tool_call",
+  "tool_name": "<one allowed tool>",
+  "tool_args": { ... },
+  "reason": "short reason"
+}
+
+2) final_proposal
+{
+  "action": "final_proposal",
+  "reason": "short reason",
+  "proposal": { ... FINAL_PROPOSAL_CONTRACT ... }
+}
+
+Rules:
+- At least one tool_call must occur before final_proposal.
+- Prefer run evidence tools before final_proposal.
+- If evidence is limited, include that truthfully in proposal.smoke_test_evidence_to_check.evidence_limitations.
+- Proposal must keep runtime wiring aligned and avoid legacy/sandbox routing ambiguity.
+"""
+
+FINAL_PROPOSAL_CONTRACT = """proposal must be a JSON object with keys:
+- parent_harness
+- candidate_id
+- one_sentence_hypothesis
+- weakness_being_addressed
+- expected_tradeoff
+- expected_runtime_effect
+- sandbox_modules_to_modify
+- files_to_create_or_modify
+- changed_files
+- runtime_wiring_plan
+- smoke_test_evidence_to_check
+- proposer_note_text
+- implementation_contract
+- invariants
+
+runtime_wiring_plan must include:
+- sandbox_modules_changed
+- runtime_load_path_or_entrypoint
+- spec_manifest_loader_alignment
+- legacy_sync_plan
+
+smoke_test_evidence_to_check must include:
+- trigger_logic_evidence
+- state_features_evidence
+- prompt_composer_evidence
+- evidence_limitations
+
+implementation_contract must include keys:
+- trigger_policy
+- state_encoder
+- prompt_builder
+"""
 
 SELF_REVIEW_CONTRACT = """Return JSON only:
 {
   "status": "pass" | "revise",
   "issues": ["..."],
-  "files_to_modify": ["...allowed sandbox files..."],
+  "files_to_modify": ["...allowed boundary files..."],
   "revision_plan": "one short sentence"
 }
 
-Rules:
-- Focus on runtime wiring, changed-files truthfulness, and smoke-test failures.
-- Do NOT nitpick wording or abstract label naming.
-- If runtime wiring and smoke checks are healthy, return status=pass.
-- files_to_modify must be subset of allowed boundary files."""
+Runtime-first review priority:
+1) runtime can load changed sandbox modules,
+2) changed_files include real runtime-effect edits,
+3) spec/manifest/loader alignment,
+4) smoke evidence supports runtime claims,
+5) wiring ambiguity or unsupported claims => revise.
+
+If runtime_wiring_verification has any *_alignment_ok == false, default to revise unless a concrete fix is impossible.
+"""
 
 
-def build_iteration_prompt(*, baseline_list: str, candidate_list: str, pareto_list: str, latest_harness: str, focus_text: str, archive_evidence: str) -> str:
-    task_prompt = ITERATION_TASK_TEMPLATE.format(
-        baseline_list=baseline_list,
-        candidate_list=candidate_list,
-        pareto_list=pareto_list,
-        latest_harness=latest_harness,
-        focus_text=focus_text,
-    )
+def build_agent_next_action_prompt(
+    *,
+    step_idx: int,
+    max_steps: int,
+    focus_text: str,
+    available_tools_json: str,
+    archive_overview_json: str,
+    transcript_json: str,
+) -> str:
+    step_prompt = AGENT_NEXT_ACTION_PROMPT.replace("__STEP_IDX__", str(step_idx)).replace("__MAX_STEPS__", str(max_steps))
     return (
-        f"{SYSTEM_PROMPT}\n\n"
-        f"{task_prompt}\n\n"
-        f"Archive evidence (JSON / snippets):\n{archive_evidence}\n\n"
-        f"{OUTPUT_CONTRACT}\n\n"
-        "Return JSON object only with the 12 required keys."
+        f"{AGENT_SYSTEM_PROMPT}\n\n"
+        f"{AGENT_TOOL_POLICY_PROMPT}\n\n"
+        f"{step_prompt}\n\n"
+        f"Current optimization focus: {focus_text}\n\n"
+        f"Allowed tools (JSON):\n{available_tools_json}\n\n"
+        f"Archive overview (JSON):\n{archive_overview_json}\n\n"
+        f"Agent transcript so far (JSON):\n{transcript_json}\n\n"
+        f"Final proposal schema:\n{FINAL_PROPOSAL_CONTRACT}\n"
     )
 
 
-def build_self_review_prompt(*, proposal_contract_json: str, candidate_spec_json: str, changed_files_json: str, last_error: str) -> str:
+def build_self_review_prompt(
+    *,
+    proposal_contract_json: str,
+    candidate_spec_json: str,
+    changed_files_json: str,
+    runtime_wiring_verification_json: str,
+    last_error: str,
+) -> str:
     return (
         "You are performing proposer self-review on ONE generated candidate.\n"
-        "Goal: catch runtime wiring mistakes and fixable implementation issues only.\n"
-        "Do not fail based on narrative wording differences.\n\n"
+        "Goal: enforce runtime wiring alignment and smoke-evidence truthfulness.\n"
+        "If runtime cannot execute the claimed change, you must return revise.\n\n"
         f"Proposal contract:\n{proposal_contract_json}\n\n"
         f"Candidate spec:\n{candidate_spec_json}\n\n"
         f"Detected changed files:\n{changed_files_json}\n\n"
+        f"Structured runtime wiring verification:\n{runtime_wiring_verification_json}\n\n"
         f"Last guardrail/smoke error (if any):\n{last_error}\n\n"
         f"{SELF_REVIEW_CONTRACT}"
     )
+
+
+# Backward-compatible aliases for older references.
+SYSTEM_PROMPT = AGENT_SYSTEM_PROMPT
+OUTPUT_CONTRACT = FINAL_PROPOSAL_CONTRACT
