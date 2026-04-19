@@ -74,6 +74,8 @@ def _prepare_proposal_contract(proposal: Dict) -> Dict:
         "invariants",
         "sandbox_modules_to_modify",
         "changed_files",
+        "runtime_wiring_plan",
+        "smoke_test_evidence_to_check",
     ]
     for key in required_keys:
         if key not in proposal:
@@ -104,6 +106,8 @@ def _prepare_proposal_contract(proposal: Dict) -> Dict:
     normalized["invariants"] = invariants
     normalized["sandbox_modules_to_modify"] = [Path(str(v)).name for v in list(proposal.get("sandbox_modules_to_modify") or [])]
     normalized["changed_files"] = [Path(str(v)).name for v in list(proposal.get("changed_files") or [])]
+    normalized["runtime_wiring_plan"] = dict(proposal.get("runtime_wiring_plan") or {})
+    normalized["smoke_test_evidence_to_check"] = dict(proposal.get("smoke_test_evidence_to_check") or {})
     return normalized
 
 
@@ -250,7 +254,11 @@ def _build_file_generation_prompt(
     return (
         "You are generating one bounded harness file for UAV harness optimization.\n"
         "Allowed harness boundary files: spec.json, state_features.py, trigger_logic.py, prompt_composer.py, archive_selector.py, validator_rules.py, state_encoder.py, trigger_policy.py, prompt_builder.py, proposer_note.txt, README.md\n"
-        "Prefer sandbox runtime-effect modules (state_features.py/trigger_logic.py/prompt_composer.py) over legacy metadata-only options.\n"
+        "Runtime-first rule: prioritize sandbox runtime-effect modules and wiring alignment.\n"
+        "Primary editable targets are sandbox modules: state_features.py, trigger_logic.py, prompt_composer.py, archive_selector.py, validator_rules.py.\n"
+        "Legacy files (state_encoder.py, trigger_policy.py, prompt_builder.py) are compatibility wrappers/metadata mirrors, not primary targets.\n"
+        "Do not create legacy-vs-sandbox ambiguity; forbidden example: editing trigger_logic.py while spec/loader still routes to trigger_policy.py.\n"
+        "If legacy sync is required for compatibility, keep it explicitly consistent with spec/manifest/runtime_wiring_plan.\n"
         "You must output ONLY the full content of the requested file, no markdown fences.\n"
         "Do not modify simulator/PX4/controller/executor/collision math/checkpoint rules.\n\n"
         f"Parent harness: {parent_harness_id}\n"
@@ -373,12 +381,24 @@ def propose_next_candidate(
             "expected_runtime_effect": "Preserve baseline runtime behavior while keeping proposer alive.",
             "files_to_create_or_modify": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
             "proposer_note_text": "Fallback proposal generated because LLM proposer call failed.",
-            "sandbox_modules_to_modify": ["state_features.py"],
+            "sandbox_modules_to_modify": ["trigger_logic.py"],
             "changed_files": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
             "implementation_contract": {
                 "trigger_policy": {},
                 "state_encoder": {},
                 "prompt_builder": {},
+            },
+            "runtime_wiring_plan": {
+                "sandbox_modules_changed": ["trigger_logic.py"],
+                "runtime_load_path_or_entrypoint": "controller.harness_sandbox runtime sandbox loader",
+                "spec_manifest_loader_alignment": "spec.sandbox + spec.manifest.active_sandbox_modules include trigger_logic.py",
+                "legacy_sync_plan": "none",
+            },
+            "smoke_test_evidence_to_check": {
+                "trigger_logic_evidence": "smoke/import checks and runtime_metadata.changed_files include trigger_logic.py",
+                "state_features_evidence": "not changed in this fallback candidate",
+                "prompt_composer_evidence": "not changed in this fallback candidate",
+                "evidence_limitations": "fallback path due to proposer LLM failure",
             },
             "invariants": [
                 "proposal_contract files must match actual changed files",
@@ -517,6 +537,8 @@ def propose_next_candidate(
             "sandbox_modules_to_modify": list(proposal.get("sandbox_modules_to_modify") or []),
             "files_to_create_or_modify": normalized_target_files,
             "changed_files": list(proposal.get("changed_files") or []),
+            "runtime_wiring_plan": dict(proposal.get("runtime_wiring_plan") or {}),
+            "smoke_test_evidence_to_check": dict(proposal.get("smoke_test_evidence_to_check") or {}),
             "implementation_contract": dict(proposal.get("implementation_contract") or {}),
             "invariants": list(proposal.get("invariants") or []),
         }

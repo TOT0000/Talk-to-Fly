@@ -1,16 +1,19 @@
 # Restricted Meta-Harness MVP (Talk-to-Fly)
 
-This proposer loop limits mutation boundary to harness-level modules only:
+This proposer loop limits mutation boundary to harness-level modules only, with **sandbox runtime-effect modules as primary targets**:
 
-- `state_encoder.py`
-- `trigger_policy.py`
-- `prompt_builder.py`
-- `spec.json`
-- `state_features.py`
-- `trigger_logic.py`
-- `prompt_composer.py`
-- `archive_selector.py`
-- `validator_rules.py`
+- Primary runtime-effect modules:
+  - `state_features.py`
+  - `trigger_logic.py`
+  - `prompt_composer.py`
+  - `archive_selector.py`
+  - `validator_rules.py`
+- Compatibility / metadata modules:
+  - `state_encoder.py`
+  - `trigger_policy.py`
+  - `prompt_builder.py`
+- Required contract/meta files:
+  - `spec.json`
 
 ## Fixed evaluation protocol (strict)
 
