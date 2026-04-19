@@ -280,7 +280,17 @@ def propose_next_candidate(
     archive_summary = summarize_archive_for_proposer(repo_root, repo_root / "proposer_archive_v2")
     tools = ProposerToolbox(repo_root=repo_root, archive_root=repo_root / "proposer_archive_v2")
     harness_options = tools.list_harnesses(kind="all")
-    selected_harnesses = [x["harness_id"] for x in harness_options[-3:]]
+    harness_scores: List[tuple] = []
+    for item in harness_options:
+        hid = item["harness_id"]
+        run_preview = tools.list_runs(hid, limit=1)
+        harness_scores.append((hid, len(run_preview), item.get("kind")))
+    harness_scores_sorted = sorted(
+        harness_scores,
+        key=lambda x: (x[1] > 0, x[1], 1 if x[2] == "baseline" else 0, x[0]),
+        reverse=True,
+    )
+    selected_harnesses = [x[0] for x in harness_scores_sorted[:3]] or [x["harness_id"] for x in harness_options[-3:]]
     tool_samples: Dict[str, Dict] = {}
     for hid in selected_harnesses:
         spec_obj = tools.read_harness_spec(hid)

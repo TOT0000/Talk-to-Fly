@@ -32,6 +32,27 @@ Total runs per evaluated harness: **24**.
 - Proposer model defaults to `gpt-4.1` and is configurable via `TYPEFLY_PROPOSER_MODEL`.
 - If `TYPEFLY_PROPOSER_MODEL` is a GPT model and `OPENAI_API_KEY` is missing, proposer fails with a clear error (unless explicit fallback is enabled).
 
+### Run evidence sources used by proposer tools
+
+`proposer/agent_tools.py` now resolves run/trace evidence with explicit source normalization and fallback:
+
+1. `proposer_archive_v2` index `trace_locations.runs_dir` (primary, schema-aligned).
+2. `proposer_archive_v2/<baselines|candidates>/<harness_id>/runs` (primary local harness folder).
+3. `trace_pointers.json` declared source path under each harness archive entry (legacy bridge).
+4. `proposer_archive/manual_runs/runs` (legacy/manual fallback).
+
+For legacy shared folders, runs are mapped to a harness by reading markers from metadata/trace JSON lines
+(e.g. `selected_baseline_id`, `harness_id`, `candidate_id`) instead of hardcoded harness IDs.
+
+Tool behaviors:
+
+- `list_runs(harness_id)` returns structured run rows (`run_id`, `run_dir`, `source`, `source_type`, file availability, optional scene/task/status).
+- `search_traces(...)` searches across runtime/planning traces and run metadata in resolved sources.
+- If no evidence exists, tools return empty hits/runs **with audit/debug reason metadata** (not silent path bugs).
+
+The proposer now also ranks harnesses by available run evidence before selecting the sample set, so it prefers
+evidence-rich baselines/candidates and only falls back to spec/code-first behavior when run evidence is truly absent.
+
 ## Runtime-effect sandbox modules
 
 - `state_features.py`: encodes runtime snapshot into state features that are injected into planning context.
