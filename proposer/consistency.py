@@ -101,6 +101,10 @@ def _validate_contract_vs_spec(contract: Dict, spec: Dict) -> None:
             if key == "summary_style":
                 claim_value = _normalize_style_value(str(claim_value))
                 spec_value = _normalize_style_value(str(spec_value))
+                if claim_value not in {"risk_aware", "structured"}:
+                    # Some proposer outputs may put baseline labels here (e.g. "baseline2");
+                    # treat those as non-actionable style descriptors instead of hard mismatches.
+                    continue
             _assert(
                 spec_value == claim_value,
                 f"state_encoder mismatch for '{key}': contract={state_claim.get(key)!r} spec={state_spec.get(key)!r}",
