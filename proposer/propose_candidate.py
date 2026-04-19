@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Set
 
 from controller.harness_sandbox import load_harness_sandbox_profile
-from controller.harness_protocol import EVALUATION_PROTOCOL_SEQUENCE, EVALUATION_PROTOCOL_VERSION, TOTAL_EVAL_RUNS
+from controller.harness_protocol import EVALUATION_PROTOCOLS, get_evaluation_protocol
 from proposer.agent_tools import ProposerToolbox
 from proposer.archive_reader import summarize_archive_for_proposer
 from proposer.consistency import validate_candidate_contract_alignment
@@ -1021,12 +1021,27 @@ def rebuild_index(archive_root: Path) -> Dict:
         if not base.exists():
             continue
         for harness_dir in sorted([p for p in base.iterdir() if p.is_dir()]):
-            eval_path = harness_dir / "eval_summary.json"
-            per_scene_path = harness_dir / "per_scene_metrics.json"
-            if not eval_path.exists():
+            kind = "baseline" if bucket == "baselines" else "candidate"
+            stage_summaries: Dict[str, Dict] = {}
+            stage_scene_paths: Dict[str, str | None] = {}
+            for stage in EVALUATION_PROTOCOLS.keys():
+                stage_eval_path = harness_dir / f"eval_summary_{stage}.json"
+                stage_scene_path = harness_dir / f"per_scene_metrics_{stage}.json"
+                if stage_eval_path.exists():
+                    stage_summaries[stage] = _load_json(stage_eval_path)
+                    stage_scene_paths[stage] = str(stage_scene_path.as_posix()) if stage_scene_path.exists() else None
+            # Backward compatibility for older formal-only archives.
+            legacy_eval_path = harness_dir / "eval_summary.json"
+            legacy_scene_path = harness_dir / "per_scene_metrics.json"
+            if "formal" not in stage_summaries and legacy_eval_path.exists():
+                stage_summaries["formal"] = _load_json(legacy_eval_path)
+                stage_scene_paths["formal"] = str(legacy_scene_path.as_posix()) if legacy_scene_path.exists() else None
+            if not stage_summaries:
                 continue
-            eval_summary = _load_json(eval_path)
-            per_scene = _load_json(per_scene_path) if per_scene_path.exists() else {}
+            eval_summary = stage_summaries.get("formal") or stage_summaries.get("screening") or next(iter(stage_summaries.values()))
+            active_stage = "formal" if "formal" in stage_summaries else "screening"
+            active_scene_path = stage_scene_paths.get(active_stage)
+            per_scene = _load_json(Path(active_scene_path)) if active_scene_path else {}
             run_dirs = sorted([p for p in (harness_dir / "runs").glob("run_*")]) if (harness_dir / "runs").exists() else []
 
             parent_id = eval_summary.get("parent_id")
@@ -1046,19 +1061,32 @@ def rebuild_index(archive_root: Path) -> Dict:
                         pass
             if (not parent_kind) and parent_id:
                 parent_kind = "baseline" if str(parent_id).startswith("baseline") else "candidate"
+            evaluation_protocol = dict(eval_summary.get("evaluation_protocol") or get_evaluation_protocol(kind=kind, requested_mode=active_stage))
             entries.append(
                 {
                     "candidate_id": str(eval_summary.get("harness_id") or harness_dir.name),
-                    "kind": "baseline" if bucket == "baselines" else "candidate",
+                    "kind": kind,
                     "parent_id": parent_id,
                     "parent_kind": parent_kind,
                     "derived_from": derived_from,
                     "path": str(harness_dir.as_posix()),
                     "total_runs": int(eval_summary.get("total_runs") or len(run_dirs)),
+                    "total_runs_expected": int(eval_summary.get("total_runs_expected") or evaluation_protocol.get("total_runs") or 0),
+                    "total_runs_completed": int(eval_summary.get("total_runs_completed") or eval_summary.get("total_runs") or len(run_dirs)),
                     "metrics": dict(eval_summary.get("metrics") or {}),
                     "status": str(eval_summary.get("status") or "unknown"),
-                    "per_scene_metrics_path": str(per_scene_path.as_posix()) if per_scene_path.exists() else None,
-                    "eval_summary_path": str(eval_path.as_posix()),
+                    "evaluation_stage": active_stage,
+                    "promoted_to_formal": bool("formal" in stage_summaries and "screening" in stage_summaries),
+                    "evaluation_protocol": evaluation_protocol,
+                    "stage_summaries": {
+                        stage: {
+                            "eval_summary_path": str((harness_dir / f"eval_summary_{stage}.json").as_posix()) if (harness_dir / f"eval_summary_{stage}.json").exists() else None,
+                            "per_scene_metrics_path": stage_scene_paths.get(stage),
+                        }
+                        for stage in sorted(stage_summaries.keys())
+                    },
+                    "per_scene_metrics_path": active_scene_path,
+                    "eval_summary_path": str((harness_dir / f"eval_summary_{active_stage}.json").as_posix()) if (harness_dir / f"eval_summary_{active_stage}.json").exists() else str((harness_dir / "eval_summary.json").as_posix()),
                     "per_scene_metrics": per_scene,
                     "trace_locations": {
                         "runs_dir": str((harness_dir / "runs").as_posix()),
@@ -1069,6 +1097,8 @@ def rebuild_index(archive_root: Path) -> Dict:
 
     pareto_ready = []
     for e in entries:
+        if str(e.get("evaluation_stage") or "") != "formal":
+            continue
         m = e.get("metrics") or {}
         if {"collision_count_avg", "near_miss_count_avg", "completion_time_mission_sec_avg", "llm_call_count_avg"}.issubset(m.keys()):
             pareto_ready.append(
@@ -1085,21 +1115,17 @@ def rebuild_index(archive_root: Path) -> Dict:
     for p in pareto_ready:
         p["metrics"]["completion_time_sec_avg"] = p["metrics"].pop("completion_time_mission_sec_avg")
 
-    pareto_map = {
-        e["candidate_id"]: e for e in mark_pareto(
-            [{"harness_id": x["candidate_id"], "metrics": x["metrics"]} for x in pareto_ready]
-        )
-    }
+    pareto_map = {}
+    for e in mark_pareto([{"harness_id": x["candidate_id"], "metrics": x["metrics"]} for x in pareto_ready]):
+        key = str(e.get("candidate_id") or e.get("harness_id") or "")
+        if key:
+            pareto_map[key] = e
     for e in entries:
         e["pareto_frontier"] = bool(pareto_map.get(e["candidate_id"], {}).get("pareto_frontier", False))
 
     index = {
         "archive_version": "proposer_archive_v2",
-        "evaluation_protocol": {
-            "version": EVALUATION_PROTOCOL_VERSION,
-            "pairs": EVALUATION_PROTOCOL_SEQUENCE,
-            "total_runs": TOTAL_EVAL_RUNS,
-        },
+        "evaluation_protocols": dict(EVALUATION_PROTOCOLS),
         "entries": entries,
     }
     index_path.parent.mkdir(parents=True, exist_ok=True)
