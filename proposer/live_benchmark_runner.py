@@ -92,8 +92,14 @@ class LiveBenchmarkRunner:
         planning_out = target / "planning_trace.jsonl"
         metadata_out = target / "metadata.json"
 
-        shutil.copy2(src_runtime, runtime_out)
-        shutil.copy2(src_planning, planning_out)
+        if src_runtime.exists():
+            shutil.copy2(src_runtime, runtime_out)
+        else:
+            runtime_out.write_text("", encoding="utf-8")
+        if src_planning.exists():
+            shutil.copy2(src_planning, planning_out)
+        else:
+            planning_out.write_text("", encoding="utf-8")
 
         run_summary = json.loads(src_summary.read_text(encoding="utf-8")) if src_summary.exists() else {}
         debug_payload = json.loads(src_debug.read_text(encoding="utf-8")) if src_debug.exists() else {}
