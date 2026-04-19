@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
@@ -22,6 +23,27 @@ def _read_text(path: Path) -> str:
 def _assert(condition: bool, message: str) -> None:
     if not condition:
         raise CandidateConsistencyError(message)
+
+
+def _canonicalize_field_name(value: str) -> str:
+    text = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower())
+    return re.sub(r"_+", "_", text).strip("_")
+
+
+def _field_expected_in_spec(expected: str, spec_fields: List[str]) -> bool:
+    expected_norm = _canonicalize_field_name(expected)
+    spec_norm = {_canonicalize_field_name(v) for v in spec_fields}
+    if expected_norm in spec_norm:
+        return True
+
+    expected_tokens = [t for t in expected_norm.split("_") if t]
+    if not expected_tokens:
+        return False
+    for candidate in spec_norm:
+        candidate_tokens = set([t for t in candidate.split("_") if t])
+        if set(expected_tokens).issubset(candidate_tokens):
+            return True
+    return False
 
 
 def _normalized_contract_files(contract: Dict) -> List[str]:
@@ -68,8 +90,12 @@ def _validate_contract_vs_spec(contract: Dict, spec: Dict) -> None:
                 f"state_encoder mismatch for '{key}': contract={state_claim.get(key)!r} spec={state_spec.get(key)!r}",
             )
     include_subset = list(state_claim.get("include_fields_contains") or [])
+    state_include_fields = list(state_spec.get("include_fields") or [])
     for item in include_subset:
-        _assert(item in list(state_spec.get("include_fields") or []), f"state_encoder.include_fields missing required field: {item}")
+        _assert(
+            _field_expected_in_spec(str(item), state_include_fields),
+            f"state_encoder.include_fields missing required field: {item}",
+        )
 
     prompt_claim = dict(impl.get("prompt_builder") or {})
     prompt_spec = dict(spec.get("prompt_builder") or {})

@@ -207,6 +207,25 @@ def test_validator_fails_when_declared_files_do_not_match_actual_changes(tmp_pat
         validate_candidate_contract_alignment(cand, parent_dir=parent)
 
 
+def test_validator_accepts_natural_language_include_field_alias(tmp_path):
+    parent = tmp_path / "baseline3"
+    cand = tmp_path / "candidate_9999"
+    _write_parent(parent)
+    _write_candidate(
+        cand,
+        files_to_modify=["spec.json", "trigger_policy.py", "proposer_note.txt"],
+    )
+
+    spec = json.loads((cand / "spec.json").read_text(encoding="utf-8"))
+    spec["proposal_contract"]["implementation_contract"]["state_encoder"]["include_fields_contains"] = [
+        "predicted collision probability"
+    ]
+    (cand / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # should pass due to canonicalized/tokenized include-field matching
+    validate_candidate_contract_alignment(cand, parent_dir=parent)
+
+
 def test_propose_flow_backfills_proposer_note_in_changed_files(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     baseline = repo / "harnesses" / "baseline3"
