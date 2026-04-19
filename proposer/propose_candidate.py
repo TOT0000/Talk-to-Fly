@@ -536,6 +536,10 @@ def propose_next_candidate(
         spec["runtime_metadata"]["proposer_tool_audit_path"] = "proposer_tool_audit.json"
         spec["runtime_metadata"]["proposer_tool_event_count"] = len(tools.audit_log)
         (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
+        (candidate_dir / "parent_diff.patch").write_text(
+            _build_parent_diff(parent_entry.dir_path, candidate_dir, changed_files),
+            encoding="utf-8",
+        )
 
         if not note:
             refreshed_note = _build_grounded_note(contract=spec["proposal_contract"], spec=spec, changed_files=changed_files)

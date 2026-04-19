@@ -102,6 +102,27 @@ def _validate_runtime_wiring(candidate_dir: Path, spec: Dict) -> None:
         _assert_importable(path)
 
 
+def _runtime_effect_modules_from_rules(candidate_dir: Path) -> Set[str]:
+    default = {"state_features.py", "trigger_logic.py", "prompt_composer.py", "state_encoder.py", "trigger_policy.py", "prompt_builder.py"}
+    rules_path = candidate_dir / "validator_rules.py"
+    if not rules_path.exists():
+        return default
+    try:
+        spec = importlib.util.spec_from_file_location("candidate_validator_rules", str(rules_path))
+        if spec is None or spec.loader is None:
+            return default
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        fn = getattr(mod, "runtime_effect_modules", None)
+        if callable(fn):
+            out = [Path(str(x)).name for x in list(fn() or [])]
+            if out:
+                return set(out)
+    except Exception:
+        return default
+    return default
+
+
 def validate_candidate_contract_alignment(
     candidate_dir: Path,
     *,
