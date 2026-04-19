@@ -23,6 +23,22 @@ Total runs per evaluated harness: **24**.
 - It uses the system prompt + iteration prompt + output contract in `proposer/prompts.py`.
 - It proposes exactly one candidate each invocation.
 - It keeps candidate edits bounded by `proposer/registry.py` allowed files.
+- It now enforces contract/spec/code consistency via `proposer/consistency.py` before a candidate is accepted.
+
+## Contract alignment guardrails (new)
+
+`propose_next_candidate()` now requires an executable proposal contract, not only narrative fields.
+
+- Contract must include `implementation_contract` (`trigger_policy`, `state_encoder`, `prompt_builder`) and explicit `invariants`.
+- `files_to_create_or_modify` must be non-empty and include `spec.json` + `proposer_note.txt`.
+- Generated candidate is validated by `validate_candidate_contract_alignment(...)`:
+  - contract claims vs `spec.json`,
+  - `spec.json` trigger policy vs `trigger_policy.py` behavior cues,
+  - `spec.json` state/prompt config vs `state_encoder.py` + `prompt_builder.py`,
+  - `proposer_note.txt` grounding to final hypothesis + implemented trigger type,
+  - declared file list vs actual parent→candidate changed files.
+
+If any check fails, proposer **fails fast** and removes the just-created candidate directory instead of silently accepting an inconsistent candidate.
 
 ## Live benchmark loop
 
