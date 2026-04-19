@@ -46,6 +46,17 @@ def _field_expected_in_spec(expected: str, spec_fields: List[str]) -> bool:
     return False
 
 
+def _normalize_style_value(value: str) -> str:
+    raw = _canonicalize_field_name(value)
+    aliases = {
+        "full": "risk_aware",
+        "detailed": "risk_aware",
+        "rich": "risk_aware",
+        "compact": "structured",
+    }
+    return aliases.get(raw, raw)
+
+
 def _normalized_contract_files(contract: Dict) -> List[str]:
     raw = list(contract.get("files_to_create_or_modify") or [])
     out: List[str] = []
@@ -85,8 +96,13 @@ def _validate_contract_vs_spec(contract: Dict, spec: Dict) -> None:
     state_spec = dict(spec.get("state_encoder") or {})
     for key in ["summary_style", "include_risk_related", "include_targets", "include_geometry_flags"]:
         if key in state_claim:
+            claim_value = state_claim.get(key)
+            spec_value = state_spec.get(key)
+            if key == "summary_style":
+                claim_value = _normalize_style_value(str(claim_value))
+                spec_value = _normalize_style_value(str(spec_value))
             _assert(
-                state_spec.get(key) == state_claim.get(key),
+                spec_value == claim_value,
                 f"state_encoder mismatch for '{key}': contract={state_claim.get(key)!r} spec={state_spec.get(key)!r}",
             )
     include_subset = list(state_claim.get("include_fields_contains") or [])

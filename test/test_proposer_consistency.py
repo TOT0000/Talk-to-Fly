@@ -220,6 +220,7 @@ def test_validator_accepts_natural_language_include_field_alias(tmp_path):
     spec["proposal_contract"]["implementation_contract"]["state_encoder"]["include_fields_contains"] = [
         "predicted collision probability"
     ]
+    spec["proposal_contract"]["implementation_contract"]["state_encoder"]["summary_style"] = "full"
     (cand / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # should pass due to canonicalized/tokenized include-field matching
