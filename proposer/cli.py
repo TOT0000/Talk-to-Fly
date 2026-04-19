@@ -4,14 +4,21 @@ import argparse
 import json
 from pathlib import Path
 
-from proposer.archive_reader import aggregate_by_harness, read_manual_runs
-from proposer.evaluate_candidate import evaluate_candidate_offline
 from proposer.propose_candidate import propose_next_candidate, rebuild_index
 from proposer.registry import HarnessRegistry
+from proposer.evaluate_candidate import evaluate_candidate_live
+from proposer.run_loop import run_once
 
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def _load_index() -> dict:
+    p = _repo_root() / "proposer_archive_v2/index.json"
+    if not p.exists():
+        return {"entries": []}
+    return json.loads(p.read_text(encoding="utf-8"))
 
 
 def cmd_list_baselines(_: argparse.Namespace) -> int:
@@ -28,14 +35,24 @@ def cmd_list_candidates(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_show_summary(args: argparse.Namespace) -> int:
+    idx = _load_index()
+    cid = args.candidate_id
+    for e in idx.get("entries", []):
+        if e.get("candidate_id") == cid:
+            print(json.dumps(e, ensure_ascii=False, indent=2))
+            return 0
+    raise SystemExit(f"Candidate not found in index: {cid}")
+
+
 def cmd_topk(args: argparse.Namespace) -> int:
-    data = aggregate_by_harness(read_manual_runs(_repo_root() / "proposer_archive/manual_runs/task_runs_debug.jsonl"))
+    idx = _load_index()
     metric = args.metric
     rows = []
-    for hid, v in data.items():
-        m = v.get("metrics", {})
-        if metric in m:
-            rows.append((hid, float(m[metric]), m))
+    for e in idx.get("entries", []):
+        m = dict(e.get("metrics") or {})
+        if metric in m and m[metric] is not None:
+            rows.append((e.get("candidate_id"), float(m[metric]), m))
     rows.sort(key=lambda x: x[1], reverse=args.desc)
     for hid, score, m in rows[: args.k]:
         print(f"{hid}\t{metric}={score:.4f}\t{json.dumps(m, ensure_ascii=False)}")
@@ -58,11 +75,10 @@ def cmd_propose(args: argparse.Namespace) -> int:
 
 def cmd_evaluate(args: argparse.Namespace) -> int:
     repo = _repo_root()
-    out = evaluate_candidate_offline(
+    out = evaluate_candidate_live(
         repo_root=repo,
         harness_id=args.harness_id,
         archive_root=repo / "proposer_archive_v2",
-        manual_debug_jsonl=repo / "proposer_archive/manual_runs/task_runs_debug.jsonl",
     )
     print(json.dumps({"eval_summary": out.eval_summary, "per_scene_metrics": out.per_scene_metrics}, ensure_ascii=False, indent=2))
     return 0
@@ -71,6 +87,12 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
 def cmd_reindex(_: argparse.Namespace) -> int:
     index = rebuild_index(_repo_root() / "proposer_archive_v2")
     print(f"index_entries={len(index.get('entries', []))}")
+    return 0
+
+
+def cmd_run_iteration(args: argparse.Namespace) -> int:
+    cid = run_once(_repo_root(), evaluate_baselines=bool(args.evaluate_baselines))
+    print(cid)
     return 0
 
 
@@ -84,8 +106,12 @@ def build_parser() -> argparse.ArgumentParser:
     s = sp.add_parser("list-candidates")
     s.set_defaults(func=cmd_list_candidates)
 
+    s = sp.add_parser("show-candidate-summary")
+    s.add_argument("candidate_id")
+    s.set_defaults(func=cmd_show_summary)
+
     s = sp.add_parser("top-k")
-    s.add_argument("--metric", default="mission_success_rate")
+    s.add_argument("--metric", default="success_rate")
     s.add_argument("-k", type=int, default=3)
     s.add_argument("--desc", action="store_true")
     s.set_defaults(func=cmd_topk)
@@ -105,6 +131,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sp.add_parser("reindex")
     s.set_defaults(func=cmd_reindex)
+
+    s = sp.add_parser("run-iteration")
+    s.add_argument("--evaluate-baselines", action="store_true")
+    s.set_defaults(func=cmd_run_iteration)
 
     return p
 

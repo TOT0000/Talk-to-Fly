@@ -57,5 +57,10 @@
   "parent": "baseline3",
   "mutation": {
     "type": "heuristic_threshold_and_prompt_order"
+  },
+  "lineage": {
+    "parent_id": "baseline3",
+    "parent_kind": "baseline",
+    "derived_from": "baseline3"
   }
 }

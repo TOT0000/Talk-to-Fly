@@ -5,6 +5,7 @@ import shutil
 from pathlib import Path
 from typing import Dict, List
 
+from controller.harness_protocol import EVALUATION_PROTOCOL_SEQUENCE, EVALUATION_PROTOCOL_VERSION, TOTAL_EVAL_RUNS
 from proposer.evaluate_candidate import mark_pareto
 from proposer.registry import HarnessRegistry, validate_candidate_boundary
 
@@ -30,8 +31,6 @@ def propose_next_candidate(repo_root: Path, note: str = "") -> Path:
     if not baselines:
         raise RuntimeError("No baselines found in harnesses/")
 
-    # MVP heuristic: start from the strongest prior baseline by ID order (baseline3 first),
-    # then make a targeted trigger+prompt edit while keeping mutation boundary strict.
     parent = sorted(baselines, key=lambda x: x.harness_id, reverse=True)[0]
     parent_spec = dict(parent.spec)
 
@@ -49,6 +48,11 @@ def propose_next_candidate(repo_root: Path, note: str = "") -> Path:
     parent_spec["id"] = candidate_id
     parent_spec["kind"] = "candidate"
     parent_spec["parent"] = parent.harness_id
+    parent_spec["lineage"] = {
+        "parent_id": parent.harness_id,
+        "parent_kind": "baseline" if parent.harness_id.startswith("baseline") else "candidate",
+        "derived_from": parent.harness_id,
+    }
     parent_spec.setdefault("mutation", {})
     parent_spec["mutation"]["type"] = "heuristic_threshold_and_prompt_order"
     parent_spec["trigger_policy"]["type"] = "hybrid"
@@ -94,32 +98,79 @@ def rebuild_index(archive_root: Path) -> Dict:
                 continue
             eval_summary = _load_json(eval_path)
             per_scene = _load_json(per_scene_path) if per_scene_path.exists() else {}
+            run_dirs = sorted([p for p in (harness_dir / "runs").glob("run_*")]) if (harness_dir / "runs").exists() else []
+
+            parent_id = eval_summary.get("parent_id")
+            parent_kind = eval_summary.get("parent_kind")
+            derived_from = eval_summary.get("derived_from")
+            if (not parent_id):
+                spec_path = harness_dir / "code_or_spec" / "spec.json"
+                if spec_path.exists():
+                    try:
+                        spec_payload = _load_json(spec_path)
+                        parent_id = spec_payload.get("parent") or ((spec_payload.get("lineage") or {}).get("parent_id"))
+                        parent_kind = (spec_payload.get("lineage") or {}).get("parent_kind")
+                        if (not parent_kind) and parent_id:
+                            parent_kind = "baseline" if str(parent_id).startswith("baseline") else "candidate"
+                        derived_from = (spec_payload.get("lineage") or {}).get("derived_from") or parent_id
+                    except Exception:
+                        pass
+            if (not parent_kind) and parent_id:
+                parent_kind = "baseline" if str(parent_id).startswith("baseline") else "candidate"
             entries.append(
                 {
-                    "harness_id": str(eval_summary.get("harness_id") or harness_dir.name),
+                    "candidate_id": str(eval_summary.get("harness_id") or harness_dir.name),
                     "kind": "baseline" if bucket == "baselines" else "candidate",
+                    "parent_id": parent_id,
+                    "parent_kind": parent_kind,
+                    "derived_from": derived_from,
                     "path": str(harness_dir.as_posix()),
+                    "total_runs": int(eval_summary.get("total_runs") or len(run_dirs)),
                     "metrics": dict(eval_summary.get("metrics") or {}),
                     "status": str(eval_summary.get("status") or "unknown"),
+                    "per_scene_metrics_path": str(per_scene_path.as_posix()) if per_scene_path.exists() else None,
+                    "eval_summary_path": str(eval_path.as_posix()),
                     "per_scene_metrics": per_scene,
-                    "trace_dir": str((harness_dir / "traces").as_posix()),
+                    "trace_locations": {
+                        "runs_dir": str((harness_dir / "runs").as_posix()),
+                        "run_count": len(run_dirs),
+                    },
                 }
             )
 
-    pareto_ready = [e for e in entries if e.get("metrics")]
-    pareto_map = {e["harness_id"]: e for e in mark_pareto(pareto_ready)}
+    pareto_ready = []
     for e in entries:
-        e["pareto_frontier"] = bool(pareto_map.get(e["harness_id"], {}).get("pareto_frontier", False))
+        m = e.get("metrics") or {}
+        if {"collision_count_avg", "near_miss_count_avg", "completion_time_mission_sec_avg", "llm_call_count_avg"}.issubset(m.keys()):
+            pareto_ready.append(
+                {
+                    "candidate_id": e["candidate_id"],
+                    "metrics": {
+                        "collision_count_avg": m["collision_count_avg"],
+                        "near_miss_count_avg": m["near_miss_count_avg"],
+                        "completion_time_mission_sec_avg": m["completion_time_mission_sec_avg"],
+                        "llm_call_count_avg": m["llm_call_count_avg"],
+                    },
+                }
+            )
+    # adapt to evaluator's key name for pareto function
+    for p in pareto_ready:
+        p["metrics"]["completion_time_sec_avg"] = p["metrics"].pop("completion_time_mission_sec_avg")
+
+    pareto_map = {
+        e["candidate_id"]: e for e in mark_pareto(
+            [{"harness_id": x["candidate_id"], "metrics": x["metrics"]} for x in pareto_ready]
+        )
+    }
+    for e in entries:
+        e["pareto_frontier"] = bool(pareto_map.get(e["candidate_id"], {}).get("pareto_frontier", False))
 
     index = {
         "archive_version": "proposer_archive_v2",
         "evaluation_protocol": {
-            "version": "uav_search_v1",
-            "scene_to_task_zone": {
-                "SCENE1": "zoneA",
-                "SCENE2": "zoneB",
-                "SCENE3": "zoneC",
-            },
+            "version": EVALUATION_PROTOCOL_VERSION,
+            "pairs": EVALUATION_PROTOCOL_SEQUENCE,
+            "total_runs": TOTAL_EVAL_RUNS,
         },
         "entries": entries,
     }

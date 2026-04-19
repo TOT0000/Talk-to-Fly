@@ -1,18 +1,35 @@
 {
   "archive_version": "proposer_archive_v2",
   "evaluation_protocol": {
-    "version": "uav_search_v1",
-    "scene_to_task_zone": {
-      "SCENE1": "zoneA",
-      "SCENE2": "zoneB",
-      "SCENE3": "zoneC"
-    }
+    "version": "uav_search_v2_live24",
+    "pairs": [
+      {
+        "scene_id": "SCENE1",
+        "task_zone": "zoneA",
+        "runs": 8
+      },
+      {
+        "scene_id": "SCENE2",
+        "task_zone": "zoneB",
+        "runs": 8
+      },
+      {
+        "scene_id": "SCENE3",
+        "task_zone": "zoneC",
+        "runs": 8
+      }
+    ],
+    "total_runs": 24
   },
   "entries": [
     {
-      "harness_id": "baseline1",
+      "candidate_id": "baseline1",
       "kind": "baseline",
+      "parent_id": null,
+      "parent_kind": null,
+      "derived_from": null,
       "path": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline1",
+      "total_runs": 24,
       "metrics": {
         "mission_success_rate": 1.0,
         "collision_count_avg": 1.9583333333333333,
@@ -22,6 +39,8 @@
         "replan_count_avg": 0.041666666666666664
       },
       "status": "evaluated_from_archive",
+      "per_scene_metrics_path": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline1/per_scene_metrics.json",
+      "eval_summary_path": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline1/eval_summary.json",
       "per_scene_metrics": {
         "SCENE1": {
           "task_zone": "zoneA",
@@ -54,13 +73,20 @@
           "replan_count_avg": 0.125
         }
       },
-      "trace_dir": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline1/traces",
-      "pareto_frontier": true
+      "trace_locations": {
+        "runs_dir": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline1/runs",
+        "run_count": 0
+      },
+      "pareto_frontier": false
     },
     {
-      "harness_id": "baseline2",
+      "candidate_id": "baseline2",
       "kind": "baseline",
+      "parent_id": null,
+      "parent_kind": null,
+      "derived_from": null,
       "path": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline2",
+      "total_runs": 24,
       "metrics": {
         "mission_success_rate": 1.0,
         "collision_count_avg": 2.3333333333333335,
@@ -70,6 +96,8 @@
         "replan_count_avg": 3.7916666666666665
       },
       "status": "evaluated_from_archive",
+      "per_scene_metrics_path": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline2/per_scene_metrics.json",
+      "eval_summary_path": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline2/eval_summary.json",
       "per_scene_metrics": {
         "SCENE1": {
           "task_zone": "zoneA",
@@ -102,13 +130,20 @@
           "replan_count_avg": 6.25
         }
       },
-      "trace_dir": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline2/traces",
+      "trace_locations": {
+        "runs_dir": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline2/runs",
+        "run_count": 0
+      },
       "pareto_frontier": false
     },
     {
-      "harness_id": "baseline3",
+      "candidate_id": "baseline3",
       "kind": "baseline",
+      "parent_id": null,
+      "parent_kind": null,
+      "derived_from": null,
       "path": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline3",
+      "total_runs": 24,
       "metrics": {
         "mission_success_rate": 0.9583333333333334,
         "collision_count_avg": 2.2083333333333335,
@@ -118,6 +153,8 @@
         "replan_count_avg": 5.833333333333333
       },
       "status": "evaluated_from_archive",
+      "per_scene_metrics_path": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline3/per_scene_metrics.json",
+      "eval_summary_path": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline3/eval_summary.json",
       "per_scene_metrics": {
         "SCENE1": {
           "task_zone": "zoneA",
@@ -150,17 +187,29 @@
           "replan_count_avg": 7.375
         }
       },
-      "trace_dir": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline3/traces",
-      "pareto_frontier": true
+      "trace_locations": {
+        "runs_dir": "/workspace/Talk-to-Fly/proposer_archive_v2/baselines/baseline3/runs",
+        "run_count": 0
+      },
+      "pareto_frontier": false
     },
     {
-      "harness_id": "candidate_0001",
+      "candidate_id": "candidate_0001",
       "kind": "candidate",
+      "parent_id": "baseline3",
+      "parent_kind": "baseline",
+      "derived_from": "baseline3",
       "path": "/workspace/Talk-to-Fly/proposer_archive_v2/candidates/candidate_0001",
+      "total_runs": 0,
       "metrics": {},
       "status": "pending_execution",
+      "per_scene_metrics_path": "/workspace/Talk-to-Fly/proposer_archive_v2/candidates/candidate_0001/per_scene_metrics.json",
+      "eval_summary_path": "/workspace/Talk-to-Fly/proposer_archive_v2/candidates/candidate_0001/eval_summary.json",
       "per_scene_metrics": {},
-      "trace_dir": "/workspace/Talk-to-Fly/proposer_archive_v2/candidates/candidate_0001/traces",
+      "trace_locations": {
+        "runs_dir": "/workspace/Talk-to-Fly/proposer_archive_v2/candidates/candidate_0001/runs",
+        "run_count": 0
+      },
       "pareto_frontier": false
     }
   ]

@@ -21,16 +21,24 @@ class PipelineConfig:
     replan_cap: int
     archive_enabled_default: Optional[bool] = None
     harness_spec_path: Optional[str] = None
+    kind: str = "baseline"
+    parent_id: Optional[str] = None
 
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _iter_harness_specs(root: Path):
+    for spec_path in sorted((root / "harnesses").glob("baseline*/spec.json")):
+        yield spec_path
+    for spec_path in sorted((root / "harnesses/candidates").glob("candidate_*/spec.json")):
+        yield spec_path
+
+
 def _load_pipeline_registry_from_harness_specs() -> Dict[str, PipelineConfig]:
     registry: Dict[str, PipelineConfig] = {}
-    harness_root = _repo_root() / "harnesses"
-    for spec_path in sorted(harness_root.glob("baseline*/spec.json")):
+    for spec_path in _iter_harness_specs(_repo_root()):
         spec = json.loads(spec_path.read_text(encoding="utf-8"))
         runtime = dict(spec.get("runtime") or {})
         trigger = dict(spec.get("trigger_policy") or {})
@@ -49,6 +57,8 @@ def _load_pipeline_registry_from_harness_specs() -> Dict[str, PipelineConfig]:
             replan_cap=int(runtime.get("replan_cap", 8)),
             archive_enabled_default=True,
             harness_spec_path=str(spec_path),
+            kind=str(spec.get("kind") or ("candidate" if "candidate_" in str(spec.get("id")) else "baseline")),
+            parent_id=spec.get("parent"),
         )
         registry[pipeline.id] = pipeline
     return registry
