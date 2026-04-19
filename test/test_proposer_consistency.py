@@ -301,6 +301,7 @@ def test_propose_flow_backfills_proposer_note_in_changed_files(tmp_path, monkeyp
                     "expected_runtime_effect": "more responsive replan trigger",
                     "sandbox_modules_to_modify": ["trigger_logic.py", "state_features.py", "prompt_composer.py"],
                     "files_to_create_or_modify": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
+                    "changed_files": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
                     "proposer_note_text": "placeholder",
                     "implementation_contract": {
                         "trigger_policy": {"type": "event_predicted_collision_probability", "threshold": 0.45},
@@ -323,6 +324,14 @@ def test_propose_flow_backfills_proposer_note_in_changed_files(tmp_path, monkeyp
     spec = json.loads((created / "spec.json").read_text(encoding="utf-8"))
     assert "proposer_note.txt" in spec["proposal_contract"]["files_to_create_or_modify"]
     assert seen_models[0] == "gpt-4.1"
+    assert "trigger_logic.py" in spec["runtime_metadata"]["changed_files"]
+    assert (created / "parent_diff.patch").exists()
+    assert spec["manifest"]["active_sandbox_modules"][:3] == [
+        "state_features.py",
+        "trigger_logic.py",
+        "prompt_composer.py",
+    ]
+    assert "prompt_builder.paragraph_order" in spec["sandbox"]["deprecated_options"]
 
 
 def test_proposer_requires_openai_key_for_gpt_models(tmp_path, monkeypatch):

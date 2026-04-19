@@ -5,15 +5,19 @@ import os
 import py_compile
 import re
 import shutil
+import subprocess
+from datetime import datetime, timezone
+from difflib import unified_diff
 from pathlib import Path
 from typing import Dict, List, Set
 
 from controller.harness_protocol import EVALUATION_PROTOCOL_SEQUENCE, EVALUATION_PROTOCOL_VERSION, TOTAL_EVAL_RUNS
+from proposer.agent_tools import ProposerToolbox
 from proposer.archive_reader import summarize_archive_for_proposer
 from proposer.consistency import validate_candidate_contract_alignment
 from proposer.evaluate_candidate import mark_pareto
 from proposer.prompts import OUTPUT_CONTRACT, build_iteration_prompt
-from proposer.registry import ALLOWED_MUTATION_FILES, HarnessRegistry, validate_candidate_boundary
+from proposer.registry import ALLOWED_MUTATION_FILES, TRACKED_CONTRACT_FILES, HarnessRegistry, validate_candidate_boundary
 
 
 def _next_candidate_id(candidates_dir: Path) -> str:
@@ -69,6 +73,7 @@ def _prepare_proposal_contract(proposal: Dict) -> Dict:
         "implementation_contract",
         "invariants",
         "sandbox_modules_to_modify",
+        "changed_files",
     ]
     for key in required_keys:
         if key not in proposal:
@@ -98,12 +103,37 @@ def _prepare_proposal_contract(proposal: Dict) -> Dict:
     normalized["implementation_contract"] = implementation_contract
     normalized["invariants"] = invariants
     normalized["sandbox_modules_to_modify"] = [Path(str(v)).name for v in list(proposal.get("sandbox_modules_to_modify") or [])]
+    normalized["changed_files"] = [Path(str(v)).name for v in list(proposal.get("changed_files") or [])]
     return normalized
+
+
+def _git_parent_commit(repo_root: Path) -> str:
+    try:
+        out = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=str(repo_root), text=True).strip()
+        return out
+    except Exception:
+        return ""
+
+
+def _build_parent_diff(parent_dir: Path, candidate_dir: Path, changed_files: Set[str]) -> str:
+    chunks: List[str] = []
+    for name in sorted(changed_files):
+        left = (parent_dir / name).read_text(encoding="utf-8").splitlines(keepends=True) if (parent_dir / name).exists() else []
+        right = (candidate_dir / name).read_text(encoding="utf-8").splitlines(keepends=True) if (candidate_dir / name).exists() else []
+        chunks.extend(
+            unified_diff(
+                left,
+                right,
+                fromfile=f"parent/{name}",
+                tofile=f"candidate/{name}",
+            )
+        )
+    return "".join(chunks)
 
 
 def _detect_changed_files(candidate_dir: Path, parent_dir: Path) -> Set[str]:
     changed: Set[str] = set()
-    for name in ALLOWED_MUTATION_FILES:
+    for name in TRACKED_CONTRACT_FILES:
         cp = candidate_dir / name
         pp = parent_dir / name
         if cp.exists() and not pp.exists():
@@ -229,6 +259,12 @@ def propose_next_candidate(
         raise RuntimeError("No baselines found in harnesses/")
 
     archive_summary = summarize_archive_for_proposer(repo_root, repo_root / "proposer_archive_v2")
+    tools = ProposerToolbox(repo_root=repo_root, archive_root=repo_root / "proposer_archive_v2")
+    harness_options = tools.list_harnesses(kind="all")
+    tool_plan = {
+        "selected_harnesses": [x["harness_id"] for x in harness_options[:3]],
+        "trace_query": "collision OR near_miss OR replan",
+    }
     prompt = build_iteration_prompt(
         baseline_list=json.dumps(archive_summary.get("baseline_list", []), ensure_ascii=False),
         candidate_list=json.dumps(archive_summary.get("candidate_list", []), ensure_ascii=False),
@@ -239,6 +275,22 @@ def propose_next_candidate(
             {
                 "entries": archive_summary.get("entries", []),
                 "trace_snippets": archive_summary.get("trace_snippets", []),
+                "tool_discovery": {
+                    "available_tools": [
+                        "list_harnesses",
+                        "read_harness_spec",
+                        "read_harness_code",
+                        "diff_harnesses",
+                        "list_runs",
+                        "read_run_metadata",
+                        "search_traces",
+                        "read_trace_snippet",
+                        "validate_candidate",
+                        "smoke_check_candidate",
+                    ],
+                    "harnesses": harness_options,
+                    "default_plan": tool_plan,
+                },
                 "output_contract": OUTPUT_CONTRACT,
             },
             ensure_ascii=False,
@@ -271,6 +323,7 @@ def propose_next_candidate(
             "files_to_create_or_modify": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
             "proposer_note_text": "Fallback proposal generated because LLM proposer call failed.",
             "sandbox_modules_to_modify": ["state_features.py"],
+            "changed_files": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
             "implementation_contract": {
                 "trigger_policy": {},
                 "state_encoder": {},
@@ -378,6 +431,22 @@ def propose_next_candidate(
             "deprecated_options": {
                 "prompt_builder.paragraph_order": "deprecated_runtime_no_effect",
                 "prompt_builder.stages": "deprecated_runtime_no_effect",
+                "state_encoder.summary_style": "deprecated_metadata_only",
+            },
+        }
+        spec.setdefault("manifest", {})
+        spec["manifest"] = {
+            "lineage": dict(spec.get("lineage") or {}),
+            "active_sandbox_modules": [
+                "state_features.py",
+                "trigger_logic.py",
+                "prompt_composer.py",
+                "archive_selector.py",
+                "validator_rules.py",
+            ],
+            "evidence_pointers": {
+                "archive_index": "proposer_archive_v2/index.json",
+                "trace_snippet_count": len(archive_summary.get("trace_snippets", [])),
             },
         }
         spec["proposal_contract"] = {
@@ -388,6 +457,7 @@ def propose_next_candidate(
             "expected_runtime_effect": str(proposal.get("expected_runtime_effect") or ""),
             "sandbox_modules_to_modify": list(proposal.get("sandbox_modules_to_modify") or []),
             "files_to_create_or_modify": normalized_target_files,
+            "changed_files": list(proposal.get("changed_files") or []),
             "implementation_contract": dict(proposal.get("implementation_contract") or {}),
             "invariants": list(proposal.get("invariants") or []),
         }
@@ -403,7 +473,20 @@ def propose_next_candidate(
         changed_files = _detect_changed_files(candidate_dir, parent_entry.dir_path)
         spec = _load_json(candidate_dir / "spec.json")
         spec["proposal_contract"]["files_to_create_or_modify"] = sorted(changed_files)
+        parent_commit = _git_parent_commit(repo_root)
+        spec["runtime_metadata"] = {
+            "parent_harness": parent_id,
+            "parent_commit": parent_commit,
+            "candidate_created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "changed_files": sorted(changed_files),
+            "diff_path": "parent_diff.patch",
+            "candidate_branch_hint": f"candidate/{candidate_id}",
+        }
         (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
+        (candidate_dir / "parent_diff.patch").write_text(
+            _build_parent_diff(parent_entry.dir_path, candidate_dir, changed_files),
+            encoding="utf-8",
+        )
 
         if not note:
             refreshed_note = _build_grounded_note(contract=spec["proposal_contract"], spec=spec, changed_files=changed_files)

@@ -188,9 +188,10 @@ OUTPUT_CONTRACT = """You must output exactly the following items:
 6. expected_runtime_effect
 7. sandbox_modules_to_modify
 8. files_to_create_or_modify
-9. proposer_note_text
-10. implementation_contract
-11. invariants
+9. changed_files
+10. proposer_note_text
+11. implementation_contract
+12. invariants
 
 `implementation_contract` must be a JSON object with these nested keys:
 - trigger_policy: exact spec fields to enforce (type/heartbeat_seconds/threshold/strictly_greater/consecutive_high_risk/hysteresis)
@@ -204,6 +205,7 @@ OUTPUT_CONTRACT = """You must output exactly the following items:
 - archive_selector.py
 - validator_rules.py
 `files_to_create_or_modify` must be non-empty and must include `spec.json`, `proposer_note.txt`, and at least one sandbox module `.py`.
+`changed_files` must describe the expected parent->candidate changed file set for diff-safety.
 `invariants` must list concrete alignment checks that should hold across contract/spec/code.
 The proposed edit must remain within the allowed harness boundary.
 Do not modify unrelated repository files.
@@ -223,5 +225,5 @@ def build_iteration_prompt(*, baseline_list: str, candidate_list: str, pareto_li
         f"{task_prompt}\n\n"
         f"Archive evidence (JSON / snippets):\n{archive_evidence}\n\n"
         f"{OUTPUT_CONTRACT}\n\n"
-        "Return JSON object only with the 11 required keys."
+        "Return JSON object only with the 12 required keys."
     )

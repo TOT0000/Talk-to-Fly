@@ -24,7 +24,7 @@ Total runs per evaluated harness: **24**.
 
 `proposer/propose_candidate.py` now drives proposal creation with LLM calls via `controller.llm_wrapper.LLMWrapper`.
 
-- It reads archive/index + representative trace snippets.
+- It uses controlled coding-agent tools (`proposer/agent_tools.py`) to list/read/diff harnesses and inspect runs/traces.
 - It uses the system prompt + iteration prompt + output contract in `proposer/prompts.py`.
 - It proposes exactly one candidate each invocation.
 - It keeps candidate edits bounded by `proposer/registry.py` allowed files.
@@ -38,7 +38,20 @@ Total runs per evaluated harness: **24**.
 - `trigger_logic.py`: optional runtime trigger decision hook used by heartbeat/threshold replan checks.
 - `prompt_composer.py`: composes additional prompt context appended to planner task text at runtime.
 - `archive_selector.py`: controls which archive entries/trace snippets are fed to proposer summary (latest harness selector).
-- `validator_rules.py`: reserved rules module for sandbox validation policy extensions.
+- `validator_rules.py`: validator extension hook (`runtime_effect_modules()`) used by consistency checks.
+
+## Editable options audit (kept / deprecated / rewired)
+
+- **Kept (runtime-effect):**
+  - `state_features.py`, `trigger_logic.py`, `prompt_composer.py`
+  - (compatibility legacy names) `state_encoder.py`, `trigger_policy.py`, `prompt_builder.py`
+- **Deprecated (metadata-only / fake options):**
+  - `prompt_builder.paragraph_order`
+  - `prompt_builder.stages`
+  - `state_encoder.summary_style` (kept for compatibility metadata, not trusted as runtime-effect signal)
+- **Rewired to runtime checks:**
+  - Runtime-effect detection now verifies actual changed modules and can be extended by `validator_rules.runtime_effect_modules()`.
+  - Candidate contract must include expected `changed_files`, and final accepted spec stores actual changed files + diff metadata.
 
 ## Contract alignment guardrails (new)
 
@@ -54,6 +67,17 @@ Total runs per evaluated harness: **24**.
   - declared file list vs actual parent→candidate changed files.
 
 If any check fails, proposer **fails fast** and removes the just-created candidate directory instead of silently accepting an inconsistent candidate.
+
+## Diff-safe / branch-safe / test-safe metadata
+
+Accepted candidates now persist the following in `spec.json`:
+- `manifest` (active sandbox modules + evidence pointers)
+- `runtime_metadata.parent_commit`
+- `runtime_metadata.changed_files`
+- `runtime_metadata.candidate_branch_hint`
+- `runtime_metadata.diff_path`
+
+And each accepted candidate writes `parent_diff.patch` in candidate directory for rollback/review without auto-push or auto-merge.
 
 ## Live benchmark loop
 

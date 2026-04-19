@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-from proposer.registry import ALLOWED_MUTATION_FILES
+from proposer.registry import ALLOWED_MUTATION_FILES, TRACKED_CONTRACT_FILES
 
 
 class CandidateConsistencyError(ValueError):
@@ -81,7 +82,7 @@ def _normalized_contract_files(contract: Dict) -> List[str]:
 
 def _detect_changed_files(candidate_dir: Path, parent_dir: Path) -> Set[str]:
     changed: Set[str] = set()
-    for name in ALLOWED_MUTATION_FILES:
+    for name in TRACKED_CONTRACT_FILES:
         cp = candidate_dir / name
         pp = parent_dir / name
         if cp.exists() and not pp.exists():
@@ -186,6 +187,27 @@ def _validate_note_grounding(note_text: str, contract: Dict, spec: Dict) -> None
         _assert(trigger_type in note_text, "proposer_note.txt must mention the implemented trigger_policy.type")
 
 
+def _runtime_effect_modules_from_rules(candidate_dir: Path) -> Set[str]:
+    default = {"state_features.py", "trigger_logic.py", "prompt_composer.py", "state_encoder.py", "trigger_policy.py", "prompt_builder.py"}
+    rules_path = candidate_dir / "validator_rules.py"
+    if not rules_path.exists():
+        return default
+    try:
+        spec = importlib.util.spec_from_file_location("candidate_validator_rules", str(rules_path))
+        if spec is None or spec.loader is None:
+            return default
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        fn = getattr(mod, "runtime_effect_modules", None)
+        if callable(fn):
+            out = [Path(str(x)).name for x in list(fn() or [])]
+            if out:
+                return set(out)
+    except Exception:
+        return default
+    return default
+
+
 def validate_candidate_contract_alignment(
     candidate_dir: Path,
     *,
@@ -209,15 +231,7 @@ def validate_candidate_contract_alignment(
         changed_files = _detect_changed_files(candidate_dir, Path(parent_dir))
         _assert(changed_files, "candidate must differ from parent in at least one allowed file")
         _assert(set(declared_files) == changed_files, f"files_to_create_or_modify mismatch: declared={sorted(declared_files)} actual={sorted(changed_files)}")
-        runtime_effect_modules = {
-            "state_features.py",
-            "trigger_logic.py",
-            "prompt_composer.py",
-            # legacy runtime-effect module names (kept for compatibility)
-            "state_encoder.py",
-            "trigger_policy.py",
-            "prompt_builder.py",
-        }
+        runtime_effect_modules = _runtime_effect_modules_from_rules(candidate_dir)
         _assert(
             bool(runtime_effect_modules.intersection(changed_files)),
             "candidate must modify at least one runtime-effect sandbox module",
