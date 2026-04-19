@@ -11,12 +11,13 @@ from difflib import unified_diff
 from pathlib import Path
 from typing import Dict, List, Set
 
+from controller.harness_sandbox import load_harness_sandbox_profile
 from controller.harness_protocol import EVALUATION_PROTOCOL_SEQUENCE, EVALUATION_PROTOCOL_VERSION, TOTAL_EVAL_RUNS
 from proposer.agent_tools import ProposerToolbox
 from proposer.archive_reader import summarize_archive_for_proposer
 from proposer.consistency import validate_candidate_contract_alignment
 from proposer.evaluate_candidate import mark_pareto
-from proposer.prompts import OUTPUT_CONTRACT, build_iteration_prompt, build_self_review_prompt
+from proposer.prompts import build_agent_next_action_prompt, build_self_review_prompt
 from proposer.registry import ALLOWED_MUTATION_FILES, TRACKED_CONTRACT_FILES, HarnessRegistry, validate_candidate_boundary
 
 
@@ -53,6 +54,153 @@ def _llm_json(llm, model_name: str, prompt: str) -> Dict:
     return _extract_json_object(str(raw or ""))
 
 
+def _available_agent_tools() -> List[Dict]:
+    return [
+        {"name": "list_harnesses", "args": {"kind": "all|baseline|candidate"}},
+        {"name": "read_harness_spec", "args": {"harness_id": "str"}},
+        {"name": "read_harness_code", "args": {"harness_id": "str", "file_name": "str"}},
+        {"name": "diff_harnesses", "args": {"parent_harness": "str", "candidate_harness": "str", "file_name": "str"}},
+        {"name": "list_runs", "args": {"harness_id": "str", "limit": "int"}},
+        {"name": "read_run_metadata", "args": {"run_dir": "str"}},
+        {"name": "search_traces", "args": {"harness_id": "str", "needle": "str", "max_hits": "int"}},
+        {"name": "read_trace_snippet", "args": {"trace_path": "str", "line_no": "int", "window": "int"}},
+        {"name": "validate_candidate", "args": {"candidate_dir": "str", "parent_dir": "str"}},
+        {"name": "smoke_check_candidate", "args": {"candidate_dir": "str"}},
+    ]
+
+
+def _execute_agent_tool(tools: ProposerToolbox, tool_name: str, tool_args: Dict) -> Dict:
+    args = dict(tool_args or {})
+    if tool_name == "list_harnesses":
+        return {"result": tools.list_harnesses(kind=str(args.get("kind") or "all"))}
+    if tool_name == "read_harness_spec":
+        return {"result": tools.read_harness_spec(str(args.get("harness_id") or ""))}
+    if tool_name == "read_harness_code":
+        return {"result": tools.read_harness_code(str(args.get("harness_id") or ""), str(args.get("file_name") or ""))}
+    if tool_name == "diff_harnesses":
+        return {
+            "result": tools.diff_harnesses(
+                parent_harness=str(args.get("parent_harness") or ""),
+                candidate_harness=str(args.get("candidate_harness") or ""),
+                file_name=str(args.get("file_name") or ""),
+            )
+        }
+    if tool_name == "list_runs":
+        return {"result": tools.list_runs(harness_id=str(args.get("harness_id") or ""), limit=int(args.get("limit") or 12))}
+    if tool_name == "read_run_metadata":
+        return {"result": tools.read_run_metadata(run_dir=str(args.get("run_dir") or ""))}
+    if tool_name == "search_traces":
+        return {
+            "result": tools.search_traces(
+                harness_id=str(args.get("harness_id") or ""),
+                needle=str(args.get("needle") or ""),
+                max_hits=int(args.get("max_hits") or 12),
+            )
+        }
+    if tool_name == "read_trace_snippet":
+        return {
+            "result": tools.read_trace_snippet(
+                trace_path=str(args.get("trace_path") or ""),
+                line_no=int(args.get("line_no") or 1),
+                window=int(args.get("window") or 2),
+            )
+        }
+    if tool_name == "validate_candidate":
+        return {
+            "result": tools.validate_candidate(
+                candidate_dir=str(args.get("candidate_dir") or ""),
+                parent_dir=str(args.get("parent_dir") or ""),
+            )
+        }
+    if tool_name == "smoke_check_candidate":
+        return {"result": tools.smoke_check_candidate(candidate_dir=str(args.get("candidate_dir") or ""))}
+    raise ValueError(f"unknown tool: {tool_name}")
+
+
+def _run_proposer_agent_loop(
+    *,
+    llm,
+    proposer_model: str,
+    focus_text: str,
+    archive_summary: Dict,
+    tools: ProposerToolbox,
+    max_steps: int,
+) -> Dict:
+    transcript: List[Dict] = []
+    tool_steps = 0
+    run_evidence_tool_steps = 0
+    run_evidence_hits = 0
+    available_tools = _available_agent_tools()
+    run_evidence_tools = {"list_runs", "search_traces", "read_run_metadata", "read_trace_snippet"}
+    for step_idx in range(1, max(1, int(max_steps)) + 1):
+        prompt = build_agent_next_action_prompt(
+            step_idx=step_idx,
+            max_steps=max(1, int(max_steps)),
+            focus_text=focus_text,
+            available_tools_json=json.dumps(available_tools, ensure_ascii=False, indent=2),
+            archive_overview_json=json.dumps(
+                {
+                    "baseline_list": archive_summary.get("baseline_list", []),
+                    "candidate_list": archive_summary.get("candidate_list", []),
+                    "pareto_list": archive_summary.get("pareto_list", []),
+                    "latest_harness": archive_summary.get("latest_harness"),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            transcript_json=json.dumps(transcript[-12:], ensure_ascii=False, indent=2),
+        )
+        action_obj = _extract_json_object(str(llm.request(prompt=prompt, model_name=proposer_model, stream=False) or "{}"))
+        action = str(action_obj.get("action") or "").strip().lower()
+
+        if action == "tool_call":
+            tool_name = str(action_obj.get("tool_name") or "").strip()
+            tool_args = dict(action_obj.get("tool_args") or {})
+            try:
+                result = _execute_agent_tool(tools, tool_name, tool_args)
+            except Exception as exc:
+                result = {"error": str(exc)}
+            transcript.append({"step": step_idx, "action": "tool_call", "tool_name": tool_name, "tool_args": tool_args, "observation": result})
+            tool_steps += 1
+            if tool_name in run_evidence_tools:
+                run_evidence_tool_steps += 1
+                payload = result.get("result")
+                if isinstance(payload, list):
+                    run_evidence_hits += len(payload)
+                elif isinstance(payload, dict) and payload:
+                    run_evidence_hits += 1
+            continue
+
+        if action == "final_proposal":
+            if tool_steps <= 0:
+                transcript.append({"step": step_idx, "action": "feedback", "message": "At least one tool_call is required before final_proposal."})
+                continue
+            if run_evidence_tool_steps <= 0:
+                transcript.append({"step": step_idx, "action": "feedback", "message": "Use run evidence tools before final_proposal."})
+                continue
+            proposal = dict(action_obj.get("proposal") or {})
+            smoke_block = dict(proposal.get("smoke_test_evidence_to_check") or {})
+            limitation = str(smoke_block.get("evidence_limitations") or "").strip()
+            if run_evidence_hits <= 0:
+                smoke_block["evidence_limitations"] = limitation or "run evidence limited; diagnosis falls back to conservative spec/code-level hypothesis"
+            else:
+                smoke_block["evidence_limitations"] = limitation or "none"
+            proposal["smoke_test_evidence_to_check"] = smoke_block
+            return {
+                "proposal": proposal,
+                "agent_meta": {
+                    "steps_used": step_idx,
+                    "tool_steps": tool_steps,
+                    "run_evidence_tool_steps": run_evidence_tool_steps,
+                    "run_evidence_hits": run_evidence_hits,
+                },
+            }
+
+        transcript.append({"step": step_idx, "action": "feedback", "message": f"Invalid action: {action}. Use tool_call or final_proposal."})
+
+    raise RuntimeError(f"proposer agent exceeded max steps without valid final proposal: max_steps={max_steps}")
+
+
 def _normalize_files_to_modify(proposal: Dict) -> List[str]:
     normalized_target_files: List[str] = []
     for name in list(proposal.get("files_to_create_or_modify") or []):
@@ -74,6 +222,8 @@ def _prepare_proposal_contract(proposal: Dict) -> Dict:
         "invariants",
         "sandbox_modules_to_modify",
         "changed_files",
+        "runtime_wiring_plan",
+        "smoke_test_evidence_to_check",
     ]
     for key in required_keys:
         if key not in proposal:
@@ -103,7 +253,10 @@ def _prepare_proposal_contract(proposal: Dict) -> Dict:
     normalized["implementation_contract"] = implementation_contract
     normalized["invariants"] = invariants
     normalized["sandbox_modules_to_modify"] = [Path(str(v)).name for v in list(proposal.get("sandbox_modules_to_modify") or [])]
+    normalized["hypothesis_target_modules"] = list(normalized["sandbox_modules_to_modify"])
     normalized["changed_files"] = [Path(str(v)).name for v in list(proposal.get("changed_files") or [])]
+    normalized["runtime_wiring_plan"] = dict(proposal.get("runtime_wiring_plan") or {})
+    normalized["smoke_test_evidence_to_check"] = dict(proposal.get("smoke_test_evidence_to_check") or {})
     return normalized
 
 
@@ -169,6 +322,9 @@ def _build_grounded_note(*, contract: Dict, spec: Dict, changed_files: Set[str])
                 f"template_family={prompt_cfg.get('template_family')}, include_example={prompt_cfg.get('include_example')}"
             ),
             f"Changed files: {sorted(changed_files)}",
+            f"Hypothesis target modules: {contract.get('hypothesis_target_modules')}",
+            f"Runtime-effect changed files: {contract.get('runtime_effect_changed_files')}",
+            f"Supporting generated files: {contract.get('supporting_generated_files')}",
             f"Contract invariants: {contract.get('invariants')}",
             f"Sandbox modules: {contract.get('sandbox_modules_to_modify')}",
         ]
@@ -232,11 +388,170 @@ def _run_import_checks(candidate_dir: Path) -> None:
         spec.loader.exec_module(mod)
 
 
+def _runtime_effect_modules_for_candidate(candidate_dir: Path) -> Set[str]:
+    default = {"state_features.py", "trigger_logic.py", "prompt_composer.py", "state_encoder.py", "trigger_policy.py", "prompt_builder.py"}
+    rules_path = candidate_dir / "validator_rules.py"
+    if not rules_path.exists():
+        return default
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("candidate_validator_rules_meta", str(rules_path))
+        if spec is None or spec.loader is None:
+            return default
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        fn = getattr(mod, "runtime_effect_modules", None)
+        if callable(fn):
+            out = {Path(str(x)).name for x in list(fn() or [])}
+            if out:
+                return out
+    except Exception:
+        return default
+    return default
+
+
+def _build_change_semantics(*, proposal_contract: Dict, changed_files: Set[str], runtime_effect_modules: Set[str]) -> Dict:
+    changed = {Path(str(x)).name for x in set(changed_files or set())}
+    primary_claims = [Path(str(x)).name for x in list(proposal_contract.get("hypothesis_target_modules") or proposal_contract.get("sandbox_modules_to_modify") or [])]
+    primary_claims = sorted([x for x in primary_claims if x])
+    runtime_effect_changed = sorted(changed.intersection(set(runtime_effect_modules)).intersection(set(primary_claims)))
+    supporting = sorted(changed - set(runtime_effect_changed))
+    return {
+        "hypothesis_target_modules": primary_claims,
+        "runtime_effect_changed_files": runtime_effect_changed,
+        "supporting_generated_files": supporting,
+        "full_diff_files": sorted(changed),
+        "editable_allowed_files": sorted(ALLOWED_MUTATION_FILES),
+    }
+
+
+def _runtime_wiring_smoke_verification(*, candidate_dir: Path, proposal_contract: Dict, changed_files: Set[str]) -> Dict:
+    try:
+        profile = load_harness_sandbox_profile(str((candidate_dir / "spec.json").as_posix()))
+    except Exception as exc:
+        changed = {Path(str(x)).name for x in set(changed_files or set())}
+        claimed = {Path(str(x)).name for x in set(proposal_contract.get("sandbox_modules_to_modify") or [])}
+        return {
+            "passed": False,
+            "loader_entrypoint": "controller.harness_sandbox.load_harness_sandbox_profile",
+            "loaded_trigger_module": "",
+            "loaded_trigger_function": "",
+            "loaded_state_module": "",
+            "loaded_state_function": "",
+            "loaded_prompt_module": "",
+            "loaded_prompt_function": "",
+            "candidate_trigger_module_claim": "trigger_logic.py" if "trigger_logic.py" in claimed else "",
+            "candidate_state_module_claim": "state_features.py" if "state_features.py" in claimed else "",
+            "candidate_prompt_module_claim": "prompt_composer.py" if "prompt_composer.py" in claimed else "",
+            "trigger_alignment_ok": False if "trigger_logic.py" in changed else None,
+            "state_alignment_ok": False if "state_features.py" in changed else None,
+            "prompt_alignment_ok": False if "prompt_composer.py" in changed else None,
+            "changed_files": sorted(changed),
+            "manifest_active_sandbox_modules": [],
+            "notes": [f"runtime wiring loader failed: {exc}"],
+        }
+    trigger = dict(profile.get("trigger_logic") or {})
+    state = dict(profile.get("state_features") or {})
+    prompt = dict(profile.get("prompt_composer") or {})
+    claimed = {
+        Path(str(x)).name
+        for x in list(proposal_contract.get("hypothesis_target_modules") or proposal_contract.get("sandbox_modules_to_modify") or [])
+    }
+    changed = {Path(str(x)).name for x in set(changed_files or set())}
+    manifest_active = {Path(str(x)).name for x in list(((profile.get("spec") or {}).get("manifest") or {}).get("active_sandbox_modules") or [])}
+
+    def _fn_name(obj) -> str:
+        return getattr(obj, "__name__", "") if callable(obj) else ""
+
+    checks = {
+        "trigger": {
+            "module": "trigger_logic.py",
+            "loaded_module": Path(str(trigger.get("module") or "")).name,
+            "loaded_function": _fn_name(trigger.get("fn")),
+            "claim": "trigger_logic.py" if "trigger_logic.py" in claimed else "",
+        },
+        "state": {
+            "module": "state_features.py",
+            "loaded_module": Path(str(state.get("module") or "")).name,
+            "loaded_function": _fn_name(state.get("fn")),
+            "claim": "state_features.py" if "state_features.py" in claimed else "",
+        },
+        "prompt": {
+            "module": "prompt_composer.py",
+            "loaded_module": Path(str(prompt.get("module") or "")).name,
+            "loaded_function": _fn_name(prompt.get("fn")),
+            "claim": "prompt_composer.py" if "prompt_composer.py" in claimed else "",
+        },
+    }
+
+    notes: List[str] = []
+
+    def _alignment(item: Dict) -> bool | None:
+        expected = item["module"]
+        is_claimed = bool(item["claim"])
+        if not is_claimed:
+            if expected in changed:
+                notes.append(f"{expected}: runtime-effect file changed but not in primary hypothesis_target_modules")
+            notes.append(f"{expected}: not in primary claim; skipped strict alignment check")
+            return None
+        module_ok = item["loaded_module"] == expected
+        fn_ok = bool(item["loaded_function"])
+        active_ok = expected in manifest_active if manifest_active else True
+        changed_ok = expected in changed
+        if not module_ok:
+            notes.append(f"{expected}: runtime loaded {item['loaded_module']} (expected {expected})")
+        if not fn_ok:
+            notes.append(f"{expected}: runtime function not found")
+        if not active_ok:
+            notes.append(f"{expected}: manifest.active_sandbox_modules missing expected module")
+        if not changed_ok:
+            notes.append(f"{expected}: module was claimed but not detected in changed_files")
+        return bool(module_ok and fn_ok and active_ok and changed_ok)
+
+    trigger_ok = _alignment(checks["trigger"])
+    state_ok = _alignment(checks["state"])
+    prompt_ok = _alignment(checks["prompt"])
+    all_flags = [x for x in [trigger_ok, state_ok, prompt_ok] if x is not None]
+    passed = all(all_flags) if all_flags else True
+    if passed and all_flags:
+        notes.append("runtime wiring alignment passed for all claimed/changed sandbox lines")
+
+    verification = {
+        "passed": bool(passed),
+        "loader_entrypoint": "controller.harness_sandbox.load_harness_sandbox_profile",
+        "loaded_trigger_module": checks["trigger"]["loaded_module"],
+        "loaded_trigger_function": checks["trigger"]["loaded_function"],
+        "loaded_state_module": checks["state"]["loaded_module"],
+        "loaded_state_function": checks["state"]["loaded_function"],
+        "loaded_prompt_module": checks["prompt"]["loaded_module"],
+        "loaded_prompt_function": checks["prompt"]["loaded_function"],
+        "candidate_trigger_module_claim": checks["trigger"]["claim"],
+        "candidate_state_module_claim": checks["state"]["claim"],
+        "candidate_prompt_module_claim": checks["prompt"]["claim"],
+        "trigger_alignment_ok": trigger_ok,
+        "state_alignment_ok": state_ok,
+        "prompt_alignment_ok": prompt_ok,
+        "changed_files": sorted(changed),
+        "manifest_active_sandbox_modules": sorted(manifest_active),
+        "notes": notes,
+    }
+    return verification
+
+
 def _normalize_generated_text(text: str) -> str:
     out = str(text or "")
     while "\\n" in out:
         out = out.replace("\\n", "\n")
     return out
+
+
+def _guess_error_file_from_text(text: str) -> str:
+    raw = str(text or "")
+    m = re.search(r"([A-Za-z0-9_./-]+\.py)", raw)
+    if not m:
+        return ""
+    return Path(m.group(1)).name
 
 
 def _build_file_generation_prompt(
@@ -250,7 +565,11 @@ def _build_file_generation_prompt(
     return (
         "You are generating one bounded harness file for UAV harness optimization.\n"
         "Allowed harness boundary files: spec.json, state_features.py, trigger_logic.py, prompt_composer.py, archive_selector.py, validator_rules.py, state_encoder.py, trigger_policy.py, prompt_builder.py, proposer_note.txt, README.md\n"
-        "Prefer sandbox runtime-effect modules (state_features.py/trigger_logic.py/prompt_composer.py) over legacy metadata-only options.\n"
+        "Runtime-first rule: prioritize sandbox runtime-effect modules and wiring alignment.\n"
+        "Primary editable targets are sandbox modules: state_features.py, trigger_logic.py, prompt_composer.py, archive_selector.py, validator_rules.py.\n"
+        "Legacy files (state_encoder.py, trigger_policy.py, prompt_builder.py) are compatibility wrappers/metadata mirrors, not primary targets.\n"
+        "Do not create legacy-vs-sandbox ambiguity; forbidden example: editing trigger_logic.py while spec/loader still routes to trigger_policy.py.\n"
+        "If legacy sync is required for compatibility, keep it explicitly consistent with spec/manifest/runtime_wiring_plan.\n"
         "You must output ONLY the full content of the requested file, no markdown fences.\n"
         "Do not modify simulator/PX4/controller/executor/collision math/checkpoint rules.\n\n"
         f"Parent harness: {parent_harness_id}\n"
@@ -270,6 +589,7 @@ def propose_next_candidate(
     focus_text: str = "Improve safety-aware replan timing while avoiding unnecessary detours.",
     allow_fallback_heuristic: bool = False,
     max_revision_rounds: int = 2,
+    max_agent_steps: int = 10,
 ) -> Path:
     repo_root = Path(repo_root)
     reg = HarnessRegistry(repo_root)
@@ -279,87 +599,28 @@ def propose_next_candidate(
 
     archive_summary = summarize_archive_for_proposer(repo_root, repo_root / "proposer_archive_v2")
     tools = ProposerToolbox(repo_root=repo_root, archive_root=repo_root / "proposer_archive_v2")
-    harness_options = tools.list_harnesses(kind="all")
-    harness_scores: List[tuple] = []
-    for item in harness_options:
-        hid = item["harness_id"]
-        run_preview = tools.list_runs(hid, limit=1)
-        harness_scores.append((hid, len(run_preview), item.get("kind")))
-    harness_scores_sorted = sorted(
-        harness_scores,
-        key=lambda x: (x[1] > 0, x[1], 1 if x[2] == "baseline" else 0, x[0]),
-        reverse=True,
-    )
-    selected_harnesses = [x[0] for x in harness_scores_sorted[:3]] or [x["harness_id"] for x in harness_options[-3:]]
-    tool_samples: Dict[str, Dict] = {}
-    for hid in selected_harnesses:
-        spec_obj = tools.read_harness_spec(hid)
-        trigger_preview = tools.read_harness_code(hid, "trigger_logic.py") or tools.read_harness_code(hid, "trigger_policy.py")
-        run_list = tools.list_runs(hid, limit=2)
-        run_meta = tools.read_run_metadata(run_list[0]["run_dir"]) if run_list else {}
-        trace_hits = tools.search_traces(hid, "near_miss", max_hits=2)
-        snippet = tools.read_trace_snippet(trace_hits[0]["trace"], trace_hits[0]["line_no"], window=2) if trace_hits else []
-        tool_samples[hid] = {
-            "spec": {
-                "id": spec_obj.get("id"),
-                "parent": spec_obj.get("parent"),
-                "trigger_type": (spec_obj.get("trigger_policy") or {}).get("type"),
-            },
-            "trigger_logic_preview": trigger_preview[:500],
-            "runs": run_list,
-            "first_run_metadata": run_meta,
-            "trace_hits": trace_hits,
-            "trace_snippet": snippet,
-        }
-    tool_plan = {
-        "selected_harnesses": selected_harnesses,
-        "trace_query": "collision OR near_miss OR replan",
-    }
-    prompt = build_iteration_prompt(
-        baseline_list=json.dumps(archive_summary.get("baseline_list", []), ensure_ascii=False),
-        candidate_list=json.dumps(archive_summary.get("candidate_list", []), ensure_ascii=False),
-        pareto_list=json.dumps(archive_summary.get("pareto_list", []), ensure_ascii=False),
-        latest_harness=str(archive_summary.get("latest_harness", "(none)")),
-        focus_text=focus_text,
-        archive_evidence=json.dumps(
-            {
-                "entries": archive_summary.get("entries", []),
-                "trace_snippets": archive_summary.get("trace_snippets", []),
-                "tool_discovery": {
-                    "available_tools": [
-                        "list_harnesses",
-                        "read_harness_spec",
-                        "read_harness_code",
-                        "diff_harnesses",
-                        "list_runs",
-                        "read_run_metadata",
-                        "search_traces",
-                        "read_trace_snippet",
-                        "validate_candidate",
-                        "smoke_check_candidate",
-                    ],
-                    "harnesses": harness_options,
-                    "default_plan": tool_plan,
-                    "sampled_evidence": tool_samples,
-                },
-                "output_contract": OUTPUT_CONTRACT,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-    )
 
     from controller.llm_wrapper import LLMWrapper, MODEL_NAME
 
     llm = LLMWrapper(temperature=0.1)
     proposer_model = str(os.getenv("TYPEFLY_PROPOSER_MODEL", "gpt-4.1")).strip() or "gpt-4.1"
+    agent_meta: Dict = {}
     if proposer_model.lower().startswith("gpt-") and (not os.getenv("OPENAI_API_KEY")) and (not allow_fallback_heuristic):
         raise RuntimeError(
             "Proposer requires OpenAI provider for GPT models. "
             "Set OPENAI_API_KEY or override TYPEFLY_PROPOSER_MODEL to a provider-compatible model."
         )
     try:
-        proposal = _prepare_proposal_contract(_llm_json(llm, proposer_model or MODEL_NAME, prompt))
+        agent_output = _run_proposer_agent_loop(
+            llm=llm,
+            proposer_model=proposer_model or MODEL_NAME,
+            focus_text=focus_text,
+            archive_summary=archive_summary,
+            tools=tools,
+            max_steps=max_agent_steps,
+        )
+        agent_meta = dict(agent_output.get("agent_meta") or {})
+        proposal = _prepare_proposal_contract(dict(agent_output.get("proposal") or {}))
     except Exception:
         if not allow_fallback_heuristic:
             raise
@@ -373,18 +634,31 @@ def propose_next_candidate(
             "expected_runtime_effect": "Preserve baseline runtime behavior while keeping proposer alive.",
             "files_to_create_or_modify": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
             "proposer_note_text": "Fallback proposal generated because LLM proposer call failed.",
-            "sandbox_modules_to_modify": ["state_features.py"],
+            "sandbox_modules_to_modify": ["trigger_logic.py"],
             "changed_files": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
             "implementation_contract": {
                 "trigger_policy": {},
                 "state_encoder": {},
                 "prompt_builder": {},
             },
+            "runtime_wiring_plan": {
+                "sandbox_modules_changed": ["trigger_logic.py"],
+                "runtime_load_path_or_entrypoint": "controller.harness_sandbox runtime sandbox loader",
+                "spec_manifest_loader_alignment": "spec.sandbox + spec.manifest.active_sandbox_modules include trigger_logic.py",
+                "legacy_sync_plan": "none",
+            },
+            "smoke_test_evidence_to_check": {
+                "trigger_logic_evidence": "smoke/import checks and runtime_metadata.changed_files include trigger_logic.py",
+                "state_features_evidence": "not changed in this fallback candidate",
+                "prompt_composer_evidence": "not changed in this fallback candidate",
+                "evidence_limitations": "fallback path due to proposer LLM failure",
+            },
             "invariants": [
                 "proposal_contract files must match actual changed files",
                 "spec trigger policy must align with trigger_policy.py behavior",
             ],
         })
+        agent_meta = {"fallback_used": True, "reason": "agent_loop_or_llm_failure"}
 
     parent_id = str(proposal.get("parent_harness") or "").strip()
     if not parent_id:
@@ -515,8 +789,11 @@ def propose_next_candidate(
             "expected_tradeoff": str(proposal.get("expected_tradeoff") or ""),
             "expected_runtime_effect": str(proposal.get("expected_runtime_effect") or ""),
             "sandbox_modules_to_modify": list(proposal.get("sandbox_modules_to_modify") or []),
+            "hypothesis_target_modules": list(proposal.get("sandbox_modules_to_modify") or []),
             "files_to_create_or_modify": normalized_target_files,
             "changed_files": list(proposal.get("changed_files") or []),
+            "runtime_wiring_plan": dict(proposal.get("runtime_wiring_plan") or {}),
+            "smoke_test_evidence_to_check": dict(proposal.get("smoke_test_evidence_to_check") or {}),
             "implementation_contract": dict(proposal.get("implementation_contract") or {}),
             "invariants": list(proposal.get("invariants") or []),
         }
@@ -530,16 +807,40 @@ def propose_next_candidate(
         (candidate_dir / "proposer_note.txt").write_text(final_note + "\n", encoding="utf-8")
 
         changed_files = _detect_changed_files(candidate_dir, parent_entry.dir_path)
+        wiring_verification = _runtime_wiring_smoke_verification(
+            candidate_dir=candidate_dir,
+            proposal_contract=_load_json(candidate_dir / "spec.json").get("proposal_contract", {}),
+            changed_files=changed_files,
+        )
+        (candidate_dir / "runtime_wiring_verification.json").write_text(
+            json.dumps(wiring_verification, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         spec = _load_json(candidate_dir / "spec.json")
-        spec["proposal_contract"]["files_to_create_or_modify"] = sorted(changed_files)
+        change_semantics = _build_change_semantics(
+            proposal_contract=dict(spec.get("proposal_contract") or {}),
+            changed_files=changed_files,
+            runtime_effect_modules=_runtime_effect_modules_for_candidate(candidate_dir),
+        )
+        spec["proposal_contract"]["full_diff_files"] = list(change_semantics["full_diff_files"])
+        spec["proposal_contract"]["runtime_effect_changed_files"] = list(change_semantics["runtime_effect_changed_files"])
+        spec["proposal_contract"]["supporting_generated_files"] = list(change_semantics["supporting_generated_files"])
+        spec["proposal_contract"]["hypothesis_target_modules"] = list(change_semantics["hypothesis_target_modules"])
         parent_commit = _git_parent_commit(repo_root)
         spec["runtime_metadata"] = {
             "parent_harness": parent_id,
             "parent_commit": parent_commit,
             "candidate_created_at_utc": datetime.now(timezone.utc).isoformat(),
             "changed_files": sorted(changed_files),
+            "full_diff_files": list(change_semantics["full_diff_files"]),
+            "runtime_effect_changed_files": list(change_semantics["runtime_effect_changed_files"]),
+            "supporting_generated_files": list(change_semantics["supporting_generated_files"]),
+            "hypothesis_target_modules": list(change_semantics["hypothesis_target_modules"]),
             "diff_path": "parent_diff.patch",
             "candidate_branch_hint": f"candidate/{candidate_id}",
+            "agent_loop_meta": dict(agent_meta or {}),
+            "runtime_wiring_verification_path": "runtime_wiring_verification.json",
+            "runtime_wiring_verification_passed": bool(wiring_verification.get("passed")),
         }
         (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
         (candidate_dir / "parent_diff.patch").write_text(
@@ -579,16 +880,40 @@ def propose_next_candidate(
         last_error = ""
         for _round in range(max(0, int(max_revision_rounds)) + 1):
             changed_files = _detect_changed_files(candidate_dir, parent_entry.dir_path)
+            wiring_verification = _runtime_wiring_smoke_verification(
+                candidate_dir=candidate_dir,
+                proposal_contract=_load_json(candidate_dir / "spec.json").get("proposal_contract", {}),
+                changed_files=changed_files,
+            )
+            (candidate_dir / "runtime_wiring_verification.json").write_text(
+                json.dumps(wiring_verification, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
             spec = _load_json(candidate_dir / "spec.json")
-            spec["proposal_contract"]["files_to_create_or_modify"] = sorted(changed_files)
+            change_semantics = _build_change_semantics(
+                proposal_contract=dict(spec.get("proposal_contract") or {}),
+                changed_files=changed_files,
+                runtime_effect_modules=_runtime_effect_modules_for_candidate(candidate_dir),
+            )
+            spec["proposal_contract"]["full_diff_files"] = list(change_semantics["full_diff_files"])
+            spec["proposal_contract"]["runtime_effect_changed_files"] = list(change_semantics["runtime_effect_changed_files"])
+            spec["proposal_contract"]["supporting_generated_files"] = list(change_semantics["supporting_generated_files"])
+            spec["proposal_contract"]["hypothesis_target_modules"] = list(change_semantics["hypothesis_target_modules"])
             parent_commit = _git_parent_commit(repo_root)
             spec["runtime_metadata"] = {
                 "parent_harness": parent_id,
                 "parent_commit": parent_commit,
                 "candidate_created_at_utc": datetime.now(timezone.utc).isoformat(),
                 "changed_files": sorted(changed_files),
+                "full_diff_files": list(change_semantics["full_diff_files"]),
+                "runtime_effect_changed_files": list(change_semantics["runtime_effect_changed_files"]),
+                "supporting_generated_files": list(change_semantics["supporting_generated_files"]),
+                "hypothesis_target_modules": list(change_semantics["hypothesis_target_modules"]),
                 "diff_path": "parent_diff.patch",
                 "candidate_branch_hint": f"candidate/{candidate_id}",
+                "agent_loop_meta": dict(agent_meta or {}),
+                "runtime_wiring_verification_path": "runtime_wiring_verification.json",
+                "runtime_wiring_verification_passed": bool(wiring_verification.get("passed")),
             }
             (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
             (candidate_dir / "parent_diff.patch").write_text(
@@ -614,6 +939,9 @@ def propose_next_candidate(
                 _run_candidate_smoke_checks(candidate_dir)
                 _run_import_checks(candidate_dir)
                 validate_candidate_contract_alignment(candidate_dir, parent_dir=parent_entry.dir_path, proposal_contract=spec["proposal_contract"])
+                latest_wiring = _load_json(candidate_dir / "runtime_wiring_verification.json") if (candidate_dir / "runtime_wiring_verification.json").exists() else {}
+                if not bool(latest_wiring.get("passed", False)):
+                    raise RuntimeError(f"runtime wiring verification failed: {json.dumps(latest_wiring, ensure_ascii=False)}")
             except Exception as exc:
                 last_error = str(exc)
             else:
@@ -623,11 +951,19 @@ def propose_next_candidate(
                 proposal_contract_json=json.dumps(spec.get("proposal_contract", {}), ensure_ascii=False, indent=2),
                 candidate_spec_json=json.dumps(spec, ensure_ascii=False, indent=2),
                 changed_files_json=json.dumps(sorted(changed_files), ensure_ascii=False),
+                runtime_wiring_verification_json=json.dumps(
+                    _load_json(candidate_dir / "runtime_wiring_verification.json") if (candidate_dir / "runtime_wiring_verification.json").exists() else {},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
                 last_error=last_error or "(none)",
             )
             review = _extract_json_object(str(llm.request(prompt=review_prompt, model_name=proposer_model or MODEL_NAME, stream=False) or "{}"))
             status = str(review.get("status") or "").strip().lower()
             files_to_revise = [Path(str(x)).name for x in list(review.get("files_to_modify") or []) if Path(str(x)).name in ALLOWED_MUTATION_FILES]
+            error_file = _guess_error_file_from_text(last_error)
+            if error_file and error_file in ALLOWED_MUTATION_FILES and error_file not in files_to_revise:
+                files_to_revise.insert(0, error_file)
             if not last_error and status == "pass":
                 return candidate_dir
             if _round >= max(0, int(max_revision_rounds)):
