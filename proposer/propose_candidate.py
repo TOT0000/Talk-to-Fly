@@ -540,9 +540,14 @@ def _runtime_wiring_smoke_verification(*, candidate_dir: Path, proposal_contract
 
 
 def _normalize_generated_text(text: str) -> str:
-    out = str(text or "")
-    while "\\n" in out:
-        out = out.replace("\\n", "\n")
+    out = str(text or "").strip()
+    if out.startswith("```"):
+        lines = out.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        out = "\n".join(lines).strip()
     return out
 
 
