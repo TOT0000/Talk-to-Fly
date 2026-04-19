@@ -146,6 +146,23 @@ def test_change_semantics_multi_primary_lines():
     assert out["supporting_generated_files"] == ["spec.json"]
 
 
+def test_non_primary_runtime_files_do_not_enter_runtime_effect_changed_files():
+    out = _build_change_semantics(
+        proposal_contract={"hypothesis_target_modules": ["trigger_logic.py"]},
+        changed_files={"trigger_logic.py", "state_features.py", "prompt_composer.py", "spec.json", "proposer_note.txt"},
+        runtime_effect_modules={"trigger_logic.py", "state_features.py", "prompt_composer.py"},
+    )
+    assert out["runtime_effect_changed_files"] == ["trigger_logic.py"]
+    assert set(out["supporting_generated_files"]) == {"state_features.py", "prompt_composer.py", "spec.json", "proposer_note.txt"}
+    assert out["full_diff_files"] == [
+        "prompt_composer.py",
+        "proposer_note.txt",
+        "spec.json",
+        "state_features.py",
+        "trigger_logic.py",
+    ]
+
+
 def test_runtime_wiring_checks_primary_claim_only_not_all_loaded_lines(tmp_path):
     cdir = _make_candidate_dir(tmp_path)
     proposal = {"hypothesis_target_modules": ["trigger_logic.py"]}

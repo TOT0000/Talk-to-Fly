@@ -415,7 +415,7 @@ def _build_change_semantics(*, proposal_contract: Dict, changed_files: Set[str],
     changed = {Path(str(x)).name for x in set(changed_files or set())}
     primary_claims = [Path(str(x)).name for x in list(proposal_contract.get("hypothesis_target_modules") or proposal_contract.get("sandbox_modules_to_modify") or [])]
     primary_claims = sorted([x for x in primary_claims if x])
-    runtime_effect_changed = sorted(changed.intersection(set(runtime_effect_modules)))
+    runtime_effect_changed = sorted(changed.intersection(set(runtime_effect_modules)).intersection(set(primary_claims)))
     supporting = sorted(changed - set(runtime_effect_changed))
     return {
         "hypothesis_target_modules": primary_claims,

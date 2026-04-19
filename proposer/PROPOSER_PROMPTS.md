@@ -74,7 +74,7 @@ Generated candidate metadata distinguishes:
 - `hypothesis_target_modules`:
   - primary runtime hypothesis scope.
 - `runtime_effect_changed_files`:
-  - changed files that are runtime-effect modules.
+  - changed files that are runtime-effect modules within primary `hypothesis_target_modules` claim scope.
 - `supporting_generated_files`:
   - changed files created for packaging/record/sync.
 - `full_diff_files`:

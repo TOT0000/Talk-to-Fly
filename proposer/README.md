@@ -165,7 +165,7 @@ To avoid ambiguity between hypothesis scope and packaging artifacts:
 - `proposal_contract.hypothesis_target_modules`:
   - primary runtime-effect module lines this candidate intends to test.
 - `proposal_contract.runtime_effect_changed_files`:
-  - actually changed files that belong to runtime-effect module set.
+  - actually changed files that belong to runtime-effect module set **and** are inside `hypothesis_target_modules` (primary claim scope).
 - `proposal_contract.supporting_generated_files`:
   - changed files produced for packaging/metadata (e.g. `spec.json`, `proposer_note.txt`) rather than primary hypothesis line.
 - `proposal_contract.full_diff_files`:
