@@ -50,6 +50,8 @@ def cmd_topk(args: argparse.Namespace) -> int:
     metric = args.metric
     rows = []
     for e in idx.get("entries", []):
+        if (not args.include_screening) and str(e.get("evaluation_stage") or "") != "formal":
+            continue
         m = dict(e.get("metrics") or {})
         if metric in m and m[metric] is not None:
             rows.append((e.get("candidate_id"), float(m[metric]), m))
@@ -84,6 +86,7 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         repo_root=repo,
         harness_id=args.harness_id,
         archive_root=repo / "proposer_archive_v2",
+        evaluation_mode=args.mode,
     )
     print(json.dumps({"eval_summary": out.eval_summary, "per_scene_metrics": out.per_scene_metrics}, ensure_ascii=False, indent=2))
     return 0
@@ -124,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--metric", default="success_rate")
     s.add_argument("-k", type=int, default=3)
     s.add_argument("--desc", action="store_true")
+    s.add_argument("--include-screening", action="store_true", help="Include screening-stage candidates in ranking output.")
     s.set_defaults(func=cmd_topk)
 
     s = sp.add_parser("diff")
@@ -139,6 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sp.add_parser("evaluate")
     s.add_argument("harness_id")
+    s.add_argument("--mode", choices=["screening", "formal"], default=None)
     s.set_defaults(func=cmd_evaluate)
 
     s = sp.add_parser("reindex")

@@ -28,6 +28,40 @@ def _pick_callable(module: Optional[ModuleType], candidates: list[str]) -> Optio
     return None
 
 
+def _wrap_prompt_callable(fn: Optional[Callable]) -> Optional[Callable]:
+    if not callable(fn):
+        return None
+
+    def _wrapped(*args, **kwargs):
+        if kwargs:
+            stage = kwargs.get("stage")
+            task_description = kwargs.get("task_description")
+            encoded_state = kwargs.get("encoded_state")
+            snapshot = kwargs.get("snapshot")
+            spec_payload = kwargs.get("spec")
+            try:
+                return fn(**kwargs)
+            except TypeError:
+                pass
+            variants = [
+                (stage, task_description, encoded_state, snapshot, spec_payload),
+                (stage, task_description, encoded_state, snapshot),
+                (stage, task_description, encoded_state, spec_payload),
+                (stage, task_description, encoded_state),
+            ]
+            last_exc: Exception | None = None
+            for variant in variants:
+                try:
+                    return fn(*variant)
+                except TypeError as exc:
+                    last_exc = exc
+            if last_exc is not None:
+                raise last_exc
+        return fn(*args, **kwargs)
+
+    return _wrapped
+
+
 def load_harness_sandbox_profile(harness_spec_path: str | None) -> Dict:
     if not harness_spec_path:
         return {"enabled": False}
@@ -68,6 +102,6 @@ def load_harness_sandbox_profile(harness_spec_path: str | None) -> Dict:
         "prompt_composer": {
             "enabled": bool(prompt_cfg.get("enabled", False)),
             "module": prompt_module_name,
-            "fn": _pick_callable(prompt_module, ["compose_prompt_context", "build_prompt"]),
+            "fn": _wrap_prompt_callable(_pick_callable(prompt_module, ["compose_prompt_context", "build_prompt"])),
         },
     }

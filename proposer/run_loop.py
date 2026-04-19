@@ -36,6 +36,7 @@ def run_once(
         repo_root=repo_root,
         harness_id=candidate_id,
         archive_root=archive_v2,
+        evaluation_mode="screening",
     )
     rebuild_index(archive_v2)
     return candidate_id

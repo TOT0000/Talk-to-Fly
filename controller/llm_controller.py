@@ -2217,15 +2217,16 @@ class LLMController():
         prompt_fn = prompt_cfg.get("fn")
         if bool(prompt_cfg.get("enabled")) and callable(prompt_fn):
             try:
-                context_obj = prompt_fn(
+                context_obj = self._invoke_prompt_composer(
+                    prompt_fn=prompt_fn,
                     stage=stage,
                     task_description=composed_task,
                     encoded_state=encoded_state,
                     snapshot=snapshot,
-                    spec=spec_payload,
+                    spec_payload=spec_payload,
                 )
-            except TypeError:
-                context_obj = prompt_fn(stage, composed_task, encoded_state, spec_payload)
+            except Exception:
+                context_obj = ""
             if isinstance(context_obj, dict):
                 context_text = str(context_obj.get("prompt_context") or "")
             else:
@@ -2236,6 +2237,43 @@ class LLMController():
                 composed_task = f"{composed_task}\n\n[SANDBOX_PROMPT_CONTEXT]\n{context_text}"
 
         return composed_task
+
+    @staticmethod
+    def _invoke_prompt_composer(
+        *,
+        prompt_fn,
+        stage: str,
+        task_description: str,
+        encoded_state: dict,
+        snapshot: dict,
+        spec_payload: dict,
+    ):
+        # Preferred modern signature: keyword arguments.
+        try:
+            return prompt_fn(
+                stage=stage,
+                task_description=task_description,
+                encoded_state=encoded_state,
+                snapshot=snapshot,
+                spec=spec_payload,
+            )
+        except TypeError:
+            pass
+
+        last_exc: Exception | None = None
+        for args in [
+            (stage, task_description, encoded_state, snapshot, spec_payload),
+            (stage, task_description, encoded_state, snapshot),
+            (stage, task_description, encoded_state, spec_payload),
+            (stage, task_description, encoded_state),
+        ]:
+            try:
+                return prompt_fn(*args)
+            except TypeError as exc:
+                last_exc = exc
+        if last_exc is not None:
+            raise last_exc
+        return ""
 
     def get_selected_pipeline_config(self):
         return get_pipeline_config(self.selected_pipeline_id)
