@@ -410,6 +410,14 @@ def propose_next_candidate(
         src = parent_entry.dir_path / name
         if src.exists():
             shutil.copy2(src, candidate_dir / name)
+    # Ensure runtime-effect sandbox modules always exist for wiring checks,
+    # even when parent harness is legacy-only (state_encoder/trigger_policy/prompt_builder).
+    for required in ["state_features.py", "trigger_logic.py", "prompt_composer.py"]:
+        path = candidate_dir / required
+        if not path.exists():
+            fallback = _default_sandbox_file_content(required)
+            if fallback:
+                path.write_text(fallback, encoding="utf-8")
 
     parent_spec = _load_json(parent_entry.dir_path / "spec.json")
 
@@ -523,6 +531,18 @@ def propose_next_candidate(
             "diff_path": "parent_diff.patch",
             "candidate_branch_hint": f"candidate/{candidate_id}",
         }
+        (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
+        (candidate_dir / "parent_diff.patch").write_text(
+            _build_parent_diff(parent_entry.dir_path, candidate_dir, changed_files),
+            encoding="utf-8",
+        )
+        (candidate_dir / "proposer_tool_audit.json").write_text(
+            json.dumps({"events": tools.audit_log}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        spec = _load_json(candidate_dir / "spec.json")
+        spec["runtime_metadata"]["proposer_tool_audit_path"] = "proposer_tool_audit.json"
+        spec["runtime_metadata"]["proposer_tool_event_count"] = len(tools.audit_log)
         (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
         (candidate_dir / "parent_diff.patch").write_text(
             _build_parent_diff(parent_entry.dir_path, candidate_dir, changed_files),

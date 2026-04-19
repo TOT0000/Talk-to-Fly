@@ -55,6 +55,22 @@ def _write_parent(parent_dir):
     (parent_dir / "proposer_note.txt").write_text("parent note\n", encoding="utf-8")
 
 
+def _write_parent_legacy(parent_dir):
+    parent_dir.mkdir(parents=True, exist_ok=True)
+    spec = {
+        "id": "baseline3",
+        "kind": "baseline",
+        "trigger_policy": {"module": "trigger_policy.py", "type": "event_predicted_collision_probability", "threshold": 0.5},
+        "state_encoder": {"module": "state_encoder.py", "include_fields": ["predicted_collision_probability"]},
+        "prompt_builder": {"module": "prompt_builder.py", "template_family": "baseline3_prompt", "include_example": True},
+    }
+    (parent_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
+    (parent_dir / "trigger_policy.py").write_text(PARENT_TRIGGER, encoding="utf-8")
+    (parent_dir / "state_encoder.py").write_text(PARENT_STATE, encoding="utf-8")
+    (parent_dir / "prompt_builder.py").write_text(PARENT_PROMPT, encoding="utf-8")
+    (parent_dir / "proposer_note.txt").write_text("parent note\n", encoding="utf-8")
+
+
 def _write_candidate(candidate_dir, *, files_to_modify, include_runtime_change=True):
     candidate_dir.mkdir(parents=True, exist_ok=True)
     spec = {
@@ -209,3 +225,56 @@ def test_proposer_requires_openai_key_for_gpt_models(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         propose_next_candidate(repo_root=repo, focus_text="test consistency")
+
+
+def test_propose_flow_backfills_missing_runtime_sandbox_modules_for_legacy_parent(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    baseline = repo / "harnesses" / "baseline3"
+    (repo / "harnesses" / "candidates").mkdir(parents=True, exist_ok=True)
+    _write_parent_legacy(baseline)
+
+    class _FakeLLM:
+        def request(self, prompt: str, model_name: str, stream: bool = False):
+            if "performing proposer self-review" in prompt:
+                return json.dumps({"status": "pass", "issues": [], "files_to_modify": [], "revision_plan": "ok"})
+            if "Requested file: spec.json" in prompt:
+                return json.dumps(
+                    {
+                        "id": "candidate_0001",
+                        "kind": "candidate",
+                        "trigger_policy": {"module": "trigger_policy.py", "type": "event_predicted_collision_probability", "threshold": 0.45},
+                        "state_encoder": {"module": "state_encoder.py", "include_fields": ["predicted_collision_probability"]},
+                        "prompt_builder": {"module": "prompt_builder.py", "template_family": "baseline3_prompt", "include_example": True},
+                    }
+                )
+            if "Requested file: trigger_logic.py" in prompt:
+                return "def should_trigger_replan(state, memory, spec):\n    return (True, 'risk')\n"
+            if "Requested file:" in prompt:
+                return "def placeholder(*args, **kwargs):\n    return {}\n"
+            return json.dumps(
+                {
+                    "parent_harness": "baseline3",
+                    "candidate_id": "candidate_0001",
+                    "one_sentence_hypothesis": "test",
+                    "weakness_being_addressed": "test",
+                    "expected_tradeoff": "test",
+                    "expected_runtime_effect": "test",
+                    "sandbox_modules_to_modify": ["trigger_logic.py"],
+                    "files_to_create_or_modify": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
+                    "changed_files": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
+                    "proposer_note_text": "test",
+                    "implementation_contract": {"trigger_policy": {}, "state_encoder": {}, "prompt_builder": {}},
+                    "invariants": ["test"],
+                }
+            )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "controller.llm_wrapper",
+        SimpleNamespace(LLMWrapper=lambda temperature=0.1: _FakeLLM(), MODEL_NAME="fake-model"),
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("TYPEFLY_PROPOSER_MODEL", "gpt-4.1")
+    created = propose_next_candidate(repo_root=repo, focus_text="legacy parent test", max_revision_rounds=0)
+    assert (created / "state_features.py").exists()
+    assert (created / "prompt_composer.py").exists()
