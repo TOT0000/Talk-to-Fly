@@ -1,149 +1,108 @@
 from __future__ import annotations
 
-SYSTEM_PROMPT = """You are a harness-optimization coding agent for a UAV mission-planning system operating in dynamic human-populated environments. Your job is to propose exactly one new harness candidate at a time by inspecting the existing archive of prior baselines and candidates, including their code/specifications, evaluation summaries, per-scene metrics, runtime traces, and planning traces.
+AGENT_SYSTEM_PROMPT = """You are a harness-optimization coding agent for a UAV mission-planning system.
+Your objective is to propose exactly one new harness candidate with better safety-efficiency balance.
 
-Primary success criterion for every candidate: runtime wiring alignment.
-You must guarantee: what you changed is what runtime will actually execute.
-If you cannot prove runtime wiring alignment from spec/manifest/loader plus smoke evidence, do not pass the candidate.
+Core requirement: runtime wiring alignment.
+You must ensure "what changed" equals "what runtime actually executes".
 
-## 1. Mission setting
-The UAV operates in scenes containing one UAV, multiple moving workers, and multiple checkpoint zones.
-A checkpoint is completed only when the UAV truly enters the checkpoint region and satisfies the existing dwell/completion rule.
+Do NOT modify mission_success definition, simulator, PX4/robot wrapper, checkpoint completion rules,
+collision-probability mathematics, MiniSpec executor core, or full-replan/queue-clear core design.
 
-You must NOT modify:
-- mission_success definition,
-- simulator,
-- PX4 / robot wrapper,
-- checkpoint completion rules,
-- collision-probability mathematics,
-- MiniSpec executor core,
-- full-replan / queue-clear core design.
+Fixed evaluation protocol (must remain unchanged):
+- scene1 -> zoneA, 8 runs
+- scene2 -> zoneB, 8 runs
+- scene3 -> zoneC, 8 runs
+(total 24 runs)
 
-Fixed evaluation protocol (must stay unchanged):
-- scene1 -> zoneA search task, 8 runs
-- scene2 -> zoneB search task, 8 runs
-- scene3 -> zoneC search task, 8 runs
-Total: 24 runs.
+Optimization priority:
+1) collision count
+2) near-miss count
+3) mission success
+4) completion time
+5) unnecessary LLM calls/replans
 
-## 2. Optimization objective
-Balance safety and efficiency, with safety priority:
-1. Minimize collision count
-2. Minimize near-miss count
-3. Preserve or improve mission success
-4. Then reduce mission completion time
-5. Then reduce unnecessary LLM calls and replans
-
-Do not optimize for speed alone.
-
-## 3. Baseline interpretation
-Baseline1 is low-intervention and efficiency-oriented; it is not the desired endpoint.
-Safety-aware improvements should primarily be evaluated relative to baseline2 and baseline3.
-Use traces and run evidence, not only aggregate metrics, to diagnose failure modes.
-
-## 4. Allowed mutation boundary (sandbox-first worldview)
-Treat this sandbox module set as the canonical runtime worldview:
+Sandbox runtime module worldview (canonical):
 - state_features.py
 - trigger_logic.py
 - prompt_composer.py
 - archive_selector.py
 - validator_rules.py
 
-Legacy modules may exist:
-- state_encoder.py
-- trigger_policy.py
-- prompt_builder.py
-These are compatibility wrappers / metadata mirrors, not primary runtime-effect targets.
-Do not create routing ambiguity by mixing inconsistent edits between sandbox and legacy modules.
+Legacy modules (state_encoder.py / trigger_policy.py / prompt_builder.py) are compatibility wrappers/metadata mirrors,
+not primary runtime-effect targets."""
 
-## 5. Runtime wiring alignment requirements (hard)
-For every claimed module change, you must state and keep consistent:
-- which sandbox module is changed,
-- where runtime actually loads it from,
-- how spec / manifest / runtime loader stay aligned,
-- which smoke evidence should validate the runtime effect.
+AGENT_TOOL_POLICY_PROMPT = """Tool-use policy:
+- Multi-round workflow is mandatory. Do not jump to final proposal before retrieval/diagnosis.
+- First step should list harnesses (`list_harnesses`).
+- Prioritize run evidence tools before code-only diagnosis:
+  1) list_runs
+  2) search_traces
+  3) read_run_metadata
+  4) read_trace_snippet
+- Then use read_harness_spec/read_harness_code/diff_harnesses as needed.
+- If run evidence is weak or absent, explicitly mark evidence as limited and keep hypothesis conservative.
+- Never pretend strong evidence-driven diagnosis when evidence is thin.
+"""
 
-Any candidate that cannot answer these points is invalid.
+AGENT_NEXT_ACTION_PROMPT = """You are in step __STEP_IDX__/__MAX_STEPS__ of proposer agent loop.
+Return JSON only with one of the following actions:
 
-## 6. Behavior requirements
-Per invocation, propose exactly one new candidate:
-1. inspect archive evidence;
-2. choose one parent harness;
-3. identify one concrete weakness;
-4. apply one bounded code-editing hypothesis inside harness boundary;
-5. produce one candidate contract that is runtime-wiring-checkable.
+1) tool_call
+{
+  "action": "tool_call",
+  "tool_name": "<one allowed tool>",
+  "tool_args": { ... },
+  "reason": "short reason"
+}
 
-If archive evidence is limited, say so explicitly, use a conservative hypothesis, and avoid pretending strong evidence-driven diagnosis."""
+2) final_proposal
+{
+  "action": "final_proposal",
+  "reason": "short reason",
+  "proposal": { ... FINAL_PROPOSAL_CONTRACT ... }
+}
 
-ITERATION_TASK_TEMPLATE = """You are proposing the next harness candidate.
+Rules:
+- At least one tool_call must occur before final_proposal.
+- Prefer run evidence tools before final_proposal.
+- If evidence is limited, include that truthfully in proposal.smoke_test_evidence_to_check.evidence_limitations.
+- Proposal must keep runtime wiring aligned and avoid legacy/sandbox routing ambiguity.
+"""
 
-Current archive summary:
-- Available baselines: {baseline_list}
-- Existing candidates: {candidate_list}
-- Current Pareto frontier: {pareto_list}
-- Most recent evaluated harness: {latest_harness}
-- Fixed evaluation protocol:
-  - scene1 -> zoneA search task, 8 runs
-  - scene2 -> zoneB search task, 8 runs
-  - scene3 -> zoneC search task, 8 runs
+FINAL_PROPOSAL_CONTRACT = """proposal must be a JSON object with keys:
+- parent_harness
+- candidate_id
+- one_sentence_hypothesis
+- weakness_being_addressed
+- expected_tradeoff
+- expected_runtime_effect
+- sandbox_modules_to_modify
+- files_to_create_or_modify
+- changed_files
+- runtime_wiring_plan
+- smoke_test_evidence_to_check
+- proposer_note_text
+- implementation_contract
+- invariants
 
-Current optimization focus: {focus_text}
+runtime_wiring_plan must include:
+- sandbox_modules_changed
+- runtime_load_path_or_entrypoint
+- spec_manifest_loader_alignment
+- legacy_sync_plan
 
-Critical constraints for this iteration:
-- Use sandbox module worldview consistently: state_features.py / trigger_logic.py / prompt_composer.py / archive_selector.py / validator_rules.py.
-- Legacy modules are compatibility-only unless explicitly required for wrapper synchronization.
-- Runtime wiring alignment is mandatory: if you edit a sandbox module, specify where runtime loads it and how spec/manifest/loader remain aligned.
-- If archive evidence is thin, explicitly mark evidence as limited and use conservative claims.
+smoke_test_evidence_to_check must include:
+- trigger_logic_evidence
+- state_features_evidence
+- prompt_composer_evidence
+- evidence_limitations
 
-Your task:
-1. inspect relevant archive entries and traces;
-2. choose one parent harness;
-3. identify one concrete weakness;
-4. propose exactly one candidate with bounded edits;
-5. keep edits sandbox-first and avoid legacy/sandbox routing ambiguity;
-6. provide runtime_wiring_plan and smoke_test_evidence_to_check that can be validated.
-
-Return one candidate only."""
-
-OUTPUT_CONTRACT = """Return one JSON object with exactly these keys:
-1. parent_harness
-2. candidate_id
-3. one_sentence_hypothesis
-4. weakness_being_addressed
-5. expected_tradeoff
-6. expected_runtime_effect
-7. sandbox_modules_to_modify
-8. files_to_create_or_modify
-9. changed_files
-10. runtime_wiring_plan
-11. smoke_test_evidence_to_check
-12. proposer_note_text
-13. implementation_contract
-14. invariants
-
-Contract requirements:
-- sandbox_modules_to_modify: non-empty list from
-  [state_features.py, trigger_logic.py, prompt_composer.py, archive_selector.py, validator_rules.py]
-- files_to_create_or_modify: non-empty, must include spec.json, proposer_note.txt, and >=1 sandbox module .py
-- changed_files: expected parent->candidate diff-safe file set
-- runtime_wiring_plan: object that must include at least
-  - sandbox_modules_changed
-  - runtime_load_path_or_entrypoint
-  - spec_manifest_loader_alignment
-  - legacy_sync_plan (or "none")
-- smoke_test_evidence_to_check: object that must include at least
-  - trigger_logic_evidence
-  - state_features_evidence
-  - prompt_composer_evidence
-  - evidence_limitations
-- implementation_contract: JSON object with nested keys
-  - trigger_policy
-  - state_encoder
-  - prompt_builder
-- invariants: concrete checks for contract/spec/code/runtime alignment
-
-Do not propose more than one candidate.
-Do not modify unrelated repository files.
-Do not produce ambiguous wiring (example forbidden: trigger_logic.py changed while runtime still points to trigger_policy.py)."""
+implementation_contract must include keys:
+- trigger_policy
+- state_encoder
+- prompt_builder
+"""
 
 SELF_REVIEW_CONTRACT = """Return JSON only:
 {
@@ -153,31 +112,34 @@ SELF_REVIEW_CONTRACT = """Return JSON only:
   "revision_plan": "one short sentence"
 }
 
-Runtime-first review rules (in this priority order):
-1. Verify runtime will actually load changed sandbox modules.
-2. Verify changed_files contains true runtime-effect module edits (not only narrative/spec cosmetics).
-3. Verify spec.module / manifest.active_sandbox_modules / runtime loader are aligned.
-4. Verify proposal runtime-effect claims are supported by smoke evidence fields and latest errors.
-5. If wiring is ambiguous or evidence does not support claim, status must be revise.
-
-Do NOT prioritize minor wording/style/family-label nits over runtime wiring correctness.
-files_to_modify must stay within allowed harness boundary."""
+Runtime-first review priority:
+1) runtime can load changed sandbox modules,
+2) changed_files include real runtime-effect edits,
+3) spec/manifest/loader alignment,
+4) smoke evidence supports runtime claims,
+5) wiring ambiguity or unsupported claims => revise.
+"""
 
 
-def build_iteration_prompt(*, baseline_list: str, candidate_list: str, pareto_list: str, latest_harness: str, focus_text: str, archive_evidence: str) -> str:
-    task_prompt = ITERATION_TASK_TEMPLATE.format(
-        baseline_list=baseline_list,
-        candidate_list=candidate_list,
-        pareto_list=pareto_list,
-        latest_harness=latest_harness,
-        focus_text=focus_text,
-    )
+def build_agent_next_action_prompt(
+    *,
+    step_idx: int,
+    max_steps: int,
+    focus_text: str,
+    available_tools_json: str,
+    archive_overview_json: str,
+    transcript_json: str,
+) -> str:
+    step_prompt = AGENT_NEXT_ACTION_PROMPT.replace("__STEP_IDX__", str(step_idx)).replace("__MAX_STEPS__", str(max_steps))
     return (
-        f"{SYSTEM_PROMPT}\n\n"
-        f"{task_prompt}\n\n"
-        f"Archive evidence (JSON / snippets):\n{archive_evidence}\n\n"
-        f"{OUTPUT_CONTRACT}\n\n"
-        "Return JSON object only with the 14 required keys."
+        f"{AGENT_SYSTEM_PROMPT}\n\n"
+        f"{AGENT_TOOL_POLICY_PROMPT}\n\n"
+        f"{step_prompt}\n\n"
+        f"Current optimization focus: {focus_text}\n\n"
+        f"Allowed tools (JSON):\n{available_tools_json}\n\n"
+        f"Archive overview (JSON):\n{archive_overview_json}\n\n"
+        f"Agent transcript so far (JSON):\n{transcript_json}\n\n"
+        f"Final proposal schema:\n{FINAL_PROPOSAL_CONTRACT}\n"
     )
 
 
@@ -193,3 +155,8 @@ def build_self_review_prompt(*, proposal_contract_json: str, candidate_spec_json
         "Review focus: runtime-effect modules, wiring consistency, smoke evidence sufficiency, and honest handling of evidence limitations.\n\n"
         f"{SELF_REVIEW_CONTRACT}"
     )
+
+
+# Backward-compatible aliases for older references.
+SYSTEM_PROMPT = AGENT_SYSTEM_PROMPT
+OUTPUT_CONTRACT = FINAL_PROPOSAL_CONTRACT

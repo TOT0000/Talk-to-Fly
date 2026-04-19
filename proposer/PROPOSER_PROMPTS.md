@@ -1,95 +1,79 @@
-# Proposer Prompts (Runtime Wiring Alignment Edition)
+# Proposer Prompts (Multi-round Tool-Using Agent)
 
-This document mirrors the **runtime-used** proposer prompts in `proposer/prompts.py`.
+This document mirrors runtime prompts used by:
+- `proposer/prompts.py`
+- `proposer/propose_candidate.py::_run_proposer_agent_loop`
 
-## Runtime-used prompt constants/templates
+## Prompt roles
 
-- `SYSTEM_PROMPT`
-- `ITERATION_TASK_TEMPLATE`
-- `OUTPUT_CONTRACT`
-- `SELF_REVIEW_CONTRACT`
-- `build_iteration_prompt(...)`
-- `build_self_review_prompt(...)`
+1. `AGENT_SYSTEM_PROMPT`
+   - Defines optimization objective, safety-first priorities, immutable system boundaries, and sandbox runtime module worldview.
+   - Canonical sandbox modules: `state_features.py`, `trigger_logic.py`, `prompt_composer.py`, `archive_selector.py`, `validator_rules.py`.
 
-## 1) SYSTEM_PROMPT (design summary)
+2. `AGENT_TOOL_POLICY_PROMPT`
+   - Defines tool-use order and policy.
+   - Requires multi-round behavior (not single-shot).
+   - Requires prioritizing run-evidence tools (`list_runs`, `search_traces`, `read_run_metadata`, `read_trace_snippet`) before code-only diagnosis.
 
-Key changes now enforced:
+3. `AGENT_NEXT_ACTION_PROMPT`
+   - Per-step protocol: model returns either `tool_call` or `final_proposal` JSON.
+   - Enforces at least one tool step before final proposal.
 
-- Uses **sandbox module worldview only** as canonical runtime language:
-  - `state_features.py`
-  - `trigger_logic.py`
-  - `prompt_composer.py`
-  - `archive_selector.py`
-  - `validator_rules.py`
-- Explicitly marks legacy files (`state_encoder.py`, `trigger_policy.py`, `prompt_builder.py`) as compatibility wrapper / metadata mirror, not primary runtime-effect targets.
-- Elevates **runtime wiring alignment** to top hard requirement:
-  - the changed module must be what runtime actually executes,
-  - spec/manifest/loader must be aligned,
-  - smoke evidence must support the claim.
-- Requires explicit honesty when archive evidence is limited.
+4. `FINAL_PROPOSAL_CONTRACT`
+   - Structured proposal schema only after retrieval/diagnosis.
+   - Includes runtime wiring and smoke-evidence requirements.
 
-## 2) ITERATION_TASK_TEMPLATE (design summary)
+5. `SELF_REVIEW_CONTRACT` + `build_self_review_prompt(...)`
+   - Runtime-first review contract for pass/revise decisions after guardrails/smoke outcomes.
 
-The task template now requires:
+## Agent step protocol (runtime)
 
-- sandbox-first mutation planning,
-- no legacy/sandbox mixed ambiguous routing,
-- required `runtime_wiring_plan` and `smoke_test_evidence_to_check`,
-- explicit limited-evidence disclosure when evidence is thin.
+Each loop step returns one JSON action:
 
-## 3) OUTPUT_CONTRACT (runtime schema)
+- Tool step
+```json
+{"action":"tool_call","tool_name":"list_runs","tool_args":{"harness_id":"baseline2","limit":4}}
+```
 
-Runtime prompt requires exactly 14 keys:
+- Final proposal
+```json
+{"action":"final_proposal","proposal":{ "...FINAL_PROPOSAL_CONTRACT...": "..." }}
+```
 
-1. `parent_harness`
-2. `candidate_id`
-3. `one_sentence_hypothesis`
-4. `weakness_being_addressed`
-5. `expected_tradeoff`
-6. `expected_runtime_effect`
-7. `sandbox_modules_to_modify`
-8. `files_to_create_or_modify`
-9. `changed_files`
-10. `runtime_wiring_plan`
-11. `smoke_test_evidence_to_check`
-12. `proposer_note_text`
-13. `implementation_contract`
-14. `invariants`
+Runtime enforcements:
+- No final proposal before at least one tool call.
+- No final proposal before at least one run-evidence tool call.
+- Agent loop has max step limit (fail-fast on overflow).
+- If run evidence is weak/absent, proposal must mark `smoke_test_evidence_to_check.evidence_limitations`.
 
-Additional required structure:
+## Final proposal contract keys
 
-- `runtime_wiring_plan` includes:
-  - `sandbox_modules_changed`
-  - `runtime_load_path_or_entrypoint`
-  - `spec_manifest_loader_alignment`
-  - `legacy_sync_plan`
-- `smoke_test_evidence_to_check` includes:
-  - `trigger_logic_evidence`
-  - `state_features_evidence`
-  - `prompt_composer_evidence`
-  - `evidence_limitations`
+Required proposal keys (14 total):
+- `parent_harness`
+- `candidate_id`
+- `one_sentence_hypothesis`
+- `weakness_being_addressed`
+- `expected_tradeoff`
+- `expected_runtime_effect`
+- `sandbox_modules_to_modify`
+- `files_to_create_or_modify`
+- `changed_files`
+- `runtime_wiring_plan`
+- `smoke_test_evidence_to_check`
+- `proposer_note_text`
+- `implementation_contract`
+- `invariants`
 
-## 4) SELF_REVIEW_CONTRACT (runtime-first)
+## Workflow integration
 
-Self-review priority order is now explicit:
+The multi-round proposer workflow is:
+1. agent retrieval/diagnosis loop (`tool_call` steps),
+2. final proposal output,
+3. candidate code generation,
+4. hard guardrails + smoke/import checks,
+5. self-review/revise loop (bounded rounds),
+6. finalize candidate only when checks pass.
 
-1. runtime will load changed sandbox modules,
-2. changed files truly include runtime-effect edits,
-3. spec/manifest/loader alignment,
-4. smoke evidence supports runtime claims,
-5. any wiring ambiguity => `revise`.
+## Sync policy
 
-Narrative wording/style nits are explicitly de-prioritized.
-
-## 5) File-generation prompt behavior (runtime-used)
-
-`proposer/propose_candidate.py::_build_file_generation_prompt(...)` now states:
-
-- sandbox modules are primary editable targets,
-- legacy modules are compatibility-only,
-- forbidden ambiguous case: changed sandbox module but loader/spec still points to legacy route,
-- if legacy sync is needed, it must be explicit in spec/manifest/runtime wiring plan.
-
-## 6) Sync policy
-
-If this document and runtime constants diverge, runtime constants in `proposer/prompts.py` and `proposer/propose_candidate.py` are source of truth and this document must be updated in the same change.
+If this markdown and runtime constants diverge, runtime code is source of truth and this file must be updated in the same commit.
