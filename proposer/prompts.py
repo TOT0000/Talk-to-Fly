@@ -212,6 +212,21 @@ Do not modify unrelated repository files.
 Do not propose more than one candidate."""
 
 
+SELF_REVIEW_CONTRACT = """Return JSON only:
+{
+  "status": "pass" | "revise",
+  "issues": ["..."],
+  "files_to_modify": ["...allowed sandbox files..."],
+  "revision_plan": "one short sentence"
+}
+
+Rules:
+- Focus on runtime wiring, changed-files truthfulness, and smoke-test failures.
+- Do NOT nitpick wording or abstract label naming.
+- If runtime wiring and smoke checks are healthy, return status=pass.
+- files_to_modify must be subset of allowed boundary files."""
+
+
 def build_iteration_prompt(*, baseline_list: str, candidate_list: str, pareto_list: str, latest_harness: str, focus_text: str, archive_evidence: str) -> str:
     task_prompt = ITERATION_TASK_TEMPLATE.format(
         baseline_list=baseline_list,
@@ -226,4 +241,17 @@ def build_iteration_prompt(*, baseline_list: str, candidate_list: str, pareto_li
         f"Archive evidence (JSON / snippets):\n{archive_evidence}\n\n"
         f"{OUTPUT_CONTRACT}\n\n"
         "Return JSON object only with the 12 required keys."
+    )
+
+
+def build_self_review_prompt(*, proposal_contract_json: str, candidate_spec_json: str, changed_files_json: str, last_error: str) -> str:
+    return (
+        "You are performing proposer self-review on ONE generated candidate.\n"
+        "Goal: catch runtime wiring mistakes and fixable implementation issues only.\n"
+        "Do not fail based on narrative wording differences.\n\n"
+        f"Proposal contract:\n{proposal_contract_json}\n\n"
+        f"Candidate spec:\n{candidate_spec_json}\n\n"
+        f"Detected changed files:\n{changed_files_json}\n\n"
+        f"Last guardrail/smoke error (if any):\n{last_error}\n\n"
+        f"{SELF_REVIEW_CONTRACT}"
     )

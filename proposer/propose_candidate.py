@@ -16,7 +16,7 @@ from proposer.agent_tools import ProposerToolbox
 from proposer.archive_reader import summarize_archive_for_proposer
 from proposer.consistency import validate_candidate_contract_alignment
 from proposer.evaluate_candidate import mark_pareto
-from proposer.prompts import OUTPUT_CONTRACT, build_iteration_prompt
+from proposer.prompts import OUTPUT_CONTRACT, build_iteration_prompt, build_self_review_prompt
 from proposer.registry import ALLOWED_MUTATION_FILES, TRACKED_CONTRACT_FILES, HarnessRegistry, validate_candidate_boundary
 
 
@@ -221,6 +221,24 @@ def _run_candidate_smoke_checks(candidate_dir: Path) -> None:
         py_compile.compile(str(path), doraise=True)
 
 
+def _run_import_checks(candidate_dir: Path) -> None:
+    import importlib.util
+
+    for path in sorted(candidate_dir.glob("*.py")):
+        spec = importlib.util.spec_from_file_location(f"candidate_mod_{path.stem}", str(path))
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"import loader unavailable: {path.name}")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+
+def _normalize_generated_text(text: str) -> str:
+    out = str(text or "")
+    while "\\n" in out:
+        out = out.replace("\\n", "\n")
+    return out
+
+
 def _build_file_generation_prompt(
     *,
     parent_harness_id: str,
@@ -251,6 +269,7 @@ def propose_next_candidate(
     note: str = "",
     focus_text: str = "Improve safety-aware replan timing while avoiding unnecessary detours.",
     allow_fallback_heuristic: bool = False,
+    max_revision_rounds: int = 2,
 ) -> Path:
     repo_root = Path(repo_root)
     reg = HarnessRegistry(repo_root)
@@ -261,8 +280,29 @@ def propose_next_candidate(
     archive_summary = summarize_archive_for_proposer(repo_root, repo_root / "proposer_archive_v2")
     tools = ProposerToolbox(repo_root=repo_root, archive_root=repo_root / "proposer_archive_v2")
     harness_options = tools.list_harnesses(kind="all")
+    selected_harnesses = [x["harness_id"] for x in harness_options[-3:]]
+    tool_samples: Dict[str, Dict] = {}
+    for hid in selected_harnesses:
+        spec_obj = tools.read_harness_spec(hid)
+        trigger_preview = tools.read_harness_code(hid, "trigger_logic.py") or tools.read_harness_code(hid, "trigger_policy.py")
+        run_list = tools.list_runs(hid, limit=2)
+        run_meta = tools.read_run_metadata(run_list[0]["run_dir"]) if run_list else {}
+        trace_hits = tools.search_traces(hid, "near_miss", max_hits=2)
+        snippet = tools.read_trace_snippet(trace_hits[0]["trace"], trace_hits[0]["line_no"], window=2) if trace_hits else []
+        tool_samples[hid] = {
+            "spec": {
+                "id": spec_obj.get("id"),
+                "parent": spec_obj.get("parent"),
+                "trigger_type": (spec_obj.get("trigger_policy") or {}).get("type"),
+            },
+            "trigger_logic_preview": trigger_preview[:500],
+            "runs": run_list,
+            "first_run_metadata": run_meta,
+            "trace_hits": trace_hits,
+            "trace_snippet": snippet,
+        }
     tool_plan = {
-        "selected_harnesses": [x["harness_id"] for x in harness_options[:3]],
+        "selected_harnesses": selected_harnesses,
         "trace_query": "collision OR near_miss OR replan",
     }
     prompt = build_iteration_prompt(
@@ -290,6 +330,7 @@ def propose_next_candidate(
                     ],
                     "harnesses": harness_options,
                     "default_plan": tool_plan,
+                    "sampled_evidence": tool_samples,
                 },
                 "output_contract": OUTPUT_CONTRACT,
             },
@@ -389,7 +430,7 @@ def propose_next_candidate(
             parent_file_content=parent_file_content,
             proposal=proposal,
         )
-        generated = str(llm.request(prompt=file_prompt, model_name=proposer_model or MODEL_NAME, stream=False) or "").strip()
+        generated = _normalize_generated_text(str(llm.request(prompt=file_prompt, model_name=proposer_model or MODEL_NAME, stream=False) or "").strip())
         if target_file == "spec.json":
             spec_obj = _extract_json_object(generated)
             spec_obj["id"] = candidate_id
@@ -487,16 +528,113 @@ def propose_next_candidate(
             _build_parent_diff(parent_entry.dir_path, candidate_dir, changed_files),
             encoding="utf-8",
         )
+        (candidate_dir / "proposer_tool_audit.json").write_text(
+            json.dumps({"events": tools.audit_log}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        spec = _load_json(candidate_dir / "spec.json")
+        spec["runtime_metadata"]["proposer_tool_audit_path"] = "proposer_tool_audit.json"
+        spec["runtime_metadata"]["proposer_tool_event_count"] = len(tools.audit_log)
+        (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
+        (candidate_dir / "parent_diff.patch").write_text(
+            _build_parent_diff(parent_entry.dir_path, candidate_dir, changed_files),
+            encoding="utf-8",
+        )
 
         if not note:
             refreshed_note = _build_grounded_note(contract=spec["proposal_contract"], spec=spec, changed_files=changed_files)
             (candidate_dir / "proposer_note.txt").write_text(refreshed_note + "\n", encoding="utf-8")
             final_note = refreshed_note
 
-        validate_candidate_boundary(candidate_dir)
-        _run_candidate_smoke_checks(candidate_dir)
-        validate_candidate_contract_alignment(candidate_dir, parent_dir=parent_entry.dir_path, proposal_contract=spec["proposal_contract"])
-        return candidate_dir
+        last_error = ""
+        for _round in range(max(0, int(max_revision_rounds)) + 1):
+            changed_files = _detect_changed_files(candidate_dir, parent_entry.dir_path)
+            spec = _load_json(candidate_dir / "spec.json")
+            spec["proposal_contract"]["files_to_create_or_modify"] = sorted(changed_files)
+            parent_commit = _git_parent_commit(repo_root)
+            spec["runtime_metadata"] = {
+                "parent_harness": parent_id,
+                "parent_commit": parent_commit,
+                "candidate_created_at_utc": datetime.now(timezone.utc).isoformat(),
+                "changed_files": sorted(changed_files),
+                "diff_path": "parent_diff.patch",
+                "candidate_branch_hint": f"candidate/{candidate_id}",
+            }
+            (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
+            (candidate_dir / "parent_diff.patch").write_text(
+                _build_parent_diff(parent_entry.dir_path, candidate_dir, changed_files),
+                encoding="utf-8",
+            )
+            (candidate_dir / "proposer_tool_audit.json").write_text(
+                json.dumps({"events": tools.audit_log}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            spec = _load_json(candidate_dir / "spec.json")
+            spec["runtime_metadata"]["proposer_tool_audit_path"] = "proposer_tool_audit.json"
+            spec["runtime_metadata"]["proposer_tool_event_count"] = len(tools.audit_log)
+            (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            if not note:
+                refreshed_note = _build_grounded_note(contract=spec["proposal_contract"], spec=spec, changed_files=changed_files)
+                (candidate_dir / "proposer_note.txt").write_text(refreshed_note + "\n", encoding="utf-8")
+                final_note = refreshed_note
+
+            try:
+                validate_candidate_boundary(candidate_dir)
+                _run_candidate_smoke_checks(candidate_dir)
+                _run_import_checks(candidate_dir)
+                validate_candidate_contract_alignment(candidate_dir, parent_dir=parent_entry.dir_path, proposal_contract=spec["proposal_contract"])
+            except Exception as exc:
+                last_error = str(exc)
+            else:
+                last_error = ""
+
+            review_prompt = build_self_review_prompt(
+                proposal_contract_json=json.dumps(spec.get("proposal_contract", {}), ensure_ascii=False, indent=2),
+                candidate_spec_json=json.dumps(spec, ensure_ascii=False, indent=2),
+                changed_files_json=json.dumps(sorted(changed_files), ensure_ascii=False),
+                last_error=last_error or "(none)",
+            )
+            review = _extract_json_object(str(llm.request(prompt=review_prompt, model_name=proposer_model or MODEL_NAME, stream=False) or "{}"))
+            status = str(review.get("status") or "").strip().lower()
+            files_to_revise = [Path(str(x)).name for x in list(review.get("files_to_modify") or []) if Path(str(x)).name in ALLOWED_MUTATION_FILES]
+            if not last_error and status == "pass":
+                return candidate_dir
+            if _round >= max(0, int(max_revision_rounds)):
+                raise RuntimeError(f"candidate failed hard guardrails/self-review after {_round + 1} attempts: {last_error or review}")
+            if not files_to_revise:
+                files_to_revise = ["spec.json"] + ([next(iter(changed_files - {"spec.json", "proposer_note.txt"}), "trigger_logic.py")] if changed_files else ["trigger_logic.py"])
+            issue_text = "; ".join([str(x) for x in list(review.get("issues") or [])][:4])
+            if last_error:
+                issue_text = f"{issue_text}; hard_guardrail_error={last_error}" if issue_text else f"hard_guardrail_error={last_error}"
+            for target_file in files_to_revise:
+                if target_file in {"proposer_note.txt", "README.md", "parent_diff.patch", "proposer_tool_audit.json"}:
+                    continue
+                parent_file_content = (candidate_dir / target_file).read_text(encoding="utf-8") if (candidate_dir / target_file).exists() else ""
+                file_prompt = _build_file_generation_prompt(
+                    parent_harness_id=parent_id,
+                    parent_spec=parent_spec,
+                    parent_file_name=target_file,
+                    parent_file_content=parent_file_content,
+                    proposal=proposal,
+                ) + f"\n\nSelf-review revision issues to fix:\n{issue_text}\n"
+                generated = _normalize_generated_text(str(llm.request(prompt=file_prompt, model_name=proposer_model or MODEL_NAME, stream=False) or "").strip())
+                if target_file == "spec.json":
+                    spec_obj = _extract_json_object(generated)
+                    spec_obj["id"] = candidate_id
+                    spec_obj["kind"] = "candidate"
+                    spec_obj["parent"] = parent_id
+                    prior = _load_json(candidate_dir / "spec.json")
+                    if "proposal_contract" not in spec_obj:
+                        spec_obj["proposal_contract"] = dict(prior.get("proposal_contract") or {})
+                    if "sandbox" not in spec_obj:
+                        spec_obj["sandbox"] = dict(prior.get("sandbox") or {})
+                    if "manifest" not in spec_obj:
+                        spec_obj["manifest"] = dict(prior.get("manifest") or {})
+                    (candidate_dir / "spec.json").write_text(json.dumps(spec_obj, ensure_ascii=False, indent=2), encoding="utf-8")
+                else:
+                    (candidate_dir / target_file).write_text(generated + "\n", encoding="utf-8")
+        raise RuntimeError("unreachable: revision loop ended without decision")
     except Exception:
         shutil.rmtree(candidate_dir, ignore_errors=True)
         raise

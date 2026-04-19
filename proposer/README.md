@@ -55,16 +55,16 @@ Total runs per evaluated harness: **24**.
 
 ## Contract alignment guardrails (new)
 
-`propose_next_candidate()` now requires an executable proposal contract, not only narrative fields.
+`propose_next_candidate()` now applies **minimal hard guardrails + bounded self-review revise loop**.
 
-- Contract must include `implementation_contract` (`trigger_policy`, `state_encoder`, `prompt_builder`) and explicit `invariants`.
-- `files_to_create_or_modify` must be non-empty and include `spec.json` + `proposer_note.txt`.
-- Generated candidate is validated by `validate_candidate_contract_alignment(...)`:
-  - contract claims vs `spec.json`,
-  - `spec.json` trigger policy vs `trigger_policy.py` behavior cues,
-  - `spec.json` state/prompt config vs `state_encoder.py` + `prompt_builder.py`,
-  - `proposer_note.txt` grounding to final hypothesis + implemented trigger type,
-  - declared file list vs actual parent→candidate changed files.
+- Hard guardrails focus only on:
+  - boundary safety,
+  - required artifacts (`spec`, `manifest`, `runtime_metadata`, `proposer_note`, diff/audit files),
+  - py_compile + import checks,
+  - runtime wiring consistency for sandbox modules,
+  - at least one runtime-effect module changed.
+- High-level narrative/string semantics are intentionally not hard-failed by system validator.
+- If guardrails/smoke fail, proposer enters bounded revise loop (default up to 2 revisions) and asks the coding agent to self-fix files, then re-check.
 
 If any check fails, proposer **fails fast** and removes the just-created candidate directory instead of silently accepting an inconsistent candidate.
 
@@ -76,8 +76,25 @@ Accepted candidates now persist the following in `spec.json`:
 - `runtime_metadata.changed_files`
 - `runtime_metadata.candidate_branch_hint`
 - `runtime_metadata.diff_path`
+- `runtime_metadata.proposer_tool_audit_path`
+- `runtime_metadata.proposer_tool_event_count`
 
-And each accepted candidate writes `parent_diff.patch` in candidate directory for rollback/review without auto-push or auto-merge.
+And each accepted candidate writes:
+- `parent_diff.patch` (code diff)
+- `proposer_tool_audit.json` (actual tool-call audit trail, including trace search/snippet reads)
+
+for rollback/review without auto-push or auto-merge.
+
+## 如何確認 proposer 真的有調閱紀錄檔
+
+1. 打開 `harnesses/candidates/<candidate_id>/proposer_tool_audit.json`，確認至少有：
+   - `search_traces`
+   - `read_trace_snippet`
+   - `read_run_metadata`
+2. 打開同目錄的 `spec.json`，確認：
+   - `runtime_metadata.proposer_tool_audit_path == "proposer_tool_audit.json"`
+   - `runtime_metadata.proposer_tool_event_count > 0`
+3. 對照 `parent_diff.patch` 與 `proposal_contract`，檢查 candidate 不只是改 spec，而是改到 runtime-effect sandbox code。
 
 ## Live benchmark loop
 

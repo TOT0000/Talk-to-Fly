@@ -111,6 +111,7 @@ def evaluate_candidate_live(repo_root: Path, harness_id: str, archive_root: Path
         "validator_rules.py",
         "proposer_note.txt",
         "parent_diff.patch",
+        "proposer_tool_audit.json",
     ]:
         src = harness_entry.dir_path / name
         if src.exists():

@@ -64,3 +64,7 @@ def test_toolbox_list_read_search_and_snippet(tmp_path):
     assert snippet
     smoke = tools.smoke_check_candidate(str(candidate))
     assert smoke["ok"] is True
+    audit_path = candidate / "proposer_tool_audit.json"
+    tools.export_audit(audit_path)
+    exported = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert any(e.get("tool") == "search_traces" for e in exported.get("events", []))
