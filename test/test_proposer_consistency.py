@@ -1,8 +1,11 @@
 import json
+import sys
+from types import SimpleNamespace
 
 import pytest
 
 from proposer.consistency import CandidateConsistencyError, validate_candidate_contract_alignment
+from proposer.propose_candidate import propose_next_candidate
 
 
 PARENT_TRIGGER = '''from __future__ import annotations
@@ -202,3 +205,71 @@ def test_validator_fails_when_declared_files_do_not_match_actual_changes(tmp_pat
 
     with pytest.raises(CandidateConsistencyError, match="files_to_create_or_modify mismatch"):
         validate_candidate_contract_alignment(cand, parent_dir=parent)
+
+
+def test_propose_flow_backfills_proposer_note_in_changed_files(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    baseline = repo / "harnesses" / "baseline3"
+    (repo / "harnesses" / "candidates").mkdir(parents=True, exist_ok=True)
+    _write_parent(baseline)
+
+    class _FakeLLM:
+        def request(self, prompt: str, model_name: str, stream: bool = False):
+            if "Requested file: spec.json" in prompt:
+                return json.dumps(
+                    {
+                        "id": "candidate_0001",
+                        "kind": "candidate",
+                        "name": "candidate",
+                        "trigger_policy": {
+                            "module": "trigger_policy.py",
+                            "type": "event_predicted_collision_probability",
+                            "heartbeat_seconds": None,
+                            "threshold": 0.45,
+                            "strictly_greater": True,
+                            "consecutive_high_risk": 1,
+                            "hysteresis": 0.05,
+                        },
+                        "state_encoder": {
+                            "module": "state_encoder.py",
+                            "include_fields": ["uav_pose_heading", "predicted_collision_probability"],
+                            "summary_style": "risk_aware",
+                            "include_risk_related": True,
+                            "include_targets": True,
+                            "include_geometry_flags": False,
+                        },
+                        "prompt_builder": {
+                            "module": "prompt_builder.py",
+                            "template_family": "baseline3_prompt",
+                            "include_example": True,
+                            "example_family": "baseline3_example",
+                        },
+                    }
+                )
+            return json.dumps(
+                {
+                    "parent_harness": "baseline3",
+                    "candidate_id": "candidate_0001",
+                    "one_sentence_hypothesis": "introduce tighter event threshold",
+                    "weakness_being_addressed": "late event trigger",
+                    "expected_tradeoff": "slightly more replans",
+                    "files_to_create_or_modify": ["spec.json", "proposer_note.txt"],
+                    "proposer_note_text": "placeholder",
+                    "implementation_contract": {
+                        "trigger_policy": {"type": "event_predicted_collision_probability", "threshold": 0.45},
+                        "state_encoder": {"summary_style": "risk_aware", "include_risk_related": True, "include_fields_contains": ["predicted_collision_probability"]},
+                        "prompt_builder": {"template_family": "baseline3_prompt", "include_example": True, "example_family": "baseline3_example"},
+                    },
+                    "invariants": ["contract claims must match spec and code"],
+                }
+            )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "controller.llm_wrapper",
+        SimpleNamespace(LLMWrapper=lambda temperature=0.1: _FakeLLM(), MODEL_NAME="fake-model"),
+    )
+
+    created = propose_next_candidate(repo_root=repo, focus_text="test consistency")
+    spec = json.loads((created / "spec.json").read_text(encoding="utf-8"))
+    assert "proposer_note.txt" in spec["proposal_contract"]["files_to_create_or_modify"]

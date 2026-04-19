@@ -301,17 +301,22 @@ def propose_next_candidate(
         }
         (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
 
+        proposer_note_text = str(proposal.get("proposer_note_text") or "").strip()
+        grounded_note = _build_grounded_note(contract=spec["proposal_contract"], spec=spec, changed_files=set())
+        final_note = note or proposer_note_text or grounded_note
+        if not note:
+            final_note = grounded_note
+        (candidate_dir / "proposer_note.txt").write_text(final_note + "\n", encoding="utf-8")
+
         changed_files = _detect_changed_files(candidate_dir, parent_entry.dir_path)
         spec = _load_json(candidate_dir / "spec.json")
         spec["proposal_contract"]["files_to_create_or_modify"] = sorted(changed_files)
         (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        proposer_note_text = str(proposal.get("proposer_note_text") or "").strip()
-        grounded_note = _build_grounded_note(contract=spec["proposal_contract"], spec=spec, changed_files=changed_files)
-        final_note = note or proposer_note_text or grounded_note
         if not note:
-            final_note = grounded_note
-        (candidate_dir / "proposer_note.txt").write_text(final_note + "\n", encoding="utf-8")
+            refreshed_note = _build_grounded_note(contract=spec["proposal_contract"], spec=spec, changed_files=changed_files)
+            (candidate_dir / "proposer_note.txt").write_text(refreshed_note + "\n", encoding="utf-8")
+            final_note = refreshed_note
 
         validate_candidate_boundary(candidate_dir)
         validate_candidate_contract_alignment(candidate_dir, parent_dir=parent_entry.dir_path, proposal_contract=spec["proposal_contract"])
