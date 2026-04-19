@@ -185,9 +185,26 @@ OUTPUT_CONTRACT = """You must output exactly the following items:
 3. one_sentence_hypothesis
 4. weakness_being_addressed
 5. expected_tradeoff
-6. files_to_create_or_modify
-7. proposer_note_text
+6. expected_runtime_effect
+7. sandbox_modules_to_modify
+8. files_to_create_or_modify
+9. proposer_note_text
+10. implementation_contract
+11. invariants
 
+`implementation_contract` must be a JSON object with these nested keys:
+- trigger_policy: exact spec fields to enforce (type/heartbeat_seconds/threshold/strictly_greater/consecutive_high_risk/hysteresis)
+- state_encoder: exact spec fields to enforce (summary_style/include_risk_related/include_targets/include_geometry_flags/include_fields_contains)
+- prompt_builder: exact spec fields to enforce (template_family/include_example/example_family)
+
+`sandbox_modules_to_modify` must include real runtime-effect modules from:
+- state_features.py
+- trigger_logic.py
+- prompt_composer.py
+- archive_selector.py
+- validator_rules.py
+`files_to_create_or_modify` must be non-empty and must include `spec.json`, `proposer_note.txt`, and at least one sandbox module `.py`.
+`invariants` must list concrete alignment checks that should hold across contract/spec/code.
 The proposed edit must remain within the allowed harness boundary.
 Do not modify unrelated repository files.
 Do not propose more than one candidate."""
@@ -206,5 +223,5 @@ def build_iteration_prompt(*, baseline_list: str, candidate_list: str, pareto_li
         f"{task_prompt}\n\n"
         f"Archive evidence (JSON / snippets):\n{archive_evidence}\n\n"
         f"{OUTPUT_CONTRACT}\n\n"
-        "Return JSON object only with the 7 required keys."
+        "Return JSON object only with the 11 required keys."
     )

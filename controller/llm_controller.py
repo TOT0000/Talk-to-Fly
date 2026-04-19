@@ -31,6 +31,7 @@ from .scenario_manager import ScenarioManager
 from .safety_context import SafetyContext
 from .task_run_logger import TaskRunLogger
 from .pipeline_registry import get_pipeline_config, normalize_pipeline_id
+from .harness_sandbox import load_harness_sandbox_profile
 from .baseline_scenes import (
     BASELINE_SCENES,
     BaselineScene,
@@ -250,6 +251,10 @@ class LLMController():
         self._mission_original_plan: Optional[str] = None
         self._current_active_plan: Optional[str] = None
         self._latest_full_replan_response: Optional[str] = None
+        self._harness_sandbox_profile: dict = {"enabled": False}
+        self._sandbox_trigger_memory: dict = {}
+        self._last_sandbox_context: str = ""
+        self._last_sandbox_state_features: dict = {}
         self.mission_start_ts: Optional[float] = None
         self.mission_end_ts: Optional[float] = None
         self.final_mission_summary: Optional[dict] = None
@@ -1323,8 +1328,22 @@ class LLMController():
             print_t(f"[REPLAN-COUNT] current={self._replan_attempts} limit={self.replan_limit}")
             return False
         snapshot = self.get_live_ui_snapshot() or {}
-        response = self.planner.plan_agent_heartbeat(
+        sandbox_task = self._build_sandbox_task_description(
             task_description=self.current_task_description,
+            stage="heartbeat",
+            snapshot=snapshot,
+        )
+        if self._sandbox_trigger_enabled():
+            should_call, reason = self._sandbox_trigger_decision(snapshot=snapshot, source="heartbeat")
+            if (not force) and (not should_call):
+                print_debug(
+                    "[SANDBOX-TRIGGER] heartbeat skipped "
+                    f"reason={reason}",
+                    env_var="TYPEFLY_VERBOSE_DEBUG",
+                )
+                return False
+        response = self.planner.plan_agent_heartbeat(
+            task_description=sandbox_task,
             snapshot=snapshot,
             execution_history=self._build_execution_history_for_llm(),
             current_plan=self.current_plan,
@@ -1352,6 +1371,8 @@ class LLMController():
                 "true_remaining_checkpoints": [str(v).upper() for v in list(remaining or [])],
                 "completion_state_source": "benchmark_progress/dwell_tracker",
                 **policy_evidence,
+                "sandbox_prompt_context": self._last_sandbox_context,
+                "sandbox_state_features": dict(self._last_sandbox_state_features),
             }
         )
         raw_response = str(response.get("raw_response", "") or "").strip()
@@ -1394,6 +1415,16 @@ class LLMController():
             )
             return False
         predicted_p = float(predicted_p)
+        if self._sandbox_trigger_enabled():
+            snapshot = self.get_live_ui_snapshot() or {}
+            snapshot["predicted_collision_probability"] = predicted_p
+            custom_trigger, reason = self._sandbox_trigger_decision(snapshot=snapshot, source=source)
+            print_debug(
+                "[SANDBOX-TRIGGER] threshold mode "
+                f"decision={bool(custom_trigger)} reason={reason}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
+            )
+            return bool(custom_trigger)
         threshold = float(self.predicted_collision_replan_threshold)
         rearm_threshold = float(self.predicted_collision_rearm_threshold)
         if self.auto_replan_protection_remaining > 0:
@@ -1817,8 +1848,13 @@ class LLMController():
                         llm_called = False
                         final_plan_source = "agent_heartbeat"
                     else:
-                        self.current_plan = self.planner.plan(
+                        sandbox_task = self._build_sandbox_task_description(
                             task_description=task_description,
+                            stage=planning_stage,
+                            snapshot=runtime_snapshot,
+                        )
+                        self.current_plan = self.planner.plan(
+                            task_description=sandbox_task,
                             scene_description=scene_description,
                             location_info=location_info,
                             execution_history=self._build_execution_history_for_llm(),
@@ -1840,6 +1876,8 @@ class LLMController():
                                 "parsed_plan": self.current_plan,
                                 "selected_baseline_id": pipeline.id,
                                 "scene_id": self.baseline_scene_id,
+                                "sandbox_prompt_context": self._last_sandbox_context,
+                                "sandbox_state_features": dict(self._last_sandbox_state_features),
                                 **policy_evidence,
                             }
                         )
@@ -2129,7 +2167,75 @@ class LLMController():
             example_variant=config.example_variant,
             use_output_example=bool(config.use_output_example),
         )
+        self._harness_sandbox_profile = load_harness_sandbox_profile(getattr(config, "harness_spec_path", None))
+        self._sandbox_trigger_memory = {}
         return self.selected_pipeline_id
+
+    def _sandbox_trigger_enabled(self) -> bool:
+        profile = dict(getattr(self, "_harness_sandbox_profile", {}) or {})
+        trigger = dict(profile.get("trigger_logic") or {})
+        return bool(profile.get("enabled")) and bool(trigger.get("enabled")) and callable(trigger.get("fn"))
+
+    def _sandbox_trigger_decision(self, *, snapshot: dict, source: str) -> tuple[bool, str]:
+        profile = dict(getattr(self, "_harness_sandbox_profile", {}) or {})
+        trigger = dict(profile.get("trigger_logic") or {})
+        fn = trigger.get("fn")
+        if not callable(fn):
+            return False, "sandbox_trigger_unavailable"
+        spec_payload = dict(profile.get("spec") or {})
+        state_payload = dict(snapshot or {})
+        state_payload.setdefault("predicted_collision_probability", snapshot.get("predicted_collision_probability"))
+        state_payload["trigger_source"] = str(source)
+        state_payload["now_ts"] = float(time.time())
+        state_payload["last_heartbeat_ts"] = float(self.last_heartbeat_ts)
+        try:
+            out = fn(state_payload, self._sandbox_trigger_memory, spec_payload)
+            if isinstance(out, tuple) and len(out) >= 2:
+                return bool(out[0]), str(out[1])
+            return bool(out), "sandbox_trigger_bool"
+        except Exception as exc:
+            return False, f"sandbox_trigger_error:{exc}"
+
+    def _build_sandbox_task_description(self, *, task_description: str, stage: str, snapshot: dict) -> str:
+        profile = dict(getattr(self, "_harness_sandbox_profile", {}) or {})
+        spec_payload = dict(profile.get("spec") or {})
+        composed_task = str(task_description or "")
+        self._last_sandbox_context = ""
+        self._last_sandbox_state_features = {}
+
+        state_cfg = dict(profile.get("state_features") or {})
+        state_fn = state_cfg.get("fn")
+        encoded_state = {}
+        if bool(state_cfg.get("enabled")) and callable(state_fn):
+            try:
+                encoded_state = dict(state_fn(snapshot, spec_payload) or {})
+            except Exception:
+                encoded_state = {}
+        self._last_sandbox_state_features = dict(encoded_state)
+
+        prompt_cfg = dict(profile.get("prompt_composer") or {})
+        prompt_fn = prompt_cfg.get("fn")
+        if bool(prompt_cfg.get("enabled")) and callable(prompt_fn):
+            try:
+                context_obj = prompt_fn(
+                    stage=stage,
+                    task_description=composed_task,
+                    encoded_state=encoded_state,
+                    snapshot=snapshot,
+                    spec=spec_payload,
+                )
+            except TypeError:
+                context_obj = prompt_fn(stage, composed_task, encoded_state, spec_payload)
+            if isinstance(context_obj, dict):
+                context_text = str(context_obj.get("prompt_context") or "")
+            else:
+                context_text = str(context_obj or "")
+            context_text = context_text.strip()
+            self._last_sandbox_context = context_text
+            if context_text:
+                composed_task = f"{composed_task}\n\n[SANDBOX_PROMPT_CONTEXT]\n{context_text}"
+
+        return composed_task
 
     def get_selected_pipeline_config(self):
         return get_pipeline_config(self.selected_pipeline_id)
