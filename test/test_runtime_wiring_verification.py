@@ -90,6 +90,16 @@ def test_wiring_verification_fails_on_claim_runtime_mismatch(tmp_path):
     assert out["trigger_alignment_ok"] is False
 
 
+def test_wiring_verification_handles_syntax_error_without_crashing(tmp_path):
+    cdir = _make_candidate_dir(tmp_path)
+    _write(cdir / "prompt_composer.py", "def compose_prompt_context(stage):\n    return f\"oops\n")
+    proposal = {"sandbox_modules_to_modify": ["prompt_composer.py"]}
+    out = _runtime_wiring_smoke_verification(candidate_dir=cdir, proposal_contract=proposal, changed_files={"prompt_composer.py", "spec.json"})
+    assert out["passed"] is False
+    assert out["prompt_alignment_ok"] is False
+    assert any("loader failed" in n for n in out["notes"])
+
+
 def test_self_review_prompt_includes_structured_wiring_verification():
     wiring = {"passed": False, "trigger_alignment_ok": False}
     prompt = build_self_review_prompt(

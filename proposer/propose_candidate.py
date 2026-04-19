@@ -385,7 +385,30 @@ def _run_import_checks(candidate_dir: Path) -> None:
 
 
 def _runtime_wiring_smoke_verification(*, candidate_dir: Path, proposal_contract: Dict, changed_files: Set[str]) -> Dict:
-    profile = load_harness_sandbox_profile(str((candidate_dir / "spec.json").as_posix()))
+    try:
+        profile = load_harness_sandbox_profile(str((candidate_dir / "spec.json").as_posix()))
+    except Exception as exc:
+        changed = {Path(str(x)).name for x in set(changed_files or set())}
+        claimed = {Path(str(x)).name for x in set(proposal_contract.get("sandbox_modules_to_modify") or [])}
+        return {
+            "passed": False,
+            "loader_entrypoint": "controller.harness_sandbox.load_harness_sandbox_profile",
+            "loaded_trigger_module": "",
+            "loaded_trigger_function": "",
+            "loaded_state_module": "",
+            "loaded_state_function": "",
+            "loaded_prompt_module": "",
+            "loaded_prompt_function": "",
+            "candidate_trigger_module_claim": "trigger_logic.py" if "trigger_logic.py" in claimed else "",
+            "candidate_state_module_claim": "state_features.py" if "state_features.py" in claimed else "",
+            "candidate_prompt_module_claim": "prompt_composer.py" if "prompt_composer.py" in claimed else "",
+            "trigger_alignment_ok": False if "trigger_logic.py" in changed else None,
+            "state_alignment_ok": False if "state_features.py" in changed else None,
+            "prompt_alignment_ok": False if "prompt_composer.py" in changed else None,
+            "changed_files": sorted(changed),
+            "manifest_active_sandbox_modules": [],
+            "notes": [f"runtime wiring loader failed: {exc}"],
+        }
     trigger = dict(profile.get("trigger_logic") or {})
     state = dict(profile.get("state_features") or {})
     prompt = dict(profile.get("prompt_composer") or {})
