@@ -68,7 +68,12 @@ def cmd_diff(args: argparse.Namespace) -> int:
 
 
 def cmd_propose(args: argparse.Namespace) -> int:
-    p = propose_next_candidate(_repo_root(), note=args.note or "")
+    p = propose_next_candidate(
+        _repo_root(),
+        note=args.note or "",
+        focus_text=args.focus_text,
+        allow_fallback_heuristic=bool(args.allow_fallback_heuristic),
+    )
     print(p.as_posix())
     return 0
 
@@ -91,7 +96,12 @@ def cmd_reindex(_: argparse.Namespace) -> int:
 
 
 def cmd_run_iteration(args: argparse.Namespace) -> int:
-    cid = run_once(_repo_root(), evaluate_baselines=bool(args.evaluate_baselines))
+    cid = run_once(
+        _repo_root(),
+        evaluate_baselines=bool(args.evaluate_baselines),
+        focus_text=args.focus_text,
+        allow_fallback_heuristic=bool(args.allow_fallback_heuristic),
+    )
     print(cid)
     return 0
 
@@ -123,6 +133,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sp.add_parser("propose")
     s.add_argument("--note", default="")
+    s.add_argument("--focus-text", default="Improve safety-aware replan timing while avoiding unnecessary detours.")
+    s.add_argument("--allow-fallback-heuristic", action="store_true")
     s.set_defaults(func=cmd_propose)
 
     s = sp.add_parser("evaluate")
@@ -134,6 +146,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sp.add_parser("run-iteration")
     s.add_argument("--evaluate-baselines", action="store_true")
+    s.add_argument("--focus-text", default="Improve safety-aware replan timing while avoiding unnecessary detours.")
+    s.add_argument("--allow-fallback-heuristic", action="store_true")
     s.set_defaults(func=cmd_run_iteration)
 
     return p

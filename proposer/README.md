@@ -15,11 +15,14 @@ This proposer loop limits mutation boundary to harness-level modules only:
 
 Total runs per evaluated harness: **24**.
 
-This protocol is written into:
+## Agent-driven proposer
 
-- `controller/harness_protocol.py`
-- each evaluated harness `eval_summary.json`
-- `proposer_archive_v2/index.json`
+`proposer/propose_candidate.py` now drives proposal creation with LLM calls via `controller.llm_wrapper.LLMWrapper`.
+
+- It reads archive/index + representative trace snippets.
+- It uses the system prompt + iteration prompt + output contract in `proposer/prompts.py`.
+- It proposes exactly one candidate each invocation.
+- It keeps candidate edits bounded by `proposer/registry.py` allowed files.
 
 ## Live benchmark loop
 
@@ -42,8 +45,10 @@ python -m proposer.cli list-candidates
 python -m proposer.cli show-candidate-summary candidate_0001
 python -m proposer.cli top-k --metric collision_count_avg -k 5
 python -m proposer.cli diff baseline2 baseline3
-python -m proposer.cli propose
+python -m proposer.cli propose --focus-text "improve risk timing"
 python -m proposer.cli evaluate candidate_0001
 python -m proposer.cli reindex
-python -m proposer.cli run-iteration
+python -m proposer.cli run-iteration --focus-text "improve risk timing"
 ```
+
+> If no LLM key/provider is configured, propose/run-iteration may fail unless `--allow-fallback-heuristic` is provided.

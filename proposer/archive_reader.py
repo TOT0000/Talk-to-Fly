@@ -2,105 +2,102 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from statistics import mean
 from typing import Dict, List
 
-from controller.harness_protocol import EVALUATION_PROTOCOL_VERSION, EVALUATION_SCENE_TASK_MAPPING
 
-
-def _safe_float(value, default=0.0) -> float:
+def _read_json(path: Path, default):
     try:
-        return float(value)
+        return json.loads(Path(path).read_text(encoding="utf-8"))
     except Exception:
-        return float(default)
+        return default
 
 
-def _safe_int(value, default=0) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return int(default)
+def read_archive_index(archive_root: Path) -> Dict:
+    archive_root = Path(archive_root)
+    return _read_json(archive_root / "index.json", {"entries": []})
 
 
-def read_manual_runs(debug_jsonl: Path) -> List[Dict]:
-    records: List[Dict] = []
-    with Path(debug_jsonl).open("r", encoding="utf-8") as f:
-        for line in f:
-            payload = json.loads(line)
-            run = dict(payload.get("run_summary") or {})
-            if not run:
-                continue
-            baseline_id = str(run.get("selected_baseline_id") or "").strip()
-            if not baseline_id:
-                continue
-            run_id = str(run.get("run_id") or "")
-            scene = str(run.get("scene_id") or run.get("baseline_scene_id") or "")
-            records.append(
-                {
-                    "run_id": run_id,
-                    "harness_id": baseline_id,
-                    "scene": scene,
-                    "mission_success": bool(run.get("mission_success")),
-                    "run_status": str(run.get("run_status") or ""),
-                    "collision_count": _safe_int(run.get("collision_count")),
-                    "near_miss_count": _safe_int(run.get("near_miss_count")),
-                    "completion_time_mission_sec": _safe_float(run.get("completion_time_mission_sec"), default=1e9),
-                    "llm_call_count": _safe_int(run.get("llm_call_count")),
-                    "replan_count": _safe_int(run.get("replan_count")),
-                }
-            )
-    return records
+def summarize_archive_for_proposer(repo_root: Path, archive_root: Path, max_entries: int = 12) -> Dict:
+    repo_root = Path(repo_root)
+    archive_root = Path(archive_root)
+    idx = read_archive_index(archive_root)
+    entries = list(idx.get("entries", []))
 
+    baselines = [e.get("candidate_id") for e in entries if e.get("kind") == "baseline"]
+    candidates = [e.get("candidate_id") for e in entries if e.get("kind") == "candidate"]
+    pareto = [e.get("candidate_id") for e in entries if bool(e.get("pareto_frontier"))]
+    latest = entries[-1].get("candidate_id") if entries else "(none)"
 
-def aggregate_by_harness(records: List[Dict]) -> Dict[str, Dict]:
-    grouped: Dict[str, List[Dict]] = {}
-    for row in records:
-        grouped.setdefault(row["harness_id"], []).append(row)
-
-    out: Dict[str, Dict] = {}
-    for harness_id, rows in grouped.items():
-        per_scene = {}
-        for scene, zone in EVALUATION_SCENE_TASK_MAPPING.items():
-            srows = [r for r in rows if str(r["scene"]).upper() == scene]
-            if not srows:
-                continue
-            per_scene[scene] = {
-                "task_zone": zone,
-                "runs": len(srows),
-                "mission_success_rate": mean(1.0 if r["mission_success"] else 0.0 for r in srows),
-                "collision_count_avg": mean(r["collision_count"] for r in srows),
-                "near_miss_count_avg": mean(r["near_miss_count"] for r in srows),
-                "completion_time_sec_avg": mean(r["completion_time_mission_sec"] for r in srows),
-                "llm_call_count_avg": mean(r["llm_call_count"] for r in srows),
-                "replan_count_avg": mean(r["replan_count"] for r in srows),
+    compact_entries: List[Dict] = []
+    for e in entries[-max_entries:]:
+        compact_entries.append(
+            {
+                "candidate_id": e.get("candidate_id"),
+                "kind": e.get("kind"),
+                "parent_id": e.get("parent_id"),
+                "status": e.get("status"),
+                "total_runs": e.get("total_runs"),
+                "metrics": e.get("metrics", {}),
+                "pareto_frontier": bool(e.get("pareto_frontier")),
+                "per_scene_metrics_path": e.get("per_scene_metrics_path"),
+                "trace_locations": e.get("trace_locations", {}),
             }
+        )
 
-        out[harness_id] = {
-            "harness_id": harness_id,
-            "total_runs": len(rows),
-            "evaluation_protocol": {
-                "version": EVALUATION_PROTOCOL_VERSION,
-                "scene_to_task_zone": dict(EVALUATION_SCENE_TASK_MAPPING),
-            },
-            "metrics": {
-                "mission_success_rate": mean(1.0 if r["mission_success"] else 0.0 for r in rows),
-                "collision_count_avg": mean(r["collision_count"] for r in rows),
-                "near_miss_count_avg": mean(r["near_miss_count"] for r in rows),
-                "completion_time_sec_avg": mean(r["completion_time_mission_sec"] for r in rows),
-                "llm_call_count_avg": mean(r["llm_call_count"] for r in rows),
-                "replan_count_avg": mean(r["replan_count"] for r in rows),
-            },
-            "per_scene_metrics": per_scene,
-        }
-    return out
+    snippets = collect_representative_trace_snippets(repo_root=repo_root, archive_root=archive_root, max_traces=6)
+
+    return {
+        "baseline_list": baselines,
+        "candidate_list": candidates,
+        "pareto_list": pareto,
+        "latest_harness": latest,
+        "entries": compact_entries,
+        "trace_snippets": snippets,
+    }
 
 
+def collect_representative_trace_snippets(repo_root: Path, archive_root: Path, max_traces: int = 6) -> List[Dict]:
+    repo_root = Path(repo_root)
+    archive_root = Path(archive_root)
+    out: List[Dict] = []
 
-def select_representative_trace_paths(repo_root: Path, limit: int = 12) -> List[str]:
-    runs_root = Path(repo_root) / "proposer_archive/manual_runs/runs"
-    out: List[str] = []
-    for p in sorted(runs_root.glob("run_*/run_*_runtime_trace.jsonl"))[:limit]:
-        out.append(str(p.as_posix()))
-    for p in sorted(runs_root.glob("run_*/run_*_planning_trace.jsonl"))[:limit]:
-        out.append(str(p.as_posix()))
+    run_dirs = sorted(archive_root.glob("**/runs/run_*"))
+    for run_dir in run_dirs[:max_traces]:
+        runtime = run_dir / "runtime_trace.jsonl"
+        planning = run_dir / "planning_trace.jsonl"
+        metadata = run_dir / "metadata.json"
+        item = {"run_dir": run_dir.as_posix()}
+
+        if metadata.exists():
+            item["metadata"] = _read_json(metadata, {})
+
+        if runtime.exists():
+            try:
+                first_line = runtime.read_text(encoding="utf-8").splitlines()[:1]
+                item["runtime_head"] = first_line
+            except Exception:
+                pass
+
+        if planning.exists():
+            try:
+                first_line = planning.read_text(encoding="utf-8").splitlines()[:1]
+                item["planning_head"] = first_line
+            except Exception:
+                pass
+
+        out.append(item)
+
+    # fallback to legacy manual archive if live runs are absent
+    if not out:
+        legacy_runs = sorted((repo_root / "proposer_archive/manual_runs/runs").glob("run_*"))
+        for run_dir in legacy_runs[:max_traces]:
+            runtime_files = sorted(run_dir.glob("*_runtime_trace.jsonl"))
+            planning_files = sorted(run_dir.glob("*_planning_trace.jsonl"))
+            item = {"run_dir": run_dir.as_posix()}
+            if runtime_files:
+                item["runtime_path"] = runtime_files[0].as_posix()
+            if planning_files:
+                item["planning_path"] = planning_files[0].as_posix()
+            out.append(item)
+
     return out

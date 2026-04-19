@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Dict, List
 
 from controller.harness_protocol import EVALUATION_PROTOCOL_SEQUENCE, EVALUATION_PROTOCOL_VERSION, TOTAL_EVAL_RUNS
+from proposer.archive_reader import summarize_archive_for_proposer
 from proposer.evaluate_candidate import mark_pareto
-from proposer.registry import HarnessRegistry, validate_candidate_boundary
+from proposer.prompts import OUTPUT_CONTRACT, build_iteration_prompt
+from proposer.registry import ALLOWED_MUTATION_FILES, HarnessRegistry, validate_candidate_boundary
 
 
 def _next_candidate_id(candidates_dir: Path) -> str:
@@ -24,59 +27,184 @@ def _load_json(path: Path) -> Dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def propose_next_candidate(repo_root: Path, note: str = "") -> Path:
+def _extract_json_object(text: str) -> Dict:
+    raw = str(text or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-zA-Z0-9_]*\n", "", raw)
+        raw = raw.rstrip("`").strip()
+    try:
+        return json.loads(raw)
+    except Exception:
+        match = re.search(r"\{[\s\S]*\}", raw)
+        if not match:
+            raise
+        return json.loads(match.group(0))
+
+
+def _llm_json(llm, model_name: str, prompt: str) -> Dict:
+    raw = llm.request(prompt=prompt, model_name=model_name, stream=False)
+    return _extract_json_object(str(raw or ""))
+
+
+def _build_file_generation_prompt(
+    *,
+    parent_harness_id: str,
+    parent_spec: Dict,
+    parent_file_name: str,
+    parent_file_content: str,
+    proposal: Dict,
+) -> str:
+    return (
+        "You are generating one bounded harness file for UAV harness optimization.\n"
+        "Allowed harness boundary files: spec.json, state_encoder.py, trigger_policy.py, prompt_builder.py, proposer_note.txt, README.md\n"
+        "You must output ONLY the full content of the requested file, no markdown fences.\n"
+        "Do not modify simulator/PX4/controller/executor/collision math/checkpoint rules.\n\n"
+        f"Parent harness: {parent_harness_id}\n"
+        f"Parent spec:\n{json.dumps(parent_spec, ensure_ascii=False, indent=2)}\n\n"
+        f"Proposal contract:\n{json.dumps(proposal, ensure_ascii=False, indent=2)}\n\n"
+        f"Requested file: {parent_file_name}\n"
+        "Current parent file content:\n"
+        f"{parent_file_content}\n\n"
+        "Generate improved content aligned with the proposal hypothesis and weakness.\n"
+        "If requested file is spec.json, ensure valid JSON and keep candidate lineage metadata."
+    )
+
+
+def propose_next_candidate(
+    repo_root: Path,
+    note: str = "",
+    focus_text: str = "Improve safety-aware replan timing while avoiding unnecessary detours.",
+    allow_fallback_heuristic: bool = False,
+) -> Path:
     repo_root = Path(repo_root)
     reg = HarnessRegistry(repo_root)
     baselines = reg.list_baselines()
     if not baselines:
         raise RuntimeError("No baselines found in harnesses/")
 
-    parent = sorted(baselines, key=lambda x: x.harness_id, reverse=True)[0]
-    parent_spec = dict(parent.spec)
+    archive_summary = summarize_archive_for_proposer(repo_root, repo_root / "proposer_archive_v2")
+    prompt = build_iteration_prompt(
+        baseline_list=json.dumps(archive_summary.get("baseline_list", []), ensure_ascii=False),
+        candidate_list=json.dumps(archive_summary.get("candidate_list", []), ensure_ascii=False),
+        pareto_list=json.dumps(archive_summary.get("pareto_list", []), ensure_ascii=False),
+        latest_harness=str(archive_summary.get("latest_harness", "(none)")),
+        focus_text=focus_text,
+        archive_evidence=json.dumps(
+            {
+                "entries": archive_summary.get("entries", []),
+                "trace_snippets": archive_summary.get("trace_snippets", []),
+                "output_contract": OUTPUT_CONTRACT,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
 
-    candidate_id = _next_candidate_id(reg.candidates_dir)
+    from controller.llm_wrapper import LLMWrapper, MODEL_NAME
+
+    llm = LLMWrapper(temperature=0.1)
+    try:
+        proposal = _llm_json(llm, MODEL_NAME, prompt)
+    except Exception:
+        if not allow_fallback_heuristic:
+            raise
+        # conservative fallback path (explicitly marked)
+        proposal = {
+            "parent_harness": "baseline3",
+            "candidate_id": "",
+            "one_sentence_hypothesis": "Conservative fallback due to proposer LLM failure.",
+            "weakness_being_addressed": "LLM unavailable during proposal call",
+            "expected_tradeoff": "Minimal structured change",
+            "files_to_create_or_modify": ["spec.json", "proposer_note.txt"],
+            "proposer_note_text": "Fallback proposal generated because LLM proposer call failed.",
+        }
+
+    parent_id = str(proposal.get("parent_harness") or "").strip()
+    if not parent_id:
+        raise ValueError("LLM proposer output missing parent_harness")
+
+    parent_entry = reg.get(parent_id)
+
+    asked_candidate_id = str(proposal.get("candidate_id") or "").strip()
+    if re.fullmatch(r"candidate_\d{4}", asked_candidate_id) and not (reg.candidates_dir / asked_candidate_id).exists():
+        candidate_id = asked_candidate_id
+    else:
+        candidate_id = _next_candidate_id(reg.candidates_dir)
+
     candidate_dir = reg.candidates_dir / candidate_id
     candidate_dir.mkdir(parents=True, exist_ok=False)
 
-    parent_trigger = dict(parent_spec.get("trigger_policy") or {})
-    threshold = parent_trigger.get("threshold")
-    if threshold is None:
-        threshold = 0.55
-    else:
-        threshold = max(0.35, float(threshold) - 0.05)
+    files_to_modify = [str(v) for v in list(proposal.get("files_to_create_or_modify") or [])]
+    if not files_to_modify:
+        files_to_modify = ["spec.json", "trigger_policy.py", "proposer_note.txt"]
 
-    parent_spec["id"] = candidate_id
-    parent_spec["kind"] = "candidate"
-    parent_spec["parent"] = parent.harness_id
-    parent_spec["lineage"] = {
-        "parent_id": parent.harness_id,
-        "parent_kind": "baseline" if parent.harness_id.startswith("baseline") else "candidate",
-        "derived_from": parent.harness_id,
-    }
-    parent_spec.setdefault("mutation", {})
-    parent_spec["mutation"]["type"] = "heuristic_threshold_and_prompt_order"
-    parent_spec["trigger_policy"]["type"] = "hybrid"
-    parent_spec["trigger_policy"]["threshold"] = float(threshold)
-    parent_spec["trigger_policy"]["heartbeat_seconds"] = 5.0
-    parent_spec["trigger_policy"]["consecutive_high_risk"] = 2
-    parent_spec["trigger_policy"]["hysteresis"] = 0.05
-    parent_spec["prompt_builder"]["paragraph_order"] = ["opening", "task", "runtime", "risk", "examples", "output"]
+    # Start from parent snapshot for deterministic bounded edits.
+    for name in ["spec.json", "state_encoder.py", "trigger_policy.py", "prompt_builder.py"]:
+        src = parent_entry.dir_path / name
+        if src.exists():
+            shutil.copy2(src, candidate_dir / name)
 
-    for name in ["state_encoder.py", "trigger_policy.py", "prompt_builder.py"]:
-        shutil.copy2(parent.dir_path / name, candidate_dir / name)
+    parent_spec = _load_json(parent_entry.dir_path / "spec.json")
 
-    (candidate_dir / "spec.json").write_text(json.dumps(parent_spec, ensure_ascii=False, indent=2), encoding="utf-8")
-    (candidate_dir / "proposer_note.txt").write_text(
-        (
-            note
-            or (
-                "Hypothesis: baseline3 has good risk sensitivity, but adding hybrid trigger\n"
-                "(heartbeat + risk threshold + hysteresis) may reduce delayed replans while\n"
-                "containing unnecessary LLM calls under stable low-risk intervals."
+    normalized_target_files = []
+    for name in files_to_modify:
+        base = Path(name).name
+        if base in ALLOWED_MUTATION_FILES:
+            normalized_target_files.append(base)
+
+    for target_file in normalized_target_files:
+        if target_file in {"proposer_note.txt", "README.md"}:
+            continue
+        parent_file_content = (candidate_dir / target_file).read_text(encoding="utf-8") if (candidate_dir / target_file).exists() else ""
+        file_prompt = _build_file_generation_prompt(
+            parent_harness_id=parent_id,
+            parent_spec=parent_spec,
+            parent_file_name=target_file,
+            parent_file_content=parent_file_content,
+            proposal=proposal,
+        )
+        generated = str(llm.request(prompt=file_prompt, model_name=MODEL_NAME, stream=False) or "").strip()
+        if target_file == "spec.json":
+            spec_obj = _extract_json_object(generated)
+            spec_obj["id"] = candidate_id
+            spec_obj["kind"] = "candidate"
+            spec_obj["parent"] = parent_id
+            lineage = dict(spec_obj.get("lineage") or {})
+            lineage.update(
+                {
+                    "parent_id": parent_id,
+                    "parent_kind": "baseline" if parent_id.startswith("baseline") else "candidate",
+                    "derived_from": parent_id,
+                }
             )
-        ),
-        encoding="utf-8",
-    )
+            spec_obj["lineage"] = lineage
+            spec_obj.setdefault("mutation", {})
+            spec_obj["mutation"]["type"] = "llm_agent_driven"
+            (candidate_dir / target_file).write_text(json.dumps(spec_obj, ensure_ascii=False, indent=2), encoding="utf-8")
+        else:
+            (candidate_dir / target_file).write_text(generated + "\n", encoding="utf-8")
+
+    proposer_note_text = str(proposal.get("proposer_note_text") or "").strip()
+    final_note = note or proposer_note_text or "LLM proposer generated candidate without additional note."
+    (candidate_dir / "proposer_note.txt").write_text(final_note + "\n", encoding="utf-8")
+
+    # Ensure mandatory spec metadata even if LLM skipped it.
+    spec = _load_json(candidate_dir / "spec.json")
+    spec["id"] = candidate_id
+    spec["kind"] = "candidate"
+    spec["parent"] = parent_id
+    spec.setdefault("lineage", {})
+    spec["lineage"]["parent_id"] = parent_id
+    spec["lineage"]["parent_kind"] = "baseline" if parent_id.startswith("baseline") else "candidate"
+    spec["lineage"]["derived_from"] = parent_id
+    spec.setdefault("proposal_contract", {})
+    spec["proposal_contract"] = {
+        "one_sentence_hypothesis": str(proposal.get("one_sentence_hypothesis") or ""),
+        "weakness_being_addressed": str(proposal.get("weakness_being_addressed") or ""),
+        "expected_tradeoff": str(proposal.get("expected_tradeoff") or ""),
+        "files_to_create_or_modify": normalized_target_files,
+    }
+    (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
 
     validate_candidate_boundary(candidate_dir)
     return candidate_dir
@@ -153,7 +281,6 @@ def rebuild_index(archive_root: Path) -> Dict:
                     },
                 }
             )
-    # adapt to evaluator's key name for pareto function
     for p in pareto_ready:
         p["metrics"]["completion_time_sec_avg"] = p["metrics"].pop("completion_time_mission_sec_avg")
 
