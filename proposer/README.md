@@ -1,16 +1,19 @@
 # Restricted Meta-Harness MVP (Talk-to-Fly)
 
-This proposer loop limits mutation boundary to harness-level modules only:
+This proposer loop limits mutation boundary to harness-level modules only, with **sandbox runtime-effect modules as primary targets**:
 
-- `state_encoder.py`
-- `trigger_policy.py`
-- `prompt_builder.py`
-- `spec.json`
-- `state_features.py`
-- `trigger_logic.py`
-- `prompt_composer.py`
-- `archive_selector.py`
-- `validator_rules.py`
+- Primary runtime-effect modules:
+  - `state_features.py`
+  - `trigger_logic.py`
+  - `prompt_composer.py`
+  - `archive_selector.py`
+  - `validator_rules.py`
+- Compatibility / metadata modules:
+  - `state_encoder.py`
+  - `trigger_policy.py`
+  - `prompt_builder.py`
+- Required contract/meta files:
+  - `spec.json`
 
 ## Fixed evaluation protocol (strict)
 
@@ -25,12 +28,27 @@ Total runs per evaluated harness: **24**.
 `proposer/propose_candidate.py` now drives proposal creation with LLM calls via `controller.llm_wrapper.LLMWrapper`.
 
 - It uses controlled coding-agent tools (`proposer/agent_tools.py`) to list/read/diff harnesses and inspect runs/traces.
-- It uses the system prompt + iteration prompt + output contract in `proposer/prompts.py`.
+- It now uses a **multi-round agent loop** (tool step -> observation -> next step) instead of single-shot proposal prompting.
+- It uses `AGENT_SYSTEM_PROMPT` + `AGENT_TOOL_POLICY_PROMPT` + `AGENT_NEXT_ACTION_PROMPT` + `FINAL_PROPOSAL_CONTRACT` in `proposer/prompts.py`.
 - It proposes exactly one candidate each invocation.
 - It keeps candidate edits bounded by `proposer/registry.py` allowed files.
 - It now enforces contract/spec/code consistency via `proposer/consistency.py` before a candidate is accepted.
 - Proposer model defaults to `gpt-4.1` and is configurable via `TYPEFLY_PROPOSER_MODEL`.
 - If `TYPEFLY_PROPOSER_MODEL` is a GPT model and `OPENAI_API_KEY` is missing, proposer fails with a clear error (unless explicit fallback is enabled).
+
+### Multi-round agent step loop (runtime)
+
+`propose_next_candidate()` runs a bounded step loop (default max 10 steps):
+1. ask model for next action (`tool_call` or `final_proposal`),
+2. execute tool calls and append observations,
+3. require at least one tool call and at least one run-evidence tool call before accepting `final_proposal`,
+4. fail fast if step limit exceeded.
+
+Run-evidence tools are prioritized in policy and enforced before finalize:
+- `list_runs`
+- `search_traces`
+- `read_run_metadata`
+- `read_trace_snippet`
 
 ### Run evidence sources used by proposer tools
 
@@ -82,12 +100,42 @@ evidence-rich baselines/candidates and only falls back to spec/code-first behavi
   - boundary safety,
   - required artifacts (`spec`, `manifest`, `runtime_metadata`, `proposer_note`, diff/audit files),
   - py_compile + import checks,
+  - structured runtime wiring smoke verification artifact,
   - runtime wiring consistency for sandbox modules,
   - at least one runtime-effect module changed.
 - High-level narrative/string semantics are intentionally not hard-failed by system validator.
 - If guardrails/smoke fail, proposer enters bounded revise loop (default up to 2 revisions) and asks the coding agent to self-fix files, then re-check.
 
 If any check fails, proposer **fails fast** and removes the just-created candidate directory instead of silently accepting an inconsistent candidate.
+
+### Structured runtime wiring smoke verification
+
+After candidate generation and before final acceptance, proposer now writes:
+
+- `runtime_wiring_verification.json`
+
+with fields including:
+- loaded runtime module/function per line:
+  - `loaded_trigger_module` / `loaded_trigger_function`
+  - `loaded_state_module` / `loaded_state_function`
+  - `loaded_prompt_module` / `loaded_prompt_function`
+- candidate claims:
+  - `candidate_trigger_module_claim`
+  - `candidate_state_module_claim`
+  - `candidate_prompt_module_claim`
+- per-line alignment checks:
+  - `trigger_alignment_ok`
+  - `state_alignment_ok`
+  - `prompt_alignment_ok`
+- final result:
+  - `passed`
+  - `notes`
+
+`spec.runtime_metadata` now records:
+- `runtime_wiring_verification_path`
+- `runtime_wiring_verification_passed`
+
+If wiring verification fails for any claimed/changed line, proposer treats it as smoke/guardrail failure and pushes the candidate into self-review/revise (bounded rounds) or final reject.
 
 ## Diff-safe / branch-safe / test-safe metadata
 
