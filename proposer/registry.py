@@ -18,6 +18,12 @@ ALLOWED_MUTATION_FILES = {
     "validator_rules.py",
     "README.md",
     "proposer_note.txt",
+    "parent_diff.patch",
+    "proposer_tool_audit.json",
+}
+
+TRACKED_CONTRACT_FILES = {
+    x for x in ALLOWED_MUTATION_FILES if x not in {"parent_diff.patch", "proposer_tool_audit.json"}
 }
 
 
