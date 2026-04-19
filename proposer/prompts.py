@@ -188,9 +188,10 @@ OUTPUT_CONTRACT = """You must output exactly the following items:
 6. expected_runtime_effect
 7. sandbox_modules_to_modify
 8. files_to_create_or_modify
-9. proposer_note_text
-10. implementation_contract
-11. invariants
+9. changed_files
+10. proposer_note_text
+11. implementation_contract
+12. invariants
 
 `implementation_contract` must be a JSON object with these nested keys:
 - trigger_policy: exact spec fields to enforce (type/heartbeat_seconds/threshold/strictly_greater/consecutive_high_risk/hysteresis)
@@ -204,10 +205,26 @@ OUTPUT_CONTRACT = """You must output exactly the following items:
 - archive_selector.py
 - validator_rules.py
 `files_to_create_or_modify` must be non-empty and must include `spec.json`, `proposer_note.txt`, and at least one sandbox module `.py`.
+`changed_files` must describe the expected parent->candidate changed file set for diff-safety.
 `invariants` must list concrete alignment checks that should hold across contract/spec/code.
 The proposed edit must remain within the allowed harness boundary.
 Do not modify unrelated repository files.
 Do not propose more than one candidate."""
+
+
+SELF_REVIEW_CONTRACT = """Return JSON only:
+{
+  "status": "pass" | "revise",
+  "issues": ["..."],
+  "files_to_modify": ["...allowed sandbox files..."],
+  "revision_plan": "one short sentence"
+}
+
+Rules:
+- Focus on runtime wiring, changed-files truthfulness, and smoke-test failures.
+- Do NOT nitpick wording or abstract label naming.
+- If runtime wiring and smoke checks are healthy, return status=pass.
+- files_to_modify must be subset of allowed boundary files."""
 
 
 def build_iteration_prompt(*, baseline_list: str, candidate_list: str, pareto_list: str, latest_harness: str, focus_text: str, archive_evidence: str) -> str:
@@ -223,5 +240,18 @@ def build_iteration_prompt(*, baseline_list: str, candidate_list: str, pareto_li
         f"{task_prompt}\n\n"
         f"Archive evidence (JSON / snippets):\n{archive_evidence}\n\n"
         f"{OUTPUT_CONTRACT}\n\n"
-        "Return JSON object only with the 11 required keys."
+        "Return JSON object only with the 12 required keys."
+    )
+
+
+def build_self_review_prompt(*, proposal_contract_json: str, candidate_spec_json: str, changed_files_json: str, last_error: str) -> str:
+    return (
+        "You are performing proposer self-review on ONE generated candidate.\n"
+        "Goal: catch runtime wiring mistakes and fixable implementation issues only.\n"
+        "Do not fail based on narrative wording differences.\n\n"
+        f"Proposal contract:\n{proposal_contract_json}\n\n"
+        f"Candidate spec:\n{candidate_spec_json}\n\n"
+        f"Detected changed files:\n{changed_files_json}\n\n"
+        f"Last guardrail/smoke error (if any):\n{last_error}\n\n"
+        f"{SELF_REVIEW_CONTRACT}"
     )
