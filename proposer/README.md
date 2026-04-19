@@ -100,12 +100,42 @@ evidence-rich baselines/candidates and only falls back to spec/code-first behavi
   - boundary safety,
   - required artifacts (`spec`, `manifest`, `runtime_metadata`, `proposer_note`, diff/audit files),
   - py_compile + import checks,
+  - structured runtime wiring smoke verification artifact,
   - runtime wiring consistency for sandbox modules,
   - at least one runtime-effect module changed.
 - High-level narrative/string semantics are intentionally not hard-failed by system validator.
 - If guardrails/smoke fail, proposer enters bounded revise loop (default up to 2 revisions) and asks the coding agent to self-fix files, then re-check.
 
 If any check fails, proposer **fails fast** and removes the just-created candidate directory instead of silently accepting an inconsistent candidate.
+
+### Structured runtime wiring smoke verification
+
+After candidate generation and before final acceptance, proposer now writes:
+
+- `runtime_wiring_verification.json`
+
+with fields including:
+- loaded runtime module/function per line:
+  - `loaded_trigger_module` / `loaded_trigger_function`
+  - `loaded_state_module` / `loaded_state_function`
+  - `loaded_prompt_module` / `loaded_prompt_function`
+- candidate claims:
+  - `candidate_trigger_module_claim`
+  - `candidate_state_module_claim`
+  - `candidate_prompt_module_claim`
+- per-line alignment checks:
+  - `trigger_alignment_ok`
+  - `state_alignment_ok`
+  - `prompt_alignment_ok`
+- final result:
+  - `passed`
+  - `notes`
+
+`spec.runtime_metadata` now records:
+- `runtime_wiring_verification_path`
+- `runtime_wiring_verification_passed`
+
+If wiring verification fails for any claimed/changed line, proposer treats it as smoke/guardrail failure and pushes the candidate into self-review/revise (bounded rounds) or final reject.
 
 ## Diff-safe / branch-safe / test-safe metadata
 

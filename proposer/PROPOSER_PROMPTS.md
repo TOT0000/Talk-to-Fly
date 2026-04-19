@@ -25,6 +25,7 @@ This document mirrors runtime prompts used by:
 
 5. `SELF_REVIEW_CONTRACT` + `build_self_review_prompt(...)`
    - Runtime-first review contract for pass/revise decisions after guardrails/smoke outcomes.
+   - Self-review input includes structured `runtime_wiring_verification` JSON (not only a free-text error string).
 
 ## Agent step protocol (runtime)
 
@@ -45,6 +46,7 @@ Runtime enforcements:
 - No final proposal before at least one run-evidence tool call.
 - Agent loop has max step limit (fail-fast on overflow).
 - If run evidence is weak/absent, proposal must mark `smoke_test_evidence_to_check.evidence_limitations`.
+- Candidate acceptance path includes structured runtime wiring smoke verification artifact and fails revise/reject on claimed-line mismatch.
 
 ## Final proposal contract keys
 

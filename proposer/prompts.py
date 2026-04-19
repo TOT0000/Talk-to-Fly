@@ -118,6 +118,8 @@ Runtime-first review priority:
 3) spec/manifest/loader alignment,
 4) smoke evidence supports runtime claims,
 5) wiring ambiguity or unsupported claims => revise.
+
+If runtime_wiring_verification has any *_alignment_ok == false, default to revise unless a concrete fix is impossible.
 """
 
 
@@ -143,7 +145,14 @@ def build_agent_next_action_prompt(
     )
 
 
-def build_self_review_prompt(*, proposal_contract_json: str, candidate_spec_json: str, changed_files_json: str, last_error: str) -> str:
+def build_self_review_prompt(
+    *,
+    proposal_contract_json: str,
+    candidate_spec_json: str,
+    changed_files_json: str,
+    runtime_wiring_verification_json: str,
+    last_error: str,
+) -> str:
     return (
         "You are performing proposer self-review on ONE generated candidate.\n"
         "Goal: enforce runtime wiring alignment and smoke-evidence truthfulness.\n"
@@ -151,6 +160,7 @@ def build_self_review_prompt(*, proposal_contract_json: str, candidate_spec_json
         f"Proposal contract:\n{proposal_contract_json}\n\n"
         f"Candidate spec:\n{candidate_spec_json}\n\n"
         f"Detected changed files:\n{changed_files_json}\n\n"
+        f"Structured runtime wiring verification:\n{runtime_wiring_verification_json}\n\n"
         f"Last guardrail/smoke error (if any):\n{last_error}\n\n"
         "Review focus: runtime-effect modules, wiring consistency, smoke evidence sufficiency, and honest handling of evidence limitations.\n\n"
         f"{SELF_REVIEW_CONTRACT}"

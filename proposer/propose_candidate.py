@@ -11,6 +11,7 @@ from difflib import unified_diff
 from pathlib import Path
 from typing import Dict, List, Set
 
+from controller.harness_sandbox import load_harness_sandbox_profile
 from controller.harness_protocol import EVALUATION_PROTOCOL_SEQUENCE, EVALUATION_PROTOCOL_VERSION, TOTAL_EVAL_RUNS
 from proposer.agent_tools import ProposerToolbox
 from proposer.archive_reader import summarize_archive_for_proposer
@@ -383,6 +384,91 @@ def _run_import_checks(candidate_dir: Path) -> None:
         spec.loader.exec_module(mod)
 
 
+def _runtime_wiring_smoke_verification(*, candidate_dir: Path, proposal_contract: Dict, changed_files: Set[str]) -> Dict:
+    profile = load_harness_sandbox_profile(str((candidate_dir / "spec.json").as_posix()))
+    trigger = dict(profile.get("trigger_logic") or {})
+    state = dict(profile.get("state_features") or {})
+    prompt = dict(profile.get("prompt_composer") or {})
+    claimed = {Path(str(x)).name for x in list(proposal_contract.get("sandbox_modules_to_modify") or [])}
+    changed = {Path(str(x)).name for x in set(changed_files or set())}
+    manifest_active = {Path(str(x)).name for x in list(((profile.get("spec") or {}).get("manifest") or {}).get("active_sandbox_modules") or [])}
+
+    def _fn_name(obj) -> str:
+        return getattr(obj, "__name__", "") if callable(obj) else ""
+
+    checks = {
+        "trigger": {
+            "module": "trigger_logic.py",
+            "loaded_module": Path(str(trigger.get("module") or "")).name,
+            "loaded_function": _fn_name(trigger.get("fn")),
+            "claim": "trigger_logic.py" if "trigger_logic.py" in claimed else "",
+        },
+        "state": {
+            "module": "state_features.py",
+            "loaded_module": Path(str(state.get("module") or "")).name,
+            "loaded_function": _fn_name(state.get("fn")),
+            "claim": "state_features.py" if "state_features.py" in claimed else "",
+        },
+        "prompt": {
+            "module": "prompt_composer.py",
+            "loaded_module": Path(str(prompt.get("module") or "")).name,
+            "loaded_function": _fn_name(prompt.get("fn")),
+            "claim": "prompt_composer.py" if "prompt_composer.py" in claimed else "",
+        },
+    }
+
+    notes: List[str] = []
+
+    def _alignment(item: Dict) -> bool | None:
+        expected = item["module"]
+        is_claimed = bool(item["claim"]) or (expected in changed)
+        if not is_claimed:
+            notes.append(f"{expected}: not claimed/changed; skipped strict alignment check")
+            return None
+        module_ok = item["loaded_module"] == expected
+        fn_ok = bool(item["loaded_function"])
+        active_ok = expected in manifest_active if manifest_active else True
+        changed_ok = expected in changed
+        if not module_ok:
+            notes.append(f"{expected}: runtime loaded {item['loaded_module']} (expected {expected})")
+        if not fn_ok:
+            notes.append(f"{expected}: runtime function not found")
+        if not active_ok:
+            notes.append(f"{expected}: manifest.active_sandbox_modules missing expected module")
+        if not changed_ok:
+            notes.append(f"{expected}: module was claimed but not detected in changed_files")
+        return bool(module_ok and fn_ok and active_ok and changed_ok)
+
+    trigger_ok = _alignment(checks["trigger"])
+    state_ok = _alignment(checks["state"])
+    prompt_ok = _alignment(checks["prompt"])
+    all_flags = [x for x in [trigger_ok, state_ok, prompt_ok] if x is not None]
+    passed = all(all_flags) if all_flags else True
+    if passed and all_flags:
+        notes.append("runtime wiring alignment passed for all claimed/changed sandbox lines")
+
+    verification = {
+        "passed": bool(passed),
+        "loader_entrypoint": "controller.harness_sandbox.load_harness_sandbox_profile",
+        "loaded_trigger_module": checks["trigger"]["loaded_module"],
+        "loaded_trigger_function": checks["trigger"]["loaded_function"],
+        "loaded_state_module": checks["state"]["loaded_module"],
+        "loaded_state_function": checks["state"]["loaded_function"],
+        "loaded_prompt_module": checks["prompt"]["loaded_module"],
+        "loaded_prompt_function": checks["prompt"]["loaded_function"],
+        "candidate_trigger_module_claim": checks["trigger"]["claim"],
+        "candidate_state_module_claim": checks["state"]["claim"],
+        "candidate_prompt_module_claim": checks["prompt"]["claim"],
+        "trigger_alignment_ok": trigger_ok,
+        "state_alignment_ok": state_ok,
+        "prompt_alignment_ok": prompt_ok,
+        "changed_files": sorted(changed),
+        "manifest_active_sandbox_modules": sorted(manifest_active),
+        "notes": notes,
+    }
+    return verification
+
+
 def _normalize_generated_text(text: str) -> str:
     out = str(text or "")
     while "\\n" in out:
@@ -642,6 +728,15 @@ def propose_next_candidate(
         (candidate_dir / "proposer_note.txt").write_text(final_note + "\n", encoding="utf-8")
 
         changed_files = _detect_changed_files(candidate_dir, parent_entry.dir_path)
+        wiring_verification = _runtime_wiring_smoke_verification(
+            candidate_dir=candidate_dir,
+            proposal_contract=_load_json(candidate_dir / "spec.json").get("proposal_contract", {}),
+            changed_files=changed_files,
+        )
+        (candidate_dir / "runtime_wiring_verification.json").write_text(
+            json.dumps(wiring_verification, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         spec = _load_json(candidate_dir / "spec.json")
         spec["proposal_contract"]["files_to_create_or_modify"] = sorted(changed_files)
         parent_commit = _git_parent_commit(repo_root)
@@ -653,6 +748,8 @@ def propose_next_candidate(
             "diff_path": "parent_diff.patch",
             "candidate_branch_hint": f"candidate/{candidate_id}",
             "agent_loop_meta": dict(agent_meta or {}),
+            "runtime_wiring_verification_path": "runtime_wiring_verification.json",
+            "runtime_wiring_verification_passed": bool(wiring_verification.get("passed")),
         }
         (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
         (candidate_dir / "parent_diff.patch").write_text(
@@ -692,6 +789,15 @@ def propose_next_candidate(
         last_error = ""
         for _round in range(max(0, int(max_revision_rounds)) + 1):
             changed_files = _detect_changed_files(candidate_dir, parent_entry.dir_path)
+            wiring_verification = _runtime_wiring_smoke_verification(
+                candidate_dir=candidate_dir,
+                proposal_contract=_load_json(candidate_dir / "spec.json").get("proposal_contract", {}),
+                changed_files=changed_files,
+            )
+            (candidate_dir / "runtime_wiring_verification.json").write_text(
+                json.dumps(wiring_verification, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
             spec = _load_json(candidate_dir / "spec.json")
             spec["proposal_contract"]["files_to_create_or_modify"] = sorted(changed_files)
             parent_commit = _git_parent_commit(repo_root)
@@ -703,6 +809,8 @@ def propose_next_candidate(
                 "diff_path": "parent_diff.patch",
                 "candidate_branch_hint": f"candidate/{candidate_id}",
                 "agent_loop_meta": dict(agent_meta or {}),
+                "runtime_wiring_verification_path": "runtime_wiring_verification.json",
+                "runtime_wiring_verification_passed": bool(wiring_verification.get("passed")),
             }
             (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
             (candidate_dir / "parent_diff.patch").write_text(
@@ -728,6 +836,9 @@ def propose_next_candidate(
                 _run_candidate_smoke_checks(candidate_dir)
                 _run_import_checks(candidate_dir)
                 validate_candidate_contract_alignment(candidate_dir, parent_dir=parent_entry.dir_path, proposal_contract=spec["proposal_contract"])
+                latest_wiring = _load_json(candidate_dir / "runtime_wiring_verification.json") if (candidate_dir / "runtime_wiring_verification.json").exists() else {}
+                if not bool(latest_wiring.get("passed", False)):
+                    raise RuntimeError(f"runtime wiring verification failed: {json.dumps(latest_wiring, ensure_ascii=False)}")
             except Exception as exc:
                 last_error = str(exc)
             else:
@@ -737,6 +848,11 @@ def propose_next_candidate(
                 proposal_contract_json=json.dumps(spec.get("proposal_contract", {}), ensure_ascii=False, indent=2),
                 candidate_spec_json=json.dumps(spec, ensure_ascii=False, indent=2),
                 changed_files_json=json.dumps(sorted(changed_files), ensure_ascii=False),
+                runtime_wiring_verification_json=json.dumps(
+                    _load_json(candidate_dir / "runtime_wiring_verification.json") if (candidate_dir / "runtime_wiring_verification.json").exists() else {},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
                 last_error=last_error or "(none)",
             )
             review = _extract_json_object(str(llm.request(prompt=review_prompt, model_name=proposer_model or MODEL_NAME, stream=False) or "{}"))
