@@ -4,10 +4,11 @@ import json
 import re
 import shutil
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Set
 
 from controller.harness_protocol import EVALUATION_PROTOCOL_SEQUENCE, EVALUATION_PROTOCOL_VERSION, TOTAL_EVAL_RUNS
 from proposer.archive_reader import summarize_archive_for_proposer
+from proposer.consistency import validate_candidate_contract_alignment
 from proposer.evaluate_candidate import mark_pareto
 from proposer.prompts import OUTPUT_CONTRACT, build_iteration_prompt
 from proposer.registry import ALLOWED_MUTATION_FILES, HarnessRegistry, validate_candidate_boundary
@@ -44,6 +45,95 @@ def _extract_json_object(text: str) -> Dict:
 def _llm_json(llm, model_name: str, prompt: str) -> Dict:
     raw = llm.request(prompt=prompt, model_name=model_name, stream=False)
     return _extract_json_object(str(raw or ""))
+
+
+def _normalize_files_to_modify(proposal: Dict) -> List[str]:
+    normalized_target_files: List[str] = []
+    for name in list(proposal.get("files_to_create_or_modify") or []):
+        base = Path(str(name)).name
+        if base in ALLOWED_MUTATION_FILES and base not in normalized_target_files:
+            normalized_target_files.append(base)
+    return normalized_target_files
+
+
+def _prepare_proposal_contract(proposal: Dict) -> Dict:
+    required_keys = [
+        "parent_harness",
+        "one_sentence_hypothesis",
+        "weakness_being_addressed",
+        "expected_tradeoff",
+        "proposer_note_text",
+        "implementation_contract",
+        "invariants",
+    ]
+    for key in required_keys:
+        if key not in proposal:
+            raise ValueError(f"LLM proposer output missing required key: {key}")
+
+    normalized_target_files = _normalize_files_to_modify(proposal)
+    if "spec.json" not in normalized_target_files:
+        normalized_target_files.append("spec.json")
+    if "proposer_note.txt" not in normalized_target_files:
+        normalized_target_files.append("proposer_note.txt")
+    if not normalized_target_files:
+        raise ValueError("LLM proposer output missing files_to_create_or_modify")
+
+    implementation_contract = dict(proposal.get("implementation_contract") or {})
+    for section in ["trigger_policy", "state_encoder", "prompt_builder"]:
+        if section not in implementation_contract:
+            raise ValueError(f"implementation_contract missing section: {section}")
+
+    invariants = list(proposal.get("invariants") or [])
+    if not invariants:
+        raise ValueError("LLM proposer output missing invariants")
+
+    normalized = dict(proposal)
+    normalized["files_to_create_or_modify"] = normalized_target_files
+    normalized["implementation_contract"] = implementation_contract
+    normalized["invariants"] = invariants
+    return normalized
+
+
+def _detect_changed_files(candidate_dir: Path, parent_dir: Path) -> Set[str]:
+    changed: Set[str] = set()
+    for name in ALLOWED_MUTATION_FILES:
+        cp = candidate_dir / name
+        pp = parent_dir / name
+        if cp.exists() and not pp.exists():
+            changed.add(name)
+            continue
+        if cp.exists() and pp.exists():
+            if cp.read_text(encoding="utf-8") != pp.read_text(encoding="utf-8"):
+                changed.add(name)
+    return changed
+
+
+def _build_grounded_note(*, contract: Dict, spec: Dict, changed_files: Set[str]) -> str:
+    trigger = dict(spec.get("trigger_policy") or {})
+    state = dict(spec.get("state_encoder") or {})
+    prompt_cfg = dict(spec.get("prompt_builder") or {})
+    return "\n".join(
+        [
+            f"Parent harness: {contract.get('parent_harness')}",
+            f"Hypothesis: {contract.get('one_sentence_hypothesis')}",
+            f"Weakness addressed: {contract.get('weakness_being_addressed')}",
+            f"Expected tradeoff: {contract.get('expected_tradeoff')}",
+            (
+                "Implemented trigger_policy: "
+                f"type={trigger.get('type')}, heartbeat_seconds={trigger.get('heartbeat_seconds')}, threshold={trigger.get('threshold')}"
+            ),
+            (
+                "Implemented state_encoder: "
+                f"summary_style={state.get('summary_style')}, include_risk_related={state.get('include_risk_related')}"
+            ),
+            (
+                "Implemented prompt_builder: "
+                f"template_family={prompt_cfg.get('template_family')}, include_example={prompt_cfg.get('include_example')}"
+            ),
+            f"Changed files: {sorted(changed_files)}",
+            f"Contract invariants: {contract.get('invariants')}",
+        ]
+    )
 
 
 def _build_file_generation_prompt(
@@ -104,12 +194,12 @@ def propose_next_candidate(
 
     llm = LLMWrapper(temperature=0.1)
     try:
-        proposal = _llm_json(llm, MODEL_NAME, prompt)
+        proposal = _prepare_proposal_contract(_llm_json(llm, MODEL_NAME, prompt))
     except Exception:
         if not allow_fallback_heuristic:
             raise
         # conservative fallback path (explicitly marked)
-        proposal = {
+        proposal = _prepare_proposal_contract({
             "parent_harness": "baseline3",
             "candidate_id": "",
             "one_sentence_hypothesis": "Conservative fallback due to proposer LLM failure.",
@@ -117,7 +207,16 @@ def propose_next_candidate(
             "expected_tradeoff": "Minimal structured change",
             "files_to_create_or_modify": ["spec.json", "proposer_note.txt"],
             "proposer_note_text": "Fallback proposal generated because LLM proposer call failed.",
-        }
+            "implementation_contract": {
+                "trigger_policy": {},
+                "state_encoder": {},
+                "prompt_builder": {},
+            },
+            "invariants": [
+                "proposal_contract files must match actual changed files",
+                "spec trigger policy must align with trigger_policy.py behavior",
+            ],
+        })
 
     parent_id = str(proposal.get("parent_harness") or "").strip()
     if not parent_id:
@@ -134,9 +233,9 @@ def propose_next_candidate(
     candidate_dir = reg.candidates_dir / candidate_id
     candidate_dir.mkdir(parents=True, exist_ok=False)
 
-    files_to_modify = [str(v) for v in list(proposal.get("files_to_create_or_modify") or [])]
+    files_to_modify = _normalize_files_to_modify(proposal)
     if not files_to_modify:
-        files_to_modify = ["spec.json", "trigger_policy.py", "proposer_note.txt"]
+        raise ValueError("proposal_contract.files_to_create_or_modify must be non-empty")
 
     # Start from parent snapshot for deterministic bounded edits.
     for name in ["spec.json", "state_encoder.py", "trigger_policy.py", "prompt_builder.py"]:
@@ -146,11 +245,7 @@ def propose_next_candidate(
 
     parent_spec = _load_json(parent_entry.dir_path / "spec.json")
 
-    normalized_target_files = []
-    for name in files_to_modify:
-        base = Path(name).name
-        if base in ALLOWED_MUTATION_FILES:
-            normalized_target_files.append(base)
+    normalized_target_files = [Path(name).name for name in files_to_modify if Path(name).name in ALLOWED_MUTATION_FILES]
 
     for target_file in normalized_target_files:
         if target_file in {"proposer_note.txt", "README.md"}:
@@ -184,30 +279,46 @@ def propose_next_candidate(
         else:
             (candidate_dir / target_file).write_text(generated + "\n", encoding="utf-8")
 
-    proposer_note_text = str(proposal.get("proposer_note_text") or "").strip()
-    final_note = note or proposer_note_text or "LLM proposer generated candidate without additional note."
-    (candidate_dir / "proposer_note.txt").write_text(final_note + "\n", encoding="utf-8")
+    try:
+        # Ensure mandatory spec metadata even if LLM skipped it.
+        spec = _load_json(candidate_dir / "spec.json")
+        spec["id"] = candidate_id
+        spec["kind"] = "candidate"
+        spec["parent"] = parent_id
+        spec.setdefault("lineage", {})
+        spec["lineage"]["parent_id"] = parent_id
+        spec["lineage"]["parent_kind"] = "baseline" if parent_id.startswith("baseline") else "candidate"
+        spec["lineage"]["derived_from"] = parent_id
+        spec.setdefault("proposal_contract", {})
+        spec["proposal_contract"] = {
+            "parent_harness": parent_id,
+            "one_sentence_hypothesis": str(proposal.get("one_sentence_hypothesis") or ""),
+            "weakness_being_addressed": str(proposal.get("weakness_being_addressed") or ""),
+            "expected_tradeoff": str(proposal.get("expected_tradeoff") or ""),
+            "files_to_create_or_modify": normalized_target_files,
+            "implementation_contract": dict(proposal.get("implementation_contract") or {}),
+            "invariants": list(proposal.get("invariants") or []),
+        }
+        (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # Ensure mandatory spec metadata even if LLM skipped it.
-    spec = _load_json(candidate_dir / "spec.json")
-    spec["id"] = candidate_id
-    spec["kind"] = "candidate"
-    spec["parent"] = parent_id
-    spec.setdefault("lineage", {})
-    spec["lineage"]["parent_id"] = parent_id
-    spec["lineage"]["parent_kind"] = "baseline" if parent_id.startswith("baseline") else "candidate"
-    spec["lineage"]["derived_from"] = parent_id
-    spec.setdefault("proposal_contract", {})
-    spec["proposal_contract"] = {
-        "one_sentence_hypothesis": str(proposal.get("one_sentence_hypothesis") or ""),
-        "weakness_being_addressed": str(proposal.get("weakness_being_addressed") or ""),
-        "expected_tradeoff": str(proposal.get("expected_tradeoff") or ""),
-        "files_to_create_or_modify": normalized_target_files,
-    }
-    (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
+        changed_files = _detect_changed_files(candidate_dir, parent_entry.dir_path)
+        spec = _load_json(candidate_dir / "spec.json")
+        spec["proposal_contract"]["files_to_create_or_modify"] = sorted(changed_files)
+        (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    validate_candidate_boundary(candidate_dir)
-    return candidate_dir
+        proposer_note_text = str(proposal.get("proposer_note_text") or "").strip()
+        grounded_note = _build_grounded_note(contract=spec["proposal_contract"], spec=spec, changed_files=changed_files)
+        final_note = note or proposer_note_text or grounded_note
+        if not note:
+            final_note = grounded_note
+        (candidate_dir / "proposer_note.txt").write_text(final_note + "\n", encoding="utf-8")
+
+        validate_candidate_boundary(candidate_dir)
+        validate_candidate_contract_alignment(candidate_dir, parent_dir=parent_entry.dir_path, proposal_contract=spec["proposal_contract"])
+        return candidate_dir
+    except Exception:
+        shutil.rmtree(candidate_dir, ignore_errors=True)
+        raise
 
 
 def rebuild_index(archive_root: Path) -> Dict:
