@@ -4,6 +4,7 @@ from pathlib import Path
 
 from proposer.prompts import build_self_review_prompt
 from proposer.propose_candidate import _runtime_wiring_smoke_verification
+from proposer.registry import ALLOWED_MUTATION_FILES, TRACKED_CONTRACT_FILES
 
 
 def _write(path: Path, text: str) -> None:
@@ -106,3 +107,8 @@ def test_runtime_metadata_records_wiring_verification_artifact_path():
     src = inspect.getsource(__import__("proposer.propose_candidate", fromlist=["propose_next_candidate"]))
     assert "runtime_wiring_verification.json" in src
     assert "runtime_wiring_verification_path" in src
+
+
+def test_wiring_artifact_allowed_in_boundary_but_not_tracked_as_contract_diff():
+    assert "runtime_wiring_verification.json" in ALLOWED_MUTATION_FILES
+    assert "runtime_wiring_verification.json" not in TRACKED_CONTRACT_FILES
