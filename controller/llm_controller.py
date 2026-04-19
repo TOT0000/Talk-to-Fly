@@ -200,6 +200,12 @@ class LLMController():
         self.predicted_collision_rearm_threshold = float(PREDICTED_COLLISION_PROBABILITY_REARM_THRESHOLD)
         self.predicted_collision_replan_strictly_greater = False
         self.heartbeat_interval_seconds = float(AGENT_HEARTBEAT_INTERVAL_SECONDS)
+        self.selected_trigger_policy_name = ""
+        self.selected_threshold_value: Optional[float] = None
+        self.selected_cooldown_seconds: Optional[float] = None
+        self.selected_consecutive_high_risk: Optional[int] = None
+        self.selected_hysteresis: Optional[float] = None
+        self.runtime_mode_source = "default_fallback"
         self.active_objective_set = self._default_active_objective_set()
         self.latest_benchmark_progress = {
             "completed": [],
@@ -1332,6 +1338,7 @@ class LLMController():
         completed = [str(v).upper() for v in list(benchmark_progress.get("completed") or [])]
         active_ids = [str(v).upper() for v in list((snapshot.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])]
         remaining = [cid for cid in active_ids if cid not in set(completed)]
+        policy_evidence = self._build_runtime_policy_evidence()
         self.task_run_logger.append_planning_trace(
             trace={
                 **self.planner.get_last_heartbeat_trace(),
@@ -1344,6 +1351,7 @@ class LLMController():
                 "true_completed_checkpoints": [str(v).upper() for v in list(completed or [])],
                 "true_remaining_checkpoints": [str(v).upper() for v in list(remaining or [])],
                 "completion_state_source": "benchmark_progress/dwell_tracker",
+                **policy_evidence,
             }
         )
         raw_response = str(response.get("raw_response", "") or "").strip()
@@ -1656,13 +1664,10 @@ class LLMController():
             self.append_message("[Warning] Controller is waiting for takeoff...")
             return
         pipeline = self.get_selected_pipeline_config()
-        if pipeline.id in {"baseline1", "baseline2"}:
-            framework_mode = MODE_AGENT_HEARTBEAT_SOFT
-        elif pipeline.id == "baseline3":
-            framework_mode = MODE_TYPEFLY_THRESHOLD_REPLAN
-        selected_framework = self._normalize_framework_mode(framework_mode)
+        selected_framework = self._normalize_framework_mode(getattr(pipeline, "runtime_mode", framework_mode))
         self.framework_mode = selected_framework
         self.set_selected_pipeline(pipeline.id)
+        policy_evidence = self._build_runtime_policy_evidence()
         self.near_miss_count = 0
         self.collision_count = 0
         self.min_uav_worker_distance_m = None
@@ -1670,7 +1675,15 @@ class LLMController():
         self._collision_active_by_worker = {wid: False for wid in COLLISION_RISK_WORKER_IDS}
         self._latest_near_miss_events = []
         self.current_task_description = str(task_description or "")
-        print_t(f"[MODE] selected={selected_framework}")
+        print_t(
+            "[MODE] "
+            f"selected={selected_framework} "
+            f"harness_id={policy_evidence.get('selected_harness_id')} "
+            f"trigger_policy={policy_evidence.get('selected_trigger_policy_name')} "
+            f"heartbeat_seconds={policy_evidence.get('selected_heartbeat_seconds')} "
+            f"threshold={policy_evidence.get('selected_threshold_value')} "
+            f"mode_source={policy_evidence.get('runtime_mode_source')}"
+        )
         self.execution_mode = "Planning"
         self.active_objective_set = self._resolve_active_objective_set(task_description)
         self._reset_benchmark_progress_tracking()
@@ -1688,6 +1701,14 @@ class LLMController():
                 "selected_baseline_name": pipeline.name,
                 "trigger_type": pipeline.trigger_type,
                 "trigger_params": dict(pipeline.trigger_params),
+                "selected_harness_id": policy_evidence.get("selected_harness_id"),
+                "selected_trigger_mode": policy_evidence.get("selected_trigger_mode"),
+                "selected_trigger_policy_name": policy_evidence.get("selected_trigger_policy_name"),
+                "selected_heartbeat_seconds": policy_evidence.get("selected_heartbeat_seconds"),
+                "selected_threshold_value": policy_evidence.get("selected_threshold_value"),
+                "selected_cooldown_seconds": policy_evidence.get("selected_cooldown_seconds"),
+                "selected_harness_spec_path": policy_evidence.get("selected_harness_spec_path"),
+                "runtime_mode_source": policy_evidence.get("runtime_mode_source"),
                 "prompt_variant": pipeline.prompt_variant,
                 "example_variant": pipeline.example_variant,
                 "state_fields": list(pipeline.state_fields),
@@ -1790,6 +1811,7 @@ class LLMController():
                                 "true_completed_checkpoints": completed_now,
                                 "true_remaining_checkpoints": remaining_now,
                                 "completion_state_source": "benchmark_progress/dwell_tracker",
+                                **policy_evidence,
                             }
                         )
                         llm_called = False
@@ -1818,6 +1840,7 @@ class LLMController():
                                 "parsed_plan": self.current_plan,
                                 "selected_baseline_id": pipeline.id,
                                 "scene_id": self.baseline_scene_id,
+                                **policy_evidence,
                             }
                         )
                 self.current_plan = self._sanitize_minispec_plan(self.current_plan)
@@ -2057,17 +2080,50 @@ class LLMController():
         self.selected_pipeline_id = normalize_pipeline_id(pipeline_id)
         config = get_pipeline_config(self.selected_pipeline_id)
         self.replan_limit = int(config.replan_cap)
-        if config.trigger_type == "event_predicted_collision_probability":
-            threshold = float(config.trigger_params.get("predicted_collision_threshold", PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD))
+        self.selected_trigger_policy_name = str(config.trigger_type or "")
+        self.runtime_mode_source = str(getattr(config, "runtime_mode_source", "default_fallback"))
+        self.selected_hysteresis = (
+            float(config.trigger_params.get("hysteresis"))
+            if config.trigger_params.get("hysteresis") is not None
+            else None
+        )
+        self.selected_cooldown_seconds = (
+            float(config.trigger_params.get("cooldown_seconds"))
+            if config.trigger_params.get("cooldown_seconds") is not None
+            else None
+        )
+        self.selected_consecutive_high_risk = (
+            int(config.trigger_params.get("consecutive_high_risk"))
+            if config.trigger_params.get("consecutive_high_risk") is not None
+            else None
+        )
+        if config.trigger_type in {"event_predicted_collision_probability", "event", "threshold", "event_threshold", "predicted_collision_threshold"}:
+            threshold = float(
+                config.trigger_params.get(
+                    "threshold",
+                    config.trigger_params.get("predicted_collision_threshold", PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD),
+                )
+            )
             self.predicted_collision_replan_threshold = threshold
-            self.predicted_collision_rearm_threshold = max(0.0, threshold - 0.05)
+            rearm_delta = (
+                float(config.trigger_params.get("hysteresis"))
+                if config.trigger_params.get("hysteresis") is not None
+                else 0.05
+            )
+            self.predicted_collision_rearm_threshold = max(0.0, threshold - rearm_delta)
             self.predicted_collision_replan_strictly_greater = bool(config.trigger_params.get("strictly_greater", True))
             self.heartbeat_interval_seconds = float(AGENT_HEARTBEAT_INTERVAL_SECONDS)
+            self.selected_threshold_value = threshold
         else:
             self.predicted_collision_replan_threshold = float(PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD)
             self.predicted_collision_rearm_threshold = float(PREDICTED_COLLISION_PROBABILITY_REARM_THRESHOLD)
             self.predicted_collision_replan_strictly_greater = False
             self.heartbeat_interval_seconds = float(config.trigger_params.get("heartbeat_seconds", AGENT_HEARTBEAT_INTERVAL_SECONDS))
+            self.selected_threshold_value = (
+                float(config.trigger_params.get("threshold"))
+                if config.trigger_params.get("threshold") is not None
+                else None
+            )
         self.planner.set_runtime_prompt_example_variant(
             prompt_variant=config.prompt_variant,
             example_variant=config.example_variant,
@@ -2077,6 +2133,19 @@ class LLMController():
 
     def get_selected_pipeline_config(self):
         return get_pipeline_config(self.selected_pipeline_id)
+
+    def _build_runtime_policy_evidence(self) -> dict:
+        config = self.get_selected_pipeline_config()
+        return {
+            "selected_harness_id": self.selected_pipeline_id,
+            "selected_trigger_mode": self.framework_mode,
+            "selected_trigger_policy_name": self.selected_trigger_policy_name,
+            "selected_heartbeat_seconds": float(self.heartbeat_interval_seconds),
+            "selected_threshold_value": self.selected_threshold_value,
+            "selected_cooldown_seconds": self.selected_cooldown_seconds,
+            "selected_harness_spec_path": getattr(config, "harness_spec_path", None),
+            "runtime_mode_source": self.runtime_mode_source,
+        }
 
     def get_baseline_scene(self) -> BaselineScene:
         return BASELINE_SCENES[self.baseline_scene_id]

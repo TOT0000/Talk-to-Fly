@@ -37,6 +37,22 @@ Total runs per evaluated harness: **24**.
    - `eval_summary.json`
 5. Index rebuild updates lineage + Pareto frontier.
 
+## Runtime mode is now spec-driven (baseline + candidate)
+
+Runtime execution mode is selected from each harness `spec.json` trigger policy, not only from hardcoded baseline IDs:
+
+- `trigger_policy.type in {periodic, heartbeat, hybrid}` -> `agent-heartbeat-soft`
+- `trigger_policy.type in {event_predicted_collision_probability, threshold, event...}` -> `typefly-threshold-replan`
+- otherwise fallback -> `typefly-oneshot`
+
+`heartbeat_seconds`, `threshold`, and related trigger params are loaded from the same spec and propagated into runtime run context.
+
+You can verify applied config in:
+
+- terminal `[MODE] ...` line during execution
+- per-run `metadata.json` (contains `run_summary`/`debug_summary`)
+- planning trace rows (`planning_trace.jsonl`) with trigger evidence fields
+
 ## CLI
 
 ```bash
