@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 from pathlib import Path
 from typing import Dict, List
 
@@ -28,8 +29,16 @@ def summarize_archive_for_proposer(repo_root: Path, archive_root: Path, max_entr
     pareto = [e.get("candidate_id") for e in entries if bool(e.get("pareto_frontier"))]
     latest = entries[-1].get("candidate_id") if entries else "(none)"
 
+    selected_entries = list(entries[-max_entries:])
+    snippets = collect_representative_trace_snippets(repo_root=repo_root, archive_root=archive_root, max_traces=6)
+
+    selector = _load_archive_selector(repo_root, entries)
+    if selector is not None:
+        selected_entries = _apply_selector(selector, "select_entries", selected_entries, max_entries)
+        snippets = _apply_selector(selector, "select_trace_snippets", snippets, 6)
+
     compact_entries: List[Dict] = []
-    for e in entries[-max_entries:]:
+    for e in selected_entries:
         compact_entries.append(
             {
                 "candidate_id": e.get("candidate_id"),
@@ -44,8 +53,6 @@ def summarize_archive_for_proposer(repo_root: Path, archive_root: Path, max_entr
             }
         )
 
-    snippets = collect_representative_trace_snippets(repo_root=repo_root, archive_root=archive_root, max_traces=6)
-
     return {
         "baseline_list": baselines,
         "candidate_list": candidates,
@@ -54,6 +61,42 @@ def summarize_archive_for_proposer(repo_root: Path, archive_root: Path, max_entr
         "entries": compact_entries,
         "trace_snippets": snippets,
     }
+
+
+def _load_archive_selector(repo_root: Path, entries: List[Dict]):
+    if not entries:
+        return None
+    latest_id = str(entries[-1].get("candidate_id") or "")
+    if not latest_id:
+        return None
+    if latest_id.startswith("baseline"):
+        selector_path = repo_root / "harnesses" / latest_id / "archive_selector.py"
+    else:
+        selector_path = repo_root / "harnesses" / "candidates" / latest_id / "archive_selector.py"
+    if not selector_path.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("harness_archive_selector", str(selector_path))
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
+def _apply_selector(mod, fn_name: str, payload: List[Dict], max_count: int) -> List[Dict]:
+    fn = getattr(mod, fn_name, None)
+    if not callable(fn):
+        return payload
+    try:
+        out = fn(list(payload), int(max_count))
+        if isinstance(out, list):
+            return out
+    except Exception:
+        return payload
+    return payload
 
 
 def collect_representative_trace_snippets(repo_root: Path, archive_root: Path, max_traces: int = 6) -> List[Dict]:

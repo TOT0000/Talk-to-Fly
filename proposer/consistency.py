@@ -109,7 +109,7 @@ def _validate_contract_vs_spec(contract: Dict, spec: Dict) -> None:
 
 def _validate_spec_vs_module_behavior(candidate_dir: Path, spec: Dict) -> None:
     trigger_cfg = dict(spec.get("trigger_policy") or {})
-    trigger_code = _read_text(candidate_dir / "trigger_policy.py")
+    trigger_code = _read_text(candidate_dir / "trigger_logic.py") or _read_text(candidate_dir / "trigger_policy.py")
     trigger_type = str(trigger_cfg.get("type") or "")
 
     if trigger_type == "event_predicted_collision_probability":
@@ -124,7 +124,7 @@ def _validate_spec_vs_module_behavior(candidate_dir: Path, spec: Dict) -> None:
         )
 
     state_cfg = dict(spec.get("state_encoder") or {})
-    state_code = _read_text(candidate_dir / "state_encoder.py")
+    state_code = _read_text(candidate_dir / "state_features.py") or _read_text(candidate_dir / "state_encoder.py")
     _assert("include_fields" in state_code, "state_encoder.py missing include_fields handling")
     if state_cfg.get("include_risk_related"):
         _assert(
@@ -133,7 +133,7 @@ def _validate_spec_vs_module_behavior(candidate_dir: Path, spec: Dict) -> None:
         )
 
     prompt_cfg = dict(spec.get("prompt_builder") or {})
-    prompt_code = _read_text(candidate_dir / "prompt_builder.py")
+    prompt_code = _read_text(candidate_dir / "prompt_composer.py") or _read_text(candidate_dir / "prompt_builder.py")
     _assert("template_family" in prompt_code, "prompt_builder.py missing template_family handling")
     if prompt_cfg.get("include_example"):
         _assert("include_example" in prompt_code, "prompt_builder.py missing include_example handling")
@@ -172,6 +172,19 @@ def validate_candidate_contract_alignment(
         changed_files = _detect_changed_files(candidate_dir, Path(parent_dir))
         _assert(changed_files, "candidate must differ from parent in at least one allowed file")
         _assert(set(declared_files) == changed_files, f"files_to_create_or_modify mismatch: declared={sorted(declared_files)} actual={sorted(changed_files)}")
+        runtime_effect_modules = {
+            "state_features.py",
+            "trigger_logic.py",
+            "prompt_composer.py",
+            # legacy runtime-effect module names (kept for compatibility)
+            "state_encoder.py",
+            "trigger_policy.py",
+            "prompt_builder.py",
+        }
+        _assert(
+            bool(runtime_effect_modules.intersection(changed_files)),
+            "candidate must modify at least one runtime-effect sandbox module",
+        )
 
     _validate_contract_vs_spec(contract, spec)
     _validate_spec_vs_module_behavior(candidate_dir, spec)

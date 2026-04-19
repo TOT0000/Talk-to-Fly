@@ -232,8 +232,10 @@ def test_propose_flow_backfills_proposer_note_in_changed_files(tmp_path, monkeyp
     (repo / "harnesses" / "candidates").mkdir(parents=True, exist_ok=True)
     _write_parent(baseline)
 
+    seen_models = []
     class _FakeLLM:
         def request(self, prompt: str, model_name: str, stream: bool = False):
+            seen_models.append(model_name)
             if "Requested file: spec.json" in prompt:
                 return json.dumps(
                     {
@@ -265,6 +267,14 @@ def test_propose_flow_backfills_proposer_note_in_changed_files(tmp_path, monkeyp
                         },
                     }
                 )
+            if "Requested file: trigger_logic.py" in prompt:
+                return (
+                    "from __future__ import annotations\n\n"
+                    "def should_trigger_replan(state: dict, memory: dict, spec: dict) -> tuple[bool, str]:\n"
+                    "    trigger_type = 'event_predicted_collision_probability'\n"
+                    "    risk = float(state.get('predicted_collision_probability') or 0.0)\n"
+                    "    return (risk >= 0.45, f'risk_{risk:.3f}_threshold_0.450')\n"
+                )
             return json.dumps(
                 {
                     "parent_harness": "baseline3",
@@ -272,7 +282,9 @@ def test_propose_flow_backfills_proposer_note_in_changed_files(tmp_path, monkeyp
                     "one_sentence_hypothesis": "introduce tighter event threshold",
                     "weakness_being_addressed": "late event trigger",
                     "expected_tradeoff": "slightly more replans",
-                    "files_to_create_or_modify": ["spec.json", "proposer_note.txt"],
+                    "expected_runtime_effect": "more responsive replan trigger",
+                    "sandbox_modules_to_modify": ["trigger_logic.py", "state_features.py", "prompt_composer.py"],
+                    "files_to_create_or_modify": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
                     "proposer_note_text": "placeholder",
                     "implementation_contract": {
                         "trigger_policy": {"type": "event_predicted_collision_probability", "threshold": 0.45},
@@ -288,7 +300,32 @@ def test_propose_flow_backfills_proposer_note_in_changed_files(tmp_path, monkeyp
         "controller.llm_wrapper",
         SimpleNamespace(LLMWrapper=lambda temperature=0.1: _FakeLLM(), MODEL_NAME="fake-model"),
     )
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("TYPEFLY_PROPOSER_MODEL", "gpt-4.1")
 
     created = propose_next_candidate(repo_root=repo, focus_text="test consistency")
     spec = json.loads((created / "spec.json").read_text(encoding="utf-8"))
     assert "proposer_note.txt" in spec["proposal_contract"]["files_to_create_or_modify"]
+    assert seen_models[0] == "gpt-4.1"
+
+
+def test_proposer_requires_openai_key_for_gpt_models(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    baseline = repo / "harnesses" / "baseline3"
+    (repo / "harnesses" / "candidates").mkdir(parents=True, exist_ok=True)
+    _write_parent(baseline)
+
+    class _FakeLLM:
+        def request(self, prompt: str, model_name: str, stream: bool = False):
+            return "{}"
+
+    monkeypatch.setitem(
+        sys.modules,
+        "controller.llm_wrapper",
+        SimpleNamespace(LLMWrapper=lambda temperature=0.1: _FakeLLM(), MODEL_NAME="fake-model"),
+    )
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("TYPEFLY_PROPOSER_MODEL", "gpt-4.1")
+
+    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+        propose_next_candidate(repo_root=repo, focus_text="test consistency")

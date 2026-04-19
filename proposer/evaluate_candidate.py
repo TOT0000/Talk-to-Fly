@@ -99,7 +99,18 @@ def evaluate_candidate_live(repo_root: Path, harness_id: str, archive_root: Path
     runs = runner.run()
 
     # copy harness source/spec snapshot
-    for name in ["spec.json", "state_encoder.py", "trigger_policy.py", "prompt_builder.py", "proposer_note.txt"]:
+    for name in [
+        "spec.json",
+        "state_encoder.py",
+        "trigger_policy.py",
+        "prompt_builder.py",
+        "state_features.py",
+        "trigger_logic.py",
+        "prompt_composer.py",
+        "archive_selector.py",
+        "validator_rules.py",
+        "proposer_note.txt",
+    ]:
         src = harness_entry.dir_path / name
         if src.exists():
             shutil.copy2(src, target / "code_or_spec" / name)
