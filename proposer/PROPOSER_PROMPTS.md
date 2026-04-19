@@ -220,8 +220,12 @@ You must output exactly the following items:
 3. one_sentence_hypothesis
 4. weakness_being_addressed
 5. expected_tradeoff
-6. files_to_create_or_modify
-7. proposer_note_text
+6. expected_runtime_effect
+7. sandbox_modules_to_modify
+8. files_to_create_or_modify
+9. proposer_note_text
+10. implementation_contract
+11. invariants
 
 The proposed edit must remain within the allowed harness boundary.
 Do not modify unrelated repository files.
@@ -236,8 +240,12 @@ Do not propose more than one candidate.
 3. one_sentence_hypothesis
 4. weakness_being_addressed
 5. expected_tradeoff
-6. files_to_create_or_modify
-7. proposer_note_text
+6. expected_runtime_effect
+7. sandbox_modules_to_modify
+8. files_to_create_or_modify
+9. proposer_note_text
+10. implementation_contract
+11. invariants
 
 且提案必須維持在允許邊界內，不得修改無關檔案，也不能一次提出多個 candidate。
 
@@ -246,10 +254,10 @@ Do not propose more than one candidate.
 - `proposer.propose_candidate.propose_next_candidate()` 會：
   1) 讀 `proposer_archive_v2/index.json` 與 traces 摘要；
   2) 使用上面的 prompt 呼叫 LLM；
-  3) 解析 output contract；
+  3) 解析並強化 output contract（含 implementation_contract + invariants）；
   4) 以 parent harness 為基礎，僅在允許檔案生成 candidate；
-  5) 寫入 lineage / proposer_note / proposal contract；
-  6) 執行邊界檢查。
+  5) 寫入 lineage / grounded proposer_note / proposal contract；
+  6) 執行邊界檢查與一致性驗證，不一致時 fail fast。
 
 ## 8) Proposer 與 evaluator / runner / archive 關係
 

@@ -11,6 +11,11 @@ ALLOWED_MUTATION_FILES = {
     "state_encoder.py",
     "trigger_policy.py",
     "prompt_builder.py",
+    "state_features.py",
+    "trigger_logic.py",
+    "prompt_composer.py",
+    "archive_selector.py",
+    "validator_rules.py",
     "README.md",
     "proposer_note.txt",
 }
