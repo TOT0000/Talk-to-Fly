@@ -6,6 +6,12 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 
+MODE_TYPEFLY_ONESHOT = "typefly-oneshot"
+MODE_TYPEFLY_THRESHOLD_REPLAN = "typefly-threshold-replan"
+MODE_AGENT_HEARTBEAT_SOFT = "agent-heartbeat-soft"
+MODE_AGENT_HEARTBEAT_HARDGATE = "agent-heartbeat-hardgate"
+
+
 @dataclass(frozen=True)
 class PipelineConfig:
     id: str
@@ -23,6 +29,38 @@ class PipelineConfig:
     harness_spec_path: Optional[str] = None
     kind: str = "baseline"
     parent_id: Optional[str] = None
+    runtime_mode: str = MODE_TYPEFLY_ONESHOT
+    runtime_mode_source: str = "default_fallback"
+
+
+def derive_runtime_mode(trigger_type: str, base_mode: str) -> tuple[str, str]:
+    trigger = str(trigger_type or "").strip().lower()
+    base = str(base_mode or "").strip().lower()
+
+    # First preference: explicit trigger policy in harness spec.
+    if trigger in {"periodic", "heartbeat", "hybrid"}:
+        return MODE_AGENT_HEARTBEAT_SOFT, "harness_spec"
+    if trigger in {
+        "event_predicted_collision_probability",
+        "event",
+        "threshold",
+        "event_threshold",
+        "predicted_collision_threshold",
+    }:
+        return MODE_TYPEFLY_THRESHOLD_REPLAN, "harness_spec"
+    if trigger in {"oneshot", "one_shot"}:
+        return MODE_TYPEFLY_ONESHOT, "harness_spec"
+
+    # Second preference: base_mode in spec.
+    if base in {
+        MODE_TYPEFLY_ONESHOT,
+        MODE_TYPEFLY_THRESHOLD_REPLAN,
+        MODE_AGENT_HEARTBEAT_SOFT,
+        MODE_AGENT_HEARTBEAT_HARDGATE,
+    }:
+        return base, "harness_spec"
+
+    return MODE_TYPEFLY_ONESHOT, "default_fallback"
 
 
 def _repo_root() -> Path:
@@ -43,6 +81,10 @@ def _load_pipeline_registry_from_harness_specs() -> Dict[str, PipelineConfig]:
         runtime = dict(spec.get("runtime") or {})
         trigger = dict(spec.get("trigger_policy") or {})
         state_encoder = dict(spec.get("state_encoder") or {})
+        runtime_mode, runtime_mode_source = derive_runtime_mode(
+            str(trigger.get("type") or ""),
+            str(spec.get("base_mode") or "typefly-oneshot"),
+        )
         pipeline = PipelineConfig(
             id=str(spec["id"]),
             name=str(spec.get("name") or spec["id"]),
@@ -59,6 +101,8 @@ def _load_pipeline_registry_from_harness_specs() -> Dict[str, PipelineConfig]:
             harness_spec_path=str(spec_path),
             kind=str(spec.get("kind") or ("candidate" if "candidate_" in str(spec.get("id")) else "baseline")),
             parent_id=spec.get("parent"),
+            runtime_mode=runtime_mode,
+            runtime_mode_source=runtime_mode_source,
         )
         registry[pipeline.id] = pipeline
     return registry
