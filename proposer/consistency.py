@@ -57,6 +57,18 @@ def _normalize_style_value(value: str) -> str:
     return aliases.get(raw, raw)
 
 
+def _normalize_template_family(value: str) -> str:
+    raw = _canonicalize_field_name(value)
+    # Some proposer contracts emit shorthand baseline names while specs store
+    # explicit prompt-template family labels.
+    aliases = {
+        "baseline1": "baseline1_prompt",
+        "baseline2": "baseline2_prompt",
+        "baseline3": "baseline3_prompt",
+    }
+    return aliases.get(raw, raw)
+
+
 def _normalized_contract_files(contract: Dict) -> List[str]:
     raw = list(contract.get("files_to_create_or_modify") or [])
     out: List[str] = []
@@ -121,8 +133,13 @@ def _validate_contract_vs_spec(contract: Dict, spec: Dict) -> None:
     prompt_spec = dict(spec.get("prompt_builder") or {})
     for key in ["template_family", "include_example", "example_family"]:
         if key in prompt_claim:
+            claim_value = prompt_claim.get(key)
+            spec_value = prompt_spec.get(key)
+            if key in {"template_family", "example_family"}:
+                claim_value = _normalize_template_family(str(claim_value))
+                spec_value = _normalize_template_family(str(spec_value))
             _assert(
-                prompt_spec.get(key) == prompt_claim.get(key),
+                spec_value == claim_value,
                 f"prompt_builder mismatch for '{key}': contract={prompt_claim.get(key)!r} spec={prompt_spec.get(key)!r}",
             )
 
