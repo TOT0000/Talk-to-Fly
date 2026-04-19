@@ -1,0 +1,38 @@
+{
+  "id": "baseline2",
+  "name": "Periodic-InfoAware",
+  "kind": "baseline",
+  "description": "Heartbeat periodic trigger with risk-aware state payload.",
+  "base_mode": "agent-heartbeat-soft",
+  "state_encoder": {
+    "module": "state_encoder.py",
+    "include_fields": ["uav_pose_heading", "worker_positions", "remaining_checkpoints", "task_progress", "predicted_collision_probability", "risk_summary"],
+    "summary_style": "risk_aware",
+    "include_risk_related": true,
+    "include_targets": true,
+    "include_geometry_flags": true
+  },
+  "trigger_policy": {
+    "module": "trigger_policy.py",
+    "type": "periodic",
+    "heartbeat_seconds": 5.0,
+    "cooldown_seconds": 0.0,
+    "threshold": null,
+    "consecutive_high_risk": 1,
+    "hysteresis": null
+  },
+  "prompt_builder": {
+    "module": "prompt_builder.py",
+    "template_family": "baseline2_prompt",
+    "paragraph_order": ["opening", "runtime", "risk", "task", "examples", "output"],
+    "include_example": true,
+    "example_family": "baseline2_example",
+    "stages": ["initial", "replan", "heartbeat"]
+  },
+  "runtime": {
+    "prompt_variant": "baseline2_prompt",
+    "example_variant": "baseline2_example",
+    "use_output_example": true,
+    "replan_cap": 8
+  }
+}

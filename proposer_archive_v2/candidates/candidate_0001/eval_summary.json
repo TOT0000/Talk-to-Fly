@@ -1,0 +1,13 @@
+{
+  "harness_id": "candidate_0001",
+  "status": "pending_execution",
+  "evaluation_protocol": {
+    "version": "uav_search_v1",
+    "scene_to_task_zone": {
+      "SCENE1": "zoneA",
+      "SCENE2": "zoneB",
+      "SCENE3": "zoneC"
+    }
+  },
+  "metrics": {}
+}
