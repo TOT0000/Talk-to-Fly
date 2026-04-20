@@ -1431,6 +1431,7 @@ class LLMController():
                     "replan_record": matured_record,
                     "evaluator_prompt": eval_result.get("prompt"),
                     "evaluator_raw_response": eval_result.get("raw_response"),
+                    "evaluator_used_model_name": eval_result.get("used_model_name"),
                     "evaluator_parsed_json": eval_result.get("parsed"),
                     "matured_feedback_packet": packet,
                 }
@@ -1447,6 +1448,7 @@ class LLMController():
                         "raw_response": str(item.get("evaluator_raw_response") or ""),
                         "parsed_plan": {
                             "replan_record": item.get("replan_record"),
+                            "evaluator_used_model_name": item.get("evaluator_used_model_name"),
                             "evaluator_parsed_json": item.get("evaluator_parsed_json"),
                             "matured_feedback_packet": item.get("matured_feedback_packet"),
                         },
@@ -1544,7 +1546,10 @@ class LLMController():
                     "scene_id": self.baseline_scene_id,
                     "current_target_checkpoint": benchmark_progress.get("current_target"),
                     "parsed_plan": (
-                        {"feedback_memory_injected": feedback_memory_injected}
+                        {
+                            "feedback_memory_injected": feedback_memory_injected,
+                            "heartbeat_used_model_name": self.planner.get_last_heartbeat_trace().get("used_model_name"),
+                        }
                         if bool(self.archive_enabled)
                         else None
                     ),

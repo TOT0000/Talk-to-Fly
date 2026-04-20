@@ -17,6 +17,12 @@ class LLMPlanner():
     def __init__(self, robot_type: RobotType):
         self.llm = LLMWrapper()
         self.model_name = GPT4
+        heartbeat_model_env = str(os.getenv("TYPEFLY_HEARTBEAT_MODEL", "") or "").strip()
+        evaluator_model_env = str(os.getenv("TYPEFLY_EVALUATOR_MODEL", "") or "").strip()
+        self._heartbeat_model_explicit = bool(heartbeat_model_env)
+        self._evaluator_model_explicit = bool(evaluator_model_env)
+        self.heartbeat_model_name = (heartbeat_model_env if heartbeat_model_env else self.model_name)
+        self.evaluator_model_name = (evaluator_model_env if evaluator_model_env else self.model_name)
         self.controller = None  # 後續由 controller.llm_controller 綁定
 
         type_folder_name = 'tello'
@@ -259,7 +265,32 @@ class LLMPlanner():
             "Output JSON only."
         )
     def set_model(self, model_name):
+        old_default = self.model_name
         self.model_name = model_name
+        if not self._heartbeat_model_explicit and self.heartbeat_model_name == old_default:
+            self.heartbeat_model_name = self.model_name
+        if not self._evaluator_model_explicit and self.evaluator_model_name == old_default:
+            self.evaluator_model_name = self.model_name
+
+    def set_agent_model_names(
+        self,
+        heartbeat_model_name: Optional[str] = None,
+        evaluator_model_name: Optional[str] = None,
+    ):
+        hb = str(heartbeat_model_name or "").strip()
+        ev = str(evaluator_model_name or "").strip()
+        if hb:
+            self.heartbeat_model_name = hb
+            self._heartbeat_model_explicit = True
+        else:
+            self.heartbeat_model_name = self.model_name
+            self._heartbeat_model_explicit = False
+        if ev:
+            self.evaluator_model_name = ev
+            self._evaluator_model_explicit = True
+        else:
+            self.evaluator_model_name = self.model_name
+            self._evaluator_model_explicit = False
 
     @staticmethod
     def _read_text(path: str) -> str:
@@ -914,7 +945,7 @@ class LLMPlanner():
             f"full_replan_count={int(max(0, full_replan_count))} "
             f"hard_gate={hard_gate}"
         )
-        raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
+        raw = str(self.llm.request(prompt, self.heartbeat_model_name, stream=False) or "").strip()
         parsed, parsed_ok = self._parse_heartbeat_response_json(raw)
         if not parsed_ok:
             parsed = {"response": "continue", "reason": f"non_json_response:{raw[:120]}", "plan": ""}
@@ -936,6 +967,7 @@ class LLMPlanner():
             "example_variant": self.runtime_example_variant,
             "use_output_example": bool(self.runtime_use_output_example),
             "source": "agent_heartbeat",
+            "used_model_name": self.heartbeat_model_name,
         }
         return result
 
@@ -952,7 +984,7 @@ class LLMPlanner():
             f"chosen_action:\n{json.dumps(replan_record.get('chosen_action', {}), ensure_ascii=False, indent=2)}\n\n"
             f"outcome_delta:\n{json.dumps(replan_record.get('outcome_delta', {}), ensure_ascii=False, indent=2)}\n"
         )
-        raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
+        raw = str(self.llm.request(prompt, self.evaluator_model_name, stream=False) or "").strip()
         parsed, parsed_ok = self._parse_agent_evaluator_json(raw)
         if not parsed_ok:
             parsed = {
@@ -969,6 +1001,7 @@ class LLMPlanner():
             "raw_response": raw,
             "parsed": parsed,
             "parsed_ok": bool(parsed_ok),
+            "used_model_name": self.evaluator_model_name,
         }
 
     @staticmethod
