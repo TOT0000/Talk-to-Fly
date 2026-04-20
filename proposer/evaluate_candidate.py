@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import subprocess
 import shutil
+import zipfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean
@@ -17,7 +19,7 @@ from proposer.registry import HarnessRegistry
 from proposer.contract_validator import validate_candidate_contract
 from proposer.runtime_verifier import verify_runtime_artifact, TRACE_SCHEMA_VERSION
 from proposer.candidate_manifest import build_provenance_bundle
-from proposer.evaluation_pipeline import build_failure_dossier, write_dossier
+from proposer.evaluation_pipeline import FormalEvaluator, build_failure_dossier, write_dossier
 from proposer.archive_manager import persist_evidence_bundle
 
 
@@ -102,6 +104,116 @@ def _scene_file_name(stage: str) -> str:
 def _run_file_name(stage: str) -> str:
     return f"per_run_metrics_{stage}.json"
 
+
+
+
+def _load_json(path: Path) -> Dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_json(path: Path, payload: Dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _parse_manual_runs_xlsx(*, xlsx_path: Path, baseline_id: str, evaluation_protocol: Dict) -> List[Dict]:
+    if not xlsx_path.exists():
+        return []
+    ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+
+    def _cell_value(cell) -> str | None:
+        ctype = cell.get("t")
+        if ctype == "inlineStr":
+            return "".join(t.text or "" for t in cell.findall(".//a:t", ns))
+        v = cell.find("a:v", ns)
+        return None if v is None else str(v.text)
+
+    try:
+        with zipfile.ZipFile(xlsx_path) as zf:
+            sheet_xml = ET.fromstring(zf.read("xl/worksheets/sheet1.xml"))
+    except Exception:
+        return []
+
+    rows = sheet_xml.findall(".//a:sheetData/a:row", ns)
+    if not rows:
+        return []
+
+    header_cells = rows[0].findall("a:c", ns)
+    headers = [_cell_value(c) or "" for c in header_cells]
+    wanted = {
+        "run_id",
+        "scene_id",
+        "selected_baseline_id",
+        "run_status",
+        "task_success",
+        "completion_time_mission_sec",
+        "total_llm_call_count",
+        "collision_count",
+        "near_miss_count",
+    }
+    if not wanted.issubset(set(headers)):
+        return []
+
+    col_to_idx = {h: i for i, h in enumerate(headers)}
+    scene_zone = {str(p.get("scene_id")): str(p.get("task_zone")) for p in list(evaluation_protocol.get("pairs") or [])}
+
+    per_scene_seed: Dict[str, int] = {}
+    parsed: List[Dict] = []
+    for row in rows[1:]:
+        values = [_cell_value(c) for c in row.findall("a:c", ns)]
+        if not values:
+            continue
+        selected_baseline = values[col_to_idx["selected_baseline_id"]] if col_to_idx["selected_baseline_id"] < len(values) else None
+        if str(selected_baseline or "") != str(baseline_id):
+            continue
+        scene_id = str(values[col_to_idx["scene_id"]] if col_to_idx["scene_id"] < len(values) else "")
+        if scene_id not in scene_zone:
+            continue
+        seed = per_scene_seed.get(scene_id, 0)
+        per_scene_seed[scene_id] = seed + 1
+
+        success_raw = values[col_to_idx["task_success"]] if col_to_idx["task_success"] < len(values) else "0"
+        mission_success = str(success_raw or "0").strip() in {"1", "true", "True"}
+        completion_raw = values[col_to_idx["completion_time_mission_sec"]] if col_to_idx["completion_time_mission_sec"] < len(values) else None
+        llm_raw = values[col_to_idx["total_llm_call_count"]] if col_to_idx["total_llm_call_count"] < len(values) else "0"
+        collision_raw = values[col_to_idx["collision_count"]] if col_to_idx["collision_count"] < len(values) else "0"
+        near_miss_raw = values[col_to_idx["near_miss_count"]] if col_to_idx["near_miss_count"] < len(values) else "0"
+        parsed.append(
+            {
+                "run_id": str(values[col_to_idx["run_id"]] if col_to_idx["run_id"] < len(values) else f"manual_{scene_id}_{seed}"),
+                "scene_id": scene_id,
+                "task_zone": scene_zone[scene_id],
+                "run_status": str(values[col_to_idx["run_status"]] if col_to_idx["run_status"] < len(values) else "unknown"),
+                "mission_success": mission_success,
+                "completion_time_mission_sec": (None if completion_raw in {None, ""} else float(completion_raw)),
+                "llm_call_count": int(float(llm_raw or 0)),
+                "collision_count": int(float(collision_raw or 0)),
+                "near_miss_count": int(float(near_miss_raw or 0)),
+                "seed": seed,
+            }
+        )
+    return parsed
+
+
+def _load_baseline_runs_for_formal(*, archive_root: Path, baseline_id: str, evaluation_protocol: Dict) -> List[Dict]:
+    if not baseline_id:
+        return []
+    baseline_root = archive_root / ("baselines" if baseline_id.startswith("baseline") else "candidates") / baseline_id
+    formal_path = baseline_root / "per_run_metrics_formal.json"
+    if formal_path.exists():
+        return _load_json(formal_path)
+
+    legacy_path = baseline_root / "per_run_metrics.json"
+    if legacy_path.exists():
+        rows = _load_json(legacy_path)
+        _write_json(formal_path, rows)
+        return rows
+
+    manual_xlsx = archive_root.parent / "proposer_archive" / "manual_runs" / "task_runs.xlsx"
+    rows = _parse_manual_runs_xlsx(xlsx_path=manual_xlsx, baseline_id=baseline_id, evaluation_protocol=evaluation_protocol)
+    if rows:
+        _write_json(formal_path, rows)
+    return rows
 
 def evaluate_candidate_live(
     repo_root: Path,
@@ -285,5 +397,35 @@ def evaluate_candidate_live(
             json.dump(eval_summary, f, ensure_ascii=False, indent=2)
         with (target / "per_scene_metrics.json").open("w", encoding="utf-8") as f:
             json.dump(per_scene, f, ensure_ascii=False, indent=2)
+
+        baseline_id = str(spec_payload.get("parent") or "")
+        baseline_runs = _load_baseline_runs_for_formal(
+            archive_root=archive_root,
+            baseline_id=baseline_id,
+            evaluation_protocol=evaluation_protocol,
+        )
+        if baseline_runs:
+            formal = FormalEvaluator().evaluate(
+                candidate_id=harness_id,
+                baseline_id=baseline_id,
+                candidate_runs=per_run_payload,
+                baseline_runs=baseline_runs,
+            )
+            _write_json(target / "formal_summary.json", formal["formal_summary"])
+            _write_json(target / "formal_pairwise_deltas.json", formal["formal_pairwise_deltas"])
+            _write_json(target / "formal_safety_report.json", formal["formal_safety_report"])
+            _write_json(target / "formal_dossier.json", formal["formal_dossier"])
+            eval_summary["formal_decision"] = formal["formal_summary"].get("decision")
+            eval_summary["formal_decision_rationale"] = formal["formal_summary"].get("decision_rationale")
+            eval_summary["formal_artifacts"] = {
+                "formal_summary": (target / "formal_summary.json").as_posix(),
+                "formal_pairwise_deltas": (target / "formal_pairwise_deltas.json").as_posix(),
+                "formal_safety_report": (target / "formal_safety_report.json").as_posix(),
+                "formal_dossier": (target / "formal_dossier.json").as_posix(),
+            }
+            with (target / _summary_file_name(stage)).open("w", encoding="utf-8") as f:
+                json.dump(eval_summary, f, ensure_ascii=False, indent=2)
+            with (target / "eval_summary.json").open("w", encoding="utf-8") as f:
+                json.dump(eval_summary, f, ensure_ascii=False, indent=2)
 
     return EvaluationResult(eval_summary=eval_summary, per_scene_metrics=per_scene, run_artifacts=per_run_payload)
