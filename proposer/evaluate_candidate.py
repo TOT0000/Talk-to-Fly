@@ -17,7 +17,7 @@ from proposer.registry import HarnessRegistry
 from proposer.contract_validator import validate_candidate_contract
 from proposer.runtime_verifier import verify_runtime_artifact, TRACE_SCHEMA_VERSION
 from proposer.candidate_manifest import build_provenance_bundle
-from proposer.evaluation_pipeline import build_failure_dossier, write_dossier
+from proposer.evaluation_pipeline import FormalEvaluator, build_failure_dossier, write_dossier
 from proposer.archive_manager import persist_evidence_bundle
 
 
@@ -102,6 +102,16 @@ def _scene_file_name(stage: str) -> str:
 def _run_file_name(stage: str) -> str:
     return f"per_run_metrics_{stage}.json"
 
+
+
+
+def _load_json(path: Path) -> Dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_json(path: Path, payload: Dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def evaluate_candidate_live(
     repo_root: Path,
@@ -285,5 +295,32 @@ def evaluate_candidate_live(
             json.dump(eval_summary, f, ensure_ascii=False, indent=2)
         with (target / "per_scene_metrics.json").open("w", encoding="utf-8") as f:
             json.dump(per_scene, f, ensure_ascii=False, indent=2)
+
+        baseline_id = str(spec_payload.get("parent") or "")
+        baseline_runs_path = archive_root / ("baselines" if baseline_id.startswith("baseline") else "candidates") / baseline_id / "per_run_metrics_formal.json"
+        if baseline_id and baseline_runs_path.exists():
+            baseline_runs = _load_json(baseline_runs_path)
+            formal = FormalEvaluator().evaluate(
+                candidate_id=harness_id,
+                baseline_id=baseline_id,
+                candidate_runs=per_run_payload,
+                baseline_runs=baseline_runs,
+            )
+            _write_json(target / "formal_summary.json", formal["formal_summary"])
+            _write_json(target / "formal_pairwise_deltas.json", formal["formal_pairwise_deltas"])
+            _write_json(target / "formal_safety_report.json", formal["formal_safety_report"])
+            _write_json(target / "formal_dossier.json", formal["formal_dossier"])
+            eval_summary["formal_decision"] = formal["formal_summary"].get("decision")
+            eval_summary["formal_decision_rationale"] = formal["formal_summary"].get("decision_rationale")
+            eval_summary["formal_artifacts"] = {
+                "formal_summary": (target / "formal_summary.json").as_posix(),
+                "formal_pairwise_deltas": (target / "formal_pairwise_deltas.json").as_posix(),
+                "formal_safety_report": (target / "formal_safety_report.json").as_posix(),
+                "formal_dossier": (target / "formal_dossier.json").as_posix(),
+            }
+            with (target / _summary_file_name(stage)).open("w", encoding="utf-8") as f:
+                json.dump(eval_summary, f, ensure_ascii=False, indent=2)
+            with (target / "eval_summary.json").open("w", encoding="utf-8") as f:
+                json.dump(eval_summary, f, ensure_ascii=False, indent=2)
 
     return EvaluationResult(eval_summary=eval_summary, per_scene_metrics=per_scene, run_artifacts=per_run_payload)
