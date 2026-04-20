@@ -1,4 +1,4 @@
-import os, ast, re, json, math
+import os, ast, re, json, math, hashlib
 from typing import Optional
 
 from .safety_context import SafetyContext
@@ -259,6 +259,55 @@ class LLMPlanner():
     def _read_text(path: str) -> str:
         with open(path, "r") as f:
             return f.read()
+
+
+    def _prompt_asset_root(self) -> str:
+        return os.path.join(CURRENT_DIR, "./assets/tello")
+
+    def _resolve_runtime_prompt_asset_paths(self, stage: str) -> dict:
+        stage_key = str(stage or "initial").strip().lower()
+        prompt_variant = str(self.runtime_prompt_variant or "default")
+        root = self._prompt_asset_root()
+        default_paths = {
+            "initial": self.prompt_plan_initial_path,
+            "replan": self.prompt_plan_replan_path,
+            "heartbeat": self.agent_heartbeat_soft_prompt_path,
+        }
+        selected = dict(default_paths)
+        selected_variant = "default"
+        baseline_id = None
+        if prompt_variant.startswith("baseline"):
+            baseline_id = prompt_variant.replace("_prompt", "")
+            selected_variant = baseline_id
+            b_init = os.path.join(root, f"{baseline_id}_prompt_plan_initial.txt")
+            b_replan = os.path.join(root, f"{baseline_id}_prompt_plan_replan.txt")
+            b_hb = os.path.join(root, f"{baseline_id}_prompt_heartbeat_soft.txt")
+            if os.path.exists(b_init):
+                selected["initial"] = b_init
+            if baseline_id in {"baseline1", "baseline2"}:
+                if os.path.exists(b_init):
+                    selected["replan"] = b_init
+            elif baseline_id == "baseline3" and os.path.exists(b_replan):
+                selected["replan"] = b_replan
+            if os.path.exists(b_hb):
+                selected["heartbeat"] = b_hb
+        path = selected.get(stage_key, selected["initial"])
+        return {
+            "stage": stage_key,
+            "prompt_variant": prompt_variant,
+            "selected_variant": selected_variant,
+            "baseline_variant_id": baseline_id,
+            "selected_prompt_asset_path": path,
+            "selected_prompt_asset_name": os.path.basename(path),
+            "asset_paths_by_stage": selected,
+        }
+
+    @staticmethod
+    def _hash_text(text: str) -> str:
+        raw = str(text or "")
+        if not raw:
+            return ""
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _build_prompt_variant_assets(self, type_folder_name: str) -> dict:
         base_dir = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}")
@@ -779,8 +828,13 @@ class LLMPlanner():
             print_debug(f"[P-REPLAN-HISTORY]\n{replan_history_block}")
         print_debug(f"[P] Full prompt debug log: {chat_log_path}")
         raw_response = self.llm.request(prompt, self.model_name, stream=False)
+        prompt_asset_report = self._resolve_runtime_prompt_asset_paths(str(planning_stage or "initial"))
         self._last_plan_trace = {
             "prompt": prompt,
+            "prompt_hash_sha256": self._hash_text(prompt),
+            "prompt_asset_report": prompt_asset_report,
+            "selected_prompt_asset_path": prompt_asset_report.get("selected_prompt_asset_path"),
+            "selected_prompt_asset_name": prompt_asset_report.get("selected_prompt_asset_name"),
             "raw_response": raw_response,
             "planning_stage": str(planning_stage or "initial"),
             "plan_source": ("llm_replan" if str(planning_stage or "initial").strip().lower() == "replan" else "llm_initial"),
@@ -906,8 +960,13 @@ class LLMPlanner():
             "raw_response": raw,
             "parsed_ok": bool(parsed_ok),
         }
+        heartbeat_asset_report = self._resolve_runtime_prompt_asset_paths("heartbeat")
         self._last_heartbeat_trace = {
             "prompt": prompt,
+            "prompt_hash_sha256": self._hash_text(prompt),
+            "prompt_asset_report": heartbeat_asset_report,
+            "selected_prompt_asset_path": heartbeat_asset_report.get("selected_prompt_asset_path"),
+            "selected_prompt_asset_name": heartbeat_asset_report.get("selected_prompt_asset_name"),
             "raw_response": raw,
             "parsed_response": result,
             "prompt_variant": self.runtime_prompt_variant,

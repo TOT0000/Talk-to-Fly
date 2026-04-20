@@ -188,3 +188,39 @@ def test_runtime_trace_records_zone_scoped_completion_fields(tmp_path):
     assert payload["completed_active_checkpoints"] == ["A1"]
     assert payload["remaining_active_checkpoints"] == ["A2"]
     assert payload["completion_scope"] == "zone_scoped"
+
+def test_planning_trace_keeps_prompt_source_evidence_fields(tmp_path):
+    excel_path = tmp_path / "logs" / "task_runs.xlsx"
+    logger = TaskRunLogger(excel_path=str(excel_path))
+    logger.start_run(
+        task_id="task-prompt-evidence",
+        task_text="prompt evidence",
+        scenario_name="scene-prompt",
+        initial_snapshot={"benchmark_progress": {"completed": []}, "checkpoint_order": ["A1"]},
+    )
+    logger.append_planning_trace(
+        {
+            "planning_stage": "replan",
+            "llm_call_purpose": "replan",
+            "prompt": "abc",
+            "prompt_hash_sha256": "hash_prompt",
+            "selected_prompt_asset_path": "controller/assets/tello/baseline3_prompt_plan_replan.txt",
+            "selected_prompt_asset_name": "baseline3_prompt_plan_replan.txt",
+            "selected_prompt_module": "prompt_composer.py",
+            "selected_prompt_module_path": "harnesses/candidates/candidate_0099/prompt_composer.py",
+            "rendered_prompt_source": "runtime_prompt_assets_plus_candidate_prompt_composer",
+            "evaluate_prompt_source": {
+                "selected_prompt_module": "prompt_composer.py",
+                "selected_prompt_asset_path": "controller/assets/tello/baseline3_prompt_plan_replan.txt",
+                "rendered_prompt_hash_sha256": "hash_prompt",
+            },
+        }
+    )
+    logger.end_run(run_status="completed")
+    assert logger.save_pending_run() is True
+
+    planning_lines = (tmp_path / "logs" / "task_runs_planning_trace.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    payload = json.loads(planning_lines[-1])
+    assert payload["selected_prompt_module"] == "prompt_composer.py"
+    assert payload["selected_prompt_asset_name"] == "baseline3_prompt_plan_replan.txt"
+    assert payload["evaluate_prompt_source"]["rendered_prompt_hash_sha256"] == "hash_prompt"

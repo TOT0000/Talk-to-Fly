@@ -29,6 +29,8 @@ TRACKED_CONTRACT_FILES = {
     if x not in {"parent_diff.patch", "proposer_tool_audit.json", "runtime_wiring_verification.json"}
 }
 
+DEFAULT_EXCLUDED_PROPOSER_CANDIDATES = {"candidate_0001"}
+
 
 @dataclass(frozen=True)
 class HarnessEntry:
@@ -55,13 +57,16 @@ class HarnessRegistry:
             out.append(HarnessEntry(harness_id=spec["id"], kind="baseline", dir_path=path.parent, spec=spec))
         return out
 
-    def list_candidates(self) -> List[HarnessEntry]:
+    def list_candidates(self, include_excluded_for_proposer: bool = True) -> List[HarnessEntry]:
         out: List[HarnessEntry] = []
         if not self.candidates_dir.exists():
             return out
         for path in sorted(self.candidates_dir.glob("candidate_*/spec.json")):
             spec = json.loads(path.read_text(encoding="utf-8"))
-            out.append(HarnessEntry(harness_id=spec["id"], kind="candidate", dir_path=path.parent, spec=spec))
+            harness_id = str(spec.get("id") or "")
+            if (not include_excluded_for_proposer) and harness_id in DEFAULT_EXCLUDED_PROPOSER_CANDIDATES:
+                continue
+            out.append(HarnessEntry(harness_id=harness_id, kind="candidate", dir_path=path.parent, spec=spec))
         return out
 
     def get(self, harness_id: str) -> HarnessEntry:
