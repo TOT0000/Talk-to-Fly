@@ -72,6 +72,20 @@ class LiveBenchmarkRunner:
         except Exception:
             pass
 
+
+    @staticmethod
+    def _extract_prompt_source_evidence(planning_trace_path: Path) -> dict:
+        if not planning_trace_path.exists():
+            return {}
+        try:
+            for raw in planning_trace_path.read_text(encoding="utf-8").splitlines():
+                row = json.loads(raw)
+                if isinstance(row, dict) and row.get("evaluate_prompt_source"):
+                    return dict(row.get("evaluate_prompt_source") or {})
+        except Exception:
+            return {}
+        return {}
+
     def _capture_latest_saved_run(self, logger, scene_id: str, zone: str) -> RunArtifact:
         summary = logger.get_pending_run_summary() or {}
         if not summary:
@@ -104,6 +118,7 @@ class LiveBenchmarkRunner:
         run_summary = json.loads(src_summary.read_text(encoding="utf-8")) if src_summary.exists() else {}
         debug_payload = json.loads(src_debug.read_text(encoding="utf-8")) if src_debug.exists() else {}
 
+        prompt_source_evidence = self._extract_prompt_source_evidence(planning_out)
         metadata = {
             "run_id": run_id,
             "scene_id": scene_id,
@@ -115,6 +130,7 @@ class LiveBenchmarkRunner:
             "evaluation_timestamp": time.time(),
             "run_summary": run_summary,
             "debug_summary": debug_payload,
+            "evaluate_prompt_source": prompt_source_evidence,
         }
         metadata_out.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 

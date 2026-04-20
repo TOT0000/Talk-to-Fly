@@ -52,7 +52,7 @@ def test_toolbox_list_read_search_and_snippet(tmp_path):
     )
 
     tools = ProposerToolbox(repo_root=repo, archive_root=archive)
-    harnesses = tools.list_harnesses()
+    harnesses = tools.list_harnesses(include_archived=True)
     assert {h["harness_id"] for h in harnesses} == {"baseline3", "candidate_0001"}
     assert tools.read_harness_spec("candidate_0001")["parent"] == "baseline3"
     assert "encode_state_features" in tools.read_harness_code("baseline3", "state_features.py")
@@ -172,3 +172,67 @@ def test_absent_evidence_is_reported_honestly(tmp_path):
         e.get("tool") == "search_traces" and e.get("reason") == "no_runs_truly_exist"
         for e in tools.audit_log
     )
+
+
+def test_candidate_0001_excluded_from_default_pool_but_manually_readable(tmp_path):
+    repo = tmp_path / "repo"
+    archive = repo / "proposer_archive_v2"
+    baseline = repo / "harnesses" / "baseline3"
+    c1 = repo / "harnesses" / "candidates" / "candidate_0001"
+    c2 = repo / "harnesses" / "candidates" / "candidate_0002"
+    _write_harness(baseline, "baseline3", "baseline")
+    _write_harness(c1, "candidate_0001", "candidate", parent="baseline3")
+    _write_harness(c2, "candidate_0002", "candidate", parent="baseline3")
+    archive.mkdir(parents=True, exist_ok=True)
+    (archive / "index.json").write_text(json.dumps({"entries": []}), encoding="utf-8")
+
+    tools = ProposerToolbox(repo_root=repo, archive_root=archive)
+    default_candidates = {h["harness_id"] for h in tools.list_harnesses(kind="candidate")}
+    assert "candidate_0001" not in default_candidates
+    assert "candidate_0002" in default_candidates
+
+    all_candidates = {h["harness_id"] for h in tools.list_harnesses(kind="candidate", include_archived=True)}
+    assert "candidate_0001" in all_candidates
+
+    # Manual inspection remains available.
+    assert tools.read_harness_spec("candidate_0001")["id"] == "candidate_0001"
+
+
+def test_runtime_prompt_asset_tools(tmp_path):
+    repo = tmp_path / "repo"
+    archive = repo / "proposer_archive_v2"
+    assets = repo / "controller" / "assets" / "tello"
+    assets.mkdir(parents=True, exist_ok=True)
+
+    (assets / "prompt_plan_initial.txt").write_text("default initial", encoding="utf-8")
+    (assets / "prompt_plan_replan.txt").write_text("default replan", encoding="utf-8")
+    (assets / "agent_heartbeat_soft_prompt.txt").write_text("default heartbeat", encoding="utf-8")
+    (assets / "baseline1_prompt_plan_initial.txt").write_text("b1 initial", encoding="utf-8")
+    (assets / "baseline1_prompt_heartbeat_soft.txt").write_text("b1 hb", encoding="utf-8")
+    (assets / "baseline2_prompt_plan_initial.txt").write_text("b2 initial", encoding="utf-8")
+    (assets / "baseline2_prompt_heartbeat_soft.txt").write_text("b2 hb", encoding="utf-8")
+
+    b1 = repo / "harnesses" / "baseline1"
+    b2 = repo / "harnesses" / "baseline2"
+    _write_harness(b1, "baseline1", "baseline")
+    _write_harness(b2, "baseline2", "baseline")
+    for hid in ("baseline1", "baseline2"):
+        spec_path = repo / "harnesses" / hid / "spec.json"
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        spec["runtime"] = {"prompt_variant": f"{hid}_prompt"}
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+    archive.mkdir(parents=True, exist_ok=True)
+    (archive / "index.json").write_text(json.dumps({"entries": []}), encoding="utf-8")
+
+    tools = ProposerToolbox(repo_root=repo, archive_root=archive)
+    listed = tools.list_runtime_prompt_assets("baseline1")
+    assert {item["stage"] for item in listed} == {"initial", "replan", "heartbeat"}
+
+    read_initial = tools.read_runtime_prompt_asset("baseline1", stage="initial")
+    assert read_initial["text"] == "b1 initial"
+    assert read_initial["sha256"]
+
+    diff = tools.diff_runtime_prompt_assets("baseline1", "baseline2", stage="initial")
+    assert "-b1 initial" in diff["diff"]
+    assert "+b2 initial" in diff["diff"]

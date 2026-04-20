@@ -18,7 +18,7 @@ from proposer.archive_reader import summarize_archive_for_proposer
 from proposer.consistency import validate_candidate_contract_alignment
 from proposer.evaluate_candidate import mark_pareto
 from proposer.prompts import build_agent_next_action_prompt, build_self_review_prompt
-from proposer.registry import ALLOWED_MUTATION_FILES, TRACKED_CONTRACT_FILES, HarnessRegistry, validate_candidate_boundary
+from proposer.registry import ALLOWED_MUTATION_FILES, DEFAULT_EXCLUDED_PROPOSER_CANDIDATES, TRACKED_CONTRACT_FILES, HarnessRegistry, validate_candidate_boundary
 
 
 def _next_candidate_id(candidates_dir: Path) -> str:
@@ -64,6 +64,9 @@ def _available_agent_tools() -> List[Dict]:
         {"name": "read_run_metadata", "args": {"run_dir": "str"}},
         {"name": "search_traces", "args": {"harness_id": "str", "needle": "str", "max_hits": "int"}},
         {"name": "read_trace_snippet", "args": {"trace_path": "str", "line_no": "int", "window": "int"}},
+        {"name": "list_runtime_prompt_assets", "args": {"harness_id": "str"}},
+        {"name": "read_runtime_prompt_asset", "args": {"harness_id": "str", "asset_name": "str?", "stage": "initial|replan|heartbeat?"}},
+        {"name": "diff_runtime_prompt_assets", "args": {"harness_a": "str", "harness_b": "str", "stage": "initial|replan|heartbeat"}},
         {"name": "validate_candidate", "args": {"candidate_dir": "str", "parent_dir": "str"}},
         {"name": "smoke_check_candidate", "args": {"candidate_dir": "str"}},
     ]
@@ -72,7 +75,7 @@ def _available_agent_tools() -> List[Dict]:
 def _execute_agent_tool(tools: ProposerToolbox, tool_name: str, tool_args: Dict) -> Dict:
     args = dict(tool_args or {})
     if tool_name == "list_harnesses":
-        return {"result": tools.list_harnesses(kind=str(args.get("kind") or "all"))}
+        return {"result": tools.list_harnesses(kind=str(args.get("kind") or "all"), include_archived=bool(args.get("include_archived", False)))}
     if tool_name == "read_harness_spec":
         return {"result": tools.read_harness_spec(str(args.get("harness_id") or ""))}
     if tool_name == "read_harness_code":
@@ -103,6 +106,24 @@ def _execute_agent_tool(tools: ProposerToolbox, tool_name: str, tool_args: Dict)
                 trace_path=str(args.get("trace_path") or ""),
                 line_no=int(args.get("line_no") or 1),
                 window=int(args.get("window") or 2),
+            )
+        }
+    if tool_name == "list_runtime_prompt_assets":
+        return {"result": tools.list_runtime_prompt_assets(harness_id=str(args.get("harness_id") or ""))}
+    if tool_name == "read_runtime_prompt_asset":
+        return {
+            "result": tools.read_runtime_prompt_asset(
+                harness_id=str(args.get("harness_id") or ""),
+                asset_name=(str(args.get("asset_name")) if args.get("asset_name") else None),
+                stage=(str(args.get("stage")) if args.get("stage") else None),
+            )
+        }
+    if tool_name == "diff_runtime_prompt_assets":
+        return {
+            "result": tools.diff_runtime_prompt_assets(
+                harness_a=str(args.get("harness_a") or ""),
+                harness_b=str(args.get("harness_b") or ""),
+                stage=str(args.get("stage") or "initial"),
             )
         }
     if tool_name == "validate_candidate":
@@ -668,6 +689,8 @@ def propose_next_candidate(
     parent_id = str(proposal.get("parent_harness") or "").strip()
     if not parent_id:
         raise ValueError("LLM proposer output missing parent_harness")
+    if parent_id in DEFAULT_EXCLUDED_PROPOSER_CANDIDATES and os.getenv("TYPEFLY_ALLOW_EXCLUDED_PARENT", "0").strip() != "1":
+        raise ValueError(f"parent_harness {parent_id} is excluded from default proposer parent pool")
 
     parent_entry = reg.get(parent_id)
 
@@ -701,16 +724,27 @@ def propose_next_candidate(
             shutil.copy2(src, candidate_dir / name)
     # Ensure runtime-effect sandbox modules always exist for wiring checks,
     # even when parent harness is legacy-only (state_encoder/trigger_policy/prompt_builder).
+    scaffolded_runtime_modules: List[str] = []
     for required in ["state_features.py", "trigger_logic.py", "prompt_composer.py"]:
         path = candidate_dir / required
         if not path.exists():
             fallback = _default_sandbox_file_content(required)
             if fallback:
                 path.write_text(fallback, encoding="utf-8")
+                scaffolded_runtime_modules.append(required)
+
+    if scaffolded_runtime_modules:
+        existing_declared = {Path(str(x)).name for x in list(proposal.get("files_to_create_or_modify") or [])}
+        proposal["files_to_create_or_modify"] = list(existing_declared.union(set(scaffolded_runtime_modules)))
+        existing_changed = {Path(str(x)).name for x in list(proposal.get("changed_files") or [])}
+        proposal["changed_files"] = list(existing_changed.union(set(scaffolded_runtime_modules)))
 
     parent_spec = _load_json(parent_entry.dir_path / "spec.json")
 
     normalized_target_files = [Path(name).name for name in files_to_modify if Path(name).name in ALLOWED_MUTATION_FILES]
+    for scaffold_name in scaffolded_runtime_modules:
+        if scaffold_name not in normalized_target_files:
+            normalized_target_files.append(scaffold_name)
 
     for target_file in normalized_target_files:
         if target_file in {"proposer_note.txt", "README.md"}:

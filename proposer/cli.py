@@ -8,6 +8,7 @@ from proposer.propose_candidate import propose_next_candidate, rebuild_index
 from proposer.registry import HarnessRegistry
 from proposer.evaluate_candidate import evaluate_candidate_live
 from proposer.run_loop import run_once
+from proposer.agent_tools import ProposerToolbox
 
 
 def _repo_root() -> Path:
@@ -109,6 +110,37 @@ def cmd_run_iteration(args: argparse.Namespace) -> int:
     return 0
 
 
+
+
+def cmd_list_runtime_prompt_assets(args: argparse.Namespace) -> int:
+    tools = ProposerToolbox(repo_root=_repo_root(), archive_root=_repo_root() / "proposer_archive_v2")
+    print(json.dumps(tools.list_runtime_prompt_assets(args.harness_id), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_read_runtime_prompt_asset(args: argparse.Namespace) -> int:
+    tools = ProposerToolbox(repo_root=_repo_root(), archive_root=_repo_root() / "proposer_archive_v2")
+    print(
+        json.dumps(
+            tools.read_runtime_prompt_asset(args.harness_id, asset_name=args.asset_name, stage=args.stage),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
+def cmd_diff_runtime_prompt_assets(args: argparse.Namespace) -> int:
+    tools = ProposerToolbox(repo_root=_repo_root(), archive_root=_repo_root() / "proposer_archive_v2")
+    print(
+        json.dumps(
+            tools.diff_runtime_prompt_assets(args.harness_a, args.harness_b, stage=args.stage),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Restricted proposer MVP CLI")
     sp = p.add_subparsers(dest="cmd", required=True)
@@ -148,6 +180,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sp.add_parser("reindex")
     s.set_defaults(func=cmd_reindex)
+
+
+    s = sp.add_parser("list-runtime-prompt-assets")
+    s.add_argument("harness_id")
+    s.set_defaults(func=cmd_list_runtime_prompt_assets)
+
+    s = sp.add_parser("read-runtime-prompt-asset")
+    s.add_argument("harness_id")
+    s.add_argument("--asset-name", default=None)
+    s.add_argument("--stage", choices=["initial", "replan", "heartbeat"], default=None)
+    s.set_defaults(func=cmd_read_runtime_prompt_asset)
+
+    s = sp.add_parser("diff-runtime-prompt-assets")
+    s.add_argument("harness_a")
+    s.add_argument("harness_b")
+    s.add_argument("--stage", choices=["initial", "replan", "heartbeat"], default="initial")
+    s.set_defaults(func=cmd_diff_runtime_prompt_assets)
 
     s = sp.add_parser("run-iteration")
     s.add_argument("--evaluate-baselines", action="store_true")

@@ -234,6 +234,9 @@ def test_propose_flow_backfills_missing_runtime_sandbox_modules_for_legacy_paren
     _write_parent_legacy(baseline)
 
     class _FakeLLM:
+        def __init__(self):
+            self._loop_calls = 0
+
         def request(self, prompt: str, model_name: str, stream: bool = False):
             if "performing proposer self-review" in prompt:
                 return json.dumps({"status": "pass", "issues": [], "files_to_modify": [], "revision_plan": "ok"})
@@ -251,20 +254,35 @@ def test_propose_flow_backfills_missing_runtime_sandbox_modules_for_legacy_paren
                 return "def should_trigger_replan(state, memory, spec):\n    return (True, 'risk')\n"
             if "Requested file:" in prompt:
                 return "def placeholder(*args, **kwargs):\n    return {}\n"
+            self._loop_calls += 1
+            if self._loop_calls == 1:
+                return json.dumps(
+                    {
+                        "action": "tool_call",
+                        "tool_name": "list_runs",
+                        "tool_args": {"harness_id": "baseline3", "limit": 1},
+                        "reason": "collect run evidence first",
+                    }
+                )
             return json.dumps(
                 {
-                    "parent_harness": "baseline3",
-                    "candidate_id": "candidate_0001",
-                    "one_sentence_hypothesis": "test",
-                    "weakness_being_addressed": "test",
-                    "expected_tradeoff": "test",
-                    "expected_runtime_effect": "test",
-                    "sandbox_modules_to_modify": ["trigger_logic.py"],
-                    "files_to_create_or_modify": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
-                    "changed_files": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
-                    "proposer_note_text": "test",
-                    "implementation_contract": {"trigger_policy": {}, "state_encoder": {}, "prompt_builder": {}},
-                    "invariants": ["test"],
+                    "action": "final_proposal",
+                    "proposal": {
+                        "parent_harness": "baseline3",
+                        "candidate_id": "candidate_0001",
+                        "one_sentence_hypothesis": "test",
+                        "weakness_being_addressed": "test",
+                        "expected_tradeoff": "test",
+                        "expected_runtime_effect": "test",
+                        "sandbox_modules_to_modify": ["trigger_logic.py"],
+                        "files_to_create_or_modify": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
+                        "changed_files": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
+                        "runtime_wiring_plan": {},
+                        "smoke_test_evidence_to_check": {},
+                        "proposer_note_text": "test",
+                        "implementation_contract": {"trigger_policy": {}, "state_encoder": {}, "prompt_builder": {}},
+                        "invariants": ["test"],
+                    },
                 }
             )
 
@@ -278,3 +296,6 @@ def test_propose_flow_backfills_missing_runtime_sandbox_modules_for_legacy_paren
     created = propose_next_candidate(repo_root=repo, focus_text="legacy parent test", max_revision_rounds=0)
     assert (created / "state_features.py").exists()
     assert (created / "prompt_composer.py").exists()
+    spec = json.loads((created / "spec.json").read_text(encoding="utf-8"))
+    declared = set(spec.get("proposal_contract", {}).get("files_to_create_or_modify", []))
+    assert {"state_features.py", "trigger_logic.py", "prompt_composer.py"}.issubset(declared)
