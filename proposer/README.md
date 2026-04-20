@@ -15,13 +15,20 @@ This proposer loop limits mutation boundary to harness-level modules only, with 
 - Required contract/meta files:
   - `spec.json`
 
-## Fixed evaluation protocol (strict)
+## Two-stage evaluation protocol
 
-- `SCENE1 -> zoneA`, repeated 8 runs
-- `SCENE2 -> zoneB`, repeated 8 runs
-- `SCENE3 -> zoneC`, repeated 8 runs
+- **Baseline formal protocol (unchanged)**:
+  - `SCENE1 -> zoneA`, 8 runs
+  - `SCENE2 -> zoneB`, 8 runs
+  - `SCENE3 -> zoneC`, 8 runs
+  - total **24** runs
+- **Candidate screening protocol (default for candidates)**:
+  - `SCENE1 -> zoneA`, 2 runs
+  - `SCENE2 -> zoneB`, 2 runs
+  - `SCENE3 -> zoneC`, 2 runs
+  - total **6** runs
 
-Total runs per evaluated harness: **24**.
+Screening is a low-cost triage stage only. Formal 24-run candidate evaluation is the only stage used for direct baseline-level comparison.
 
 ## Agent-driven proposer
 
@@ -195,14 +202,18 @@ Legacy/compatibility field interpretation:
 ## Live benchmark loop
 
 1. Proposer creates `harnesses/candidates/candidate_xxxx/`.
-2. Evaluator uses `LLMController` live execution for 24 runs.
+2. Evaluator uses `LLMController` live execution by stage:
+   - candidate screening: 6 runs
+   - candidate formal: 24 runs
+   - baselines: 24 runs
 3. Per-run outputs are copied to:
    - `runs/run_xxx/runtime_trace.jsonl`
    - `runs/run_xxx/planning_trace.jsonl`
    - `runs/run_xxx/metadata.json`
 4. Aggregation writes:
-   - `per_scene_metrics.json`
-   - `eval_summary.json`
+   - stage-specific files: `per_scene_metrics_screening.json` / `eval_summary_screening.json`
+   - stage-specific files: `per_scene_metrics_formal.json` / `eval_summary_formal.json`
+   - legacy aliases kept for formal: `per_scene_metrics.json` / `eval_summary.json`
 5. Index rebuild updates lineage + Pareto frontier.
 
 ## Runtime mode is now spec-driven (baseline + candidate)
@@ -221,6 +232,23 @@ You can verify applied config in:
 - per-run `metadata.json` (contains `run_summary`/`debug_summary`)
 - planning trace rows (`planning_trace.jsonl`) with trigger evidence fields
 
+Heartbeat observability fields now include:
+- `heartbeat_mode_enabled`
+- `heartbeat_due`
+- `heartbeat_result` (`continue` / `replan` / `skipped` / `blocked` / `failed`)
+- `heartbeat_reason`
+- `trigger_reason`
+- `replan_applied`
+- `replan_skip_reason`
+
+Completion observability fields now use active-zone scope:
+- `active_task_zone`
+- `active_zone_checkpoints`
+- `completed_active_checkpoints`
+- `remaining_active_checkpoints`
+- `mission_success_reason`
+- `completion_scope=zone_scoped`
+
 ## CLI
 
 ```bash
@@ -231,8 +259,14 @@ python -m proposer.cli top-k --metric collision_count_avg -k 5
 python -m proposer.cli diff baseline2 baseline3
 python -m proposer.cli propose --focus-text "improve risk timing"
 python -m proposer.cli evaluate candidate_0001
+python -m proposer.cli evaluate candidate_0001 --mode formal
+python -m proposer.cli evaluate baseline1
 python -m proposer.cli reindex
 python -m proposer.cli run-iteration --focus-text "improve risk timing"
 ```
+
+`evaluate <candidate_id>` defaults to screening mode. Use `--mode formal` after screening to promote a candidate into full 24-run formal evaluation.
+
+`top-k` defaults to formal-only entries; add `--include-screening` to include screening-stage candidates.
 
 > If no LLM key/provider is configured, propose/run-iteration may fail unless `--allow-fallback-heuristic` is provided.

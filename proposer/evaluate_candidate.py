@@ -8,9 +8,8 @@ from statistics import mean
 from typing import Dict, Iterable, List
 
 from controller.harness_protocol import (
-    EVALUATION_PROTOCOL_SEQUENCE,
-    EVALUATION_PROTOCOL_VERSION,
-    TOTAL_EVAL_RUNS,
+    EVALUATION_PROTOCOLS,
+    get_evaluation_protocol,
 )
 from proposer.live_benchmark_runner import LiveBenchmarkRunner, RunArtifact
 from proposer.registry import HarnessRegistry
@@ -86,7 +85,24 @@ def _build_scene_metrics(rows: List[RunArtifact], scene_id: str, zone: str, expe
     }
 
 
-def evaluate_candidate_live(repo_root: Path, harness_id: str, archive_root: Path) -> EvaluationResult:
+def _summary_file_name(stage: str) -> str:
+    return f"eval_summary_{stage}.json"
+
+
+def _scene_file_name(stage: str) -> str:
+    return f"per_scene_metrics_{stage}.json"
+
+
+def _run_file_name(stage: str) -> str:
+    return f"per_run_metrics_{stage}.json"
+
+
+def evaluate_candidate_live(
+    repo_root: Path,
+    harness_id: str,
+    archive_root: Path,
+    evaluation_mode: str | None = None,
+) -> EvaluationResult:
     repo_root = Path(repo_root)
     archive_root = Path(archive_root)
     harness_entry = HarnessRegistry(repo_root).get(harness_id)
@@ -95,7 +111,15 @@ def evaluate_candidate_live(repo_root: Path, harness_id: str, archive_root: Path
     target.mkdir(parents=True, exist_ok=True)
     (target / "code_or_spec").mkdir(parents=True, exist_ok=True)
 
-    runner = LiveBenchmarkRunner(repo_root=repo_root, output_root=target, harness_id=harness_id)
+    evaluation_protocol = get_evaluation_protocol(kind=harness_entry.kind, requested_mode=evaluation_mode)
+    stage = str(evaluation_protocol.get("mode") or "formal")
+
+    runner = LiveBenchmarkRunner(
+        repo_root=repo_root,
+        output_root=target,
+        harness_id=harness_id,
+        evaluation_protocol=evaluation_protocol,
+    )
     runs = runner.run()
 
     # copy harness source/spec snapshot
@@ -121,28 +145,51 @@ def evaluate_candidate_live(repo_root: Path, harness_id: str, archive_root: Path
     for r in runs:
         by_scene.setdefault(r.scene_id, []).append(r)
 
-    per_scene = {}
-    for pair in EVALUATION_PROTOCOL_SEQUENCE:
+    scene_rows = {}
+    for pair in list(evaluation_protocol.get("pairs") or []):
         scene = str(pair["scene_id"])
         zone = str(pair["task_zone"])
         cnt = int(pair["runs"])
-        per_scene[scene] = _build_scene_metrics(by_scene.get(scene, []), scene, zone, cnt)
+        scene_rows[scene] = _build_scene_metrics(by_scene.get(scene, []), scene, zone, cnt)
+
+    per_scene = {
+        "evaluation_stage": stage,
+        "evaluation_protocol": {
+            "name": evaluation_protocol.get("name"),
+            "version": evaluation_protocol.get("version"),
+            "runs_per_scene": int(evaluation_protocol.get("runs_per_scene") or 0),
+            "total_runs_expected": int(evaluation_protocol.get("total_runs") or 0),
+        },
+        "scenes": scene_rows,
+    }
 
     success_total = sum(1 for r in runs if r.mission_success)
     overall_completion_avg = _avg_completion_success_only(runs)
+    formal_exists = (target / _summary_file_name("formal")).exists()
+    promoted_to_formal = bool(formal_exists or (stage == "formal"))
     eval_summary = {
         "harness_id": harness_id,
         "kind": harness_entry.kind,
         "status": "evaluated_live",
+        "evaluation_stage": stage,
         "parent_id": harness_entry.spec.get("parent"),
         "parent_kind": ("baseline" if str(harness_entry.spec.get("parent", "")).startswith("baseline") else "candidate") if harness_entry.spec.get("parent") else None,
         "derived_from": harness_entry.spec.get("parent"),
         "evaluation_protocol": {
-            "version": EVALUATION_PROTOCOL_VERSION,
-            "pairs": EVALUATION_PROTOCOL_SEQUENCE,
-            "total_runs": TOTAL_EVAL_RUNS,
+            "name": evaluation_protocol.get("name"),
+            "version": evaluation_protocol.get("version"),
+            "pairs": list(evaluation_protocol.get("pairs") or []),
+            "runs_per_scene": int(evaluation_protocol.get("runs_per_scene") or 0),
+            "total_runs": int(evaluation_protocol.get("total_runs") or 0),
         },
         "total_runs": len(runs),
+        "total_runs_expected": int(evaluation_protocol.get("total_runs") or 0),
+        "total_runs_completed": len(runs),
+        "stage_complete": len(runs) == int(evaluation_protocol.get("total_runs") or 0),
+        "promoted_to_formal": promoted_to_formal,
+        "available_evaluation_stages": sorted(
+            [k for k in EVALUATION_PROTOCOLS.keys() if (target / _summary_file_name(k)).exists()] + [stage]
+        ),
         "metrics": {
             "success_rate": (float(success_total) / float(len(runs))) if runs else 0.0,
             "collision_count_avg": mean(r.collision_count for r in runs) if runs else 0.0,
@@ -154,11 +201,19 @@ def evaluate_candidate_live(repo_root: Path, harness_id: str, archive_root: Path
     }
 
     per_run_payload = [r.__dict__ for r in runs]
-    with (target / "per_run_metrics.json").open("w", encoding="utf-8") as f:
+    with (target / _run_file_name(stage)).open("w", encoding="utf-8") as f:
         json.dump(per_run_payload, f, ensure_ascii=False, indent=2)
-    with (target / "eval_summary.json").open("w", encoding="utf-8") as f:
+    with (target / _summary_file_name(stage)).open("w", encoding="utf-8") as f:
         json.dump(eval_summary, f, ensure_ascii=False, indent=2)
-    with (target / "per_scene_metrics.json").open("w", encoding="utf-8") as f:
+    with (target / _scene_file_name(stage)).open("w", encoding="utf-8") as f:
         json.dump(per_scene, f, ensure_ascii=False, indent=2)
+    if stage == "formal":
+        # Keep formal outputs in legacy paths for backward compatibility.
+        with (target / "per_run_metrics.json").open("w", encoding="utf-8") as f:
+            json.dump(per_run_payload, f, ensure_ascii=False, indent=2)
+        with (target / "eval_summary.json").open("w", encoding="utf-8") as f:
+            json.dump(eval_summary, f, ensure_ascii=False, indent=2)
+        with (target / "per_scene_metrics.json").open("w", encoding="utf-8") as f:
+            json.dump(per_scene, f, ensure_ascii=False, indent=2)
 
     return EvaluationResult(eval_summary=eval_summary, per_scene_metrics=per_scene, run_artifacts=per_run_payload)

@@ -9,11 +9,10 @@ You must ensure "what changed" equals "what runtime actually executes".
 Do NOT modify mission_success definition, simulator, PX4/robot wrapper, checkpoint completion rules,
 collision-probability mathematics, MiniSpec executor core, or full-replan/queue-clear core design.
 
-Fixed evaluation protocol (must remain unchanged):
-- scene1 -> zoneA, 8 runs
-- scene2 -> zoneB, 8 runs
-- scene3 -> zoneC, 8 runs
-(total 24 runs)
+Evaluation policy:
+- baseline formal protocol (unchanged): scene1/2/3 each 8 runs (total 24)
+- candidate default screening protocol: scene1/2/3 each 2 runs (total 6)
+- only promoted candidates should run formal 24 for final baseline comparison
 
 Optimization priority:
 1) collision count

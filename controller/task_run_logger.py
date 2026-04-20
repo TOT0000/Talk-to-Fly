@@ -46,6 +46,12 @@ RUN_COLUMNS = [
     "selected_heartbeat_seconds",
     "selected_threshold_value",
     "selected_cooldown_seconds",
+    "active_task_zone",
+    "active_zone_checkpoints",
+    "completed_active_checkpoints",
+    "remaining_active_checkpoints",
+    "mission_success_reason",
+    "completion_scope",
     "selected_harness_spec_path",
     "runtime_mode_source",
     "archive_enabled",
@@ -93,6 +99,18 @@ PLANNING_TRACE_ALLOWED_KEYS = {
     "selected_heartbeat_seconds",
     "selected_threshold_value",
     "selected_cooldown_seconds",
+    "heartbeat_mode_enabled",
+    "heartbeat_due",
+    "heartbeat_result",
+    "heartbeat_reason",
+    "replan_applied",
+    "replan_skip_reason",
+    "active_task_zone",
+    "active_zone_checkpoints",
+    "completed_active_checkpoints",
+    "remaining_active_checkpoints",
+    "mission_success_reason",
+    "completion_scope",
     "selected_harness_spec_path",
     "runtime_mode_source",
 }
@@ -459,6 +477,8 @@ class TaskRunLogger:
             str(v).upper()
             for v in list((snapshot.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])
         ]
+        active_zone_ids = [str(v) for v in list((snapshot.get("active_objective_set") or {}).get("active_zone_ids") or [])]
+        completed_active_checkpoints = [cid for cid in active_checkpoint_ids if cid in set(completed_checkpoints)]
         remaining_checkpoints = [cid for cid in active_checkpoint_ids if cid not in set(completed_checkpoints)]
         return {
             "run_id": self._active.run_id if self._active else "",
@@ -469,6 +489,16 @@ class TaskRunLogger:
             "benchmark_progress": benchmark_progress,
             "completed_checkpoints": completed_checkpoints,
             "remaining_checkpoints": remaining_checkpoints,
+            "active_task_zone": ",".join(active_zone_ids),
+            "active_zone_checkpoints": active_checkpoint_ids,
+            "completed_active_checkpoints": completed_active_checkpoints,
+            "remaining_active_checkpoints": remaining_checkpoints,
+            "mission_success_reason": (
+                "all_active_zone_checkpoints_completed"
+                if len(remaining_checkpoints) == 0 and bool(active_checkpoint_ids)
+                else f"unfinished_active_zone_checkpoints:{remaining_checkpoints}"
+            ),
+            "completion_scope": "zone_scoped",
             "active_checkpoint_ids": active_checkpoint_ids,
             "global_unfinished_checkpoints": global_unfinished_checkpoints,
             "execution_mode": snapshot.get("execution_mode"),
@@ -536,6 +566,7 @@ class TaskRunLogger:
         completion_ratio = 0.0
         if active_scope_ids:
             completion_ratio = float(len([cid for cid in true_completed if cid in set(active_scope_ids)])) / float(len(active_scope_ids))
+        active_zone_ids = [str(v) for v in list(active.run_context.get("active_zone_ids") or [])]
         return {
             "run_id": active.run_id,
             "task_id": active.task_id,
@@ -549,6 +580,16 @@ class TaskRunLogger:
             "selected_heartbeat_seconds": active.run_context.get("selected_heartbeat_seconds"),
             "selected_threshold_value": active.run_context.get("selected_threshold_value"),
             "selected_cooldown_seconds": active.run_context.get("selected_cooldown_seconds"),
+            "active_task_zone": ",".join(active_zone_ids),
+            "active_zone_checkpoints": list(active_scope_ids),
+            "completed_active_checkpoints": list(true_completed),
+            "remaining_active_checkpoints": list(true_remaining),
+            "mission_success_reason": (
+                "all_active_zone_checkpoints_completed"
+                if bool(active.mission_success)
+                else f"unfinished_active_zone_checkpoints:{true_remaining}"
+            ),
+            "completion_scope": str(active.run_context.get("completion_scope") or "zone_scoped"),
             "selected_harness_spec_path": active.run_context.get("selected_harness_spec_path"),
             "runtime_mode_source": active.run_context.get("runtime_mode_source", ""),
             "mission_success": active.mission_success,
@@ -619,6 +660,7 @@ class TaskRunLogger:
         completion_ratio = 0.0
         if active_scope_ids:
             completion_ratio = float(len([cid for cid in true_completed if cid in set(active_scope_ids)])) / float(len(active_scope_ids))
+        active_zone_ids = [str(v) for v in list(active.run_context.get("active_zone_ids") or [])]
 
         for row in active.runtime_trace:
             self._append_jsonl_line(self.runtime_trace_jsonl_path, row)
@@ -658,6 +700,16 @@ class TaskRunLogger:
             "selected_heartbeat_seconds": active.run_context.get("selected_heartbeat_seconds"),
             "selected_threshold_value": active.run_context.get("selected_threshold_value"),
             "selected_cooldown_seconds": active.run_context.get("selected_cooldown_seconds"),
+            "active_task_zone": ",".join(active_zone_ids),
+            "active_zone_checkpoints": self._json_text(active_scope_ids),
+            "completed_active_checkpoints": self._json_text(true_completed),
+            "remaining_active_checkpoints": self._json_text(true_remaining),
+            "mission_success_reason": (
+                "all_active_zone_checkpoints_completed"
+                if bool(active.mission_success)
+                else f"unfinished_active_zone_checkpoints:{true_remaining}"
+            ),
+            "completion_scope": str(active.run_context.get("completion_scope") or "zone_scoped"),
             "selected_harness_spec_path": active.run_context.get("selected_harness_spec_path"),
             "runtime_mode_source": active.run_context.get("runtime_mode_source", ""),
             "archive_enabled": bool(active.run_context.get("archive_enabled", True)),
@@ -701,6 +753,16 @@ class TaskRunLogger:
             "selected_heartbeat_seconds": active.run_context.get("selected_heartbeat_seconds"),
             "selected_threshold_value": active.run_context.get("selected_threshold_value"),
             "selected_cooldown_seconds": active.run_context.get("selected_cooldown_seconds"),
+            "active_task_zone": ",".join(active_zone_ids),
+            "active_zone_checkpoints": list(active_scope_ids),
+            "completed_active_checkpoints": list(true_completed),
+            "remaining_active_checkpoints": list(true_remaining),
+            "mission_success_reason": (
+                "all_active_zone_checkpoints_completed"
+                if bool(active.mission_success)
+                else f"unfinished_active_zone_checkpoints:{true_remaining}"
+            ),
+            "completion_scope": str(active.run_context.get("completion_scope") or "zone_scoped"),
             "selected_harness_spec_path": active.run_context.get("selected_harness_spec_path"),
             "runtime_mode_source": active.run_context.get("runtime_mode_source", ""),
             "mission_start_ts": active.mission_start_ts,

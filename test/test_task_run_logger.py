@@ -161,3 +161,30 @@ def test_summary_completed_fields_follow_true_completion_state(tmp_path):
     assert pending["completed_checkpoints"] == ["A1", "A2"]
     assert pending["true_completed_checkpoints"] == ["A1", "A2"]
     assert pending["completion_ratio"] == 2.0 / 3.0
+    assert pending["completion_scope"] == "zone_scoped"
+    assert pending["remaining_active_checkpoints"] == ["A4"]
+    assert pending["mission_success_reason"].startswith("unfinished_active_zone_checkpoints:")
+
+
+def test_runtime_trace_records_zone_scoped_completion_fields(tmp_path):
+    excel_path = tmp_path / "logs" / "task_runs.xlsx"
+    logger = TaskRunLogger(excel_path=str(excel_path))
+    logger.start_run(
+        task_id="task-zone-fields",
+        task_text="zone field test",
+        scenario_name="scene-zone",
+        initial_snapshot={
+            "benchmark_progress": {"completed": ["A1"]},
+            "checkpoint_order": ["A1", "B1", "C1"],
+            "active_objective_set": {"active_zone_ids": ["zone_A"], "active_checkpoint_ids": ["A1", "A2"]},
+        },
+    )
+    logger.end_run(run_status="completed")
+    assert logger.save_pending_run() is True
+    runtime_lines = (tmp_path / "logs" / "task_runs_runtime_trace.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    payload = json.loads(runtime_lines[-1])
+    assert payload["active_task_zone"] == "zone_A"
+    assert payload["active_zone_checkpoints"] == ["A1", "A2"]
+    assert payload["completed_active_checkpoints"] == ["A1"]
+    assert payload["remaining_active_checkpoints"] == ["A2"]
+    assert payload["completion_scope"] == "zone_scoped"

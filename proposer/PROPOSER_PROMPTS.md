@@ -8,6 +8,7 @@ This document mirrors runtime prompts used by:
 
 1. `AGENT_SYSTEM_PROMPT`
    - Defines optimization objective, safety-first priorities, immutable system boundaries, and sandbox runtime module worldview.
+   - Encodes evaluation-stage policy: candidate screening-first (6 runs) and formal promotion for final 24-run comparison.
    - Canonical sandbox modules: `state_features.py`, `trigger_logic.py`, `prompt_composer.py`, `archive_selector.py`, `validator_rules.py`.
 
 2. `AGENT_TOOL_POLICY_PROMPT`

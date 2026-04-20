@@ -738,28 +738,6 @@ class LLMController():
             "zone_C": [cid for cid in BENCHMARK_CHECKPOINT_ORDER if cid.startswith("C")],
         }
 
-        all_keywords = (
-            "ALL ZONES",
-            "ALL CHECKPOINT",
-            "COMPLETE ALL",
-            "全部區域",
-            "全部检查点",
-            "全部檢查點",
-            "全部巡檢點",
-        )
-        if any(key in normalized for key in all_keywords) or any(key in text for key in all_keywords):
-            resolved = {
-                "active_zone_ids": all_zone_ids,
-                "active_checkpoint_ids": list(BENCHMARK_CHECKPOINT_ORDER),
-                "source": "task_parse_all",
-            }
-            print_debug(
-                "[OBJECTIVE-RESOLVE] "
-                f"task={text!r} zones={resolved.get('active_zone_ids')} "
-                f"checkpoints={resolved.get('active_checkpoint_ids')} source={resolved.get('source')}"
-            )
-            return resolved
-
         zone_tokens = set()
         context_hits = any(word in normalized for word in ("ZONE", "ZONES", "AREA", "CHECKPOINT", "INSPECT", "SEARCH"))
         context_hits = context_hits or any(word in text for word in ("區域", "巡檢", "搜尋", "搜索", "檢查點", "检查点"))
@@ -776,6 +754,29 @@ class LLMController():
                 zone_tokens.add(zone_id)
             if context_hits and re.search(rf"\b{token}\b", normalized):
                 zone_tokens.add(zone_id)
+
+        all_keywords = (
+            "ALL ZONES",
+            "ALL AREAS",
+            "ALL CHECKPOINTS IN ALL ZONES",
+            "全部區域",
+            "所有區域",
+            "全部检查点",
+            "全部檢查點",
+            "全部巡檢點",
+        )
+        if (not zone_tokens) and (any(key in normalized for key in all_keywords) or any(key in text for key in all_keywords)):
+            resolved = {
+                "active_zone_ids": all_zone_ids,
+                "active_checkpoint_ids": list(BENCHMARK_CHECKPOINT_ORDER),
+                "source": "task_parse_all",
+            }
+            print_debug(
+                "[OBJECTIVE-RESOLVE] "
+                f"task={text!r} zones={resolved.get('active_zone_ids')} "
+                f"checkpoints={resolved.get('active_checkpoint_ids')} source={resolved.get('source')}"
+            )
+            return resolved
 
         if not zone_tokens:
             resolved = self._default_active_objective_set()
@@ -1308,12 +1309,84 @@ class LLMController():
         # heartbeat should stop calling LLM continuously.
         return True
 
+    def _active_objective_trace_context(self, snapshot: Optional[dict] = None) -> Dict:
+        runtime_snapshot = dict(snapshot or {})
+        objective = dict(runtime_snapshot.get("active_objective_set") or self.active_objective_set or {})
+        active_zone_ids = [str(v) for v in list(objective.get("active_zone_ids") or [])]
+        active_checkpoint_ids = [str(v).upper() for v in list(objective.get("active_checkpoint_ids") or [])]
+        progress = dict(runtime_snapshot.get("benchmark_progress") or self.latest_benchmark_progress or {})
+        completed = [str(v).upper() for v in list(progress.get("completed") or [])]
+        completed_active = [cid for cid in active_checkpoint_ids if cid in set(completed)]
+        remaining_active = [cid for cid in active_checkpoint_ids if cid not in set(completed)]
+        return {
+            "active_task_zone": ",".join(active_zone_ids),
+            "active_zone_checkpoints": list(active_checkpoint_ids),
+            "completed_active_checkpoints": list(completed_active),
+            "remaining_active_checkpoints": list(remaining_active),
+            "completion_scope": "zone_scoped",
+        }
+
+    def _append_heartbeat_trace(
+        self,
+        *,
+        snapshot: dict,
+        heartbeat_due: bool,
+        heartbeat_result: str,
+        heartbeat_reason: str,
+        trigger_reason: str = "",
+        llm_called: bool = False,
+        replan_applied: bool = False,
+        replan_skip_reason: str = "",
+        trace_extra: Optional[dict] = None,
+    ) -> None:
+        benchmark_progress = dict((snapshot or {}).get("benchmark_progress") or {})
+        trace_payload = {
+            "planning_stage": "heartbeat",
+            "plan_source": "heartbeat_decision",
+            "llm_call_purpose": "heartbeat",
+            "llm_called": bool(llm_called),
+            "selected_baseline_id": self.selected_pipeline_id,
+            "scene_id": self.baseline_scene_id,
+            "current_target_checkpoint": benchmark_progress.get("current_target"),
+            "completion_state_source": "benchmark_progress/dwell_tracker",
+            "heartbeat_mode_enabled": bool(self._is_agent_heartbeat_mode()),
+            "heartbeat_due": bool(heartbeat_due),
+            "heartbeat_result": str(heartbeat_result or ""),
+            "heartbeat_reason": str(heartbeat_reason or ""),
+            "trigger_reason": str(trigger_reason or ""),
+            "replan_applied": bool(replan_applied),
+            "replan_skip_reason": str(replan_skip_reason or ""),
+            "sandbox_prompt_context": self._last_sandbox_context,
+            "sandbox_state_features": dict(self._last_sandbox_state_features),
+            **self._active_objective_trace_context(snapshot),
+            **self._build_runtime_policy_evidence(),
+        }
+        if trace_extra:
+            trace_payload.update(dict(trace_extra))
+        self.task_run_logger.append_planning_trace(trace=trace_payload)
+
     def _maybe_run_agent_heartbeat(self, force: bool = False) -> bool:
         if not self._is_agent_heartbeat_mode():
             return False
         if self._pending_heartbeat_replan_plan:
+            snapshot = self.get_live_ui_snapshot() or {}
+            self._append_heartbeat_trace(
+                snapshot=snapshot,
+                heartbeat_due=True,
+                heartbeat_result="replan_pending",
+                heartbeat_reason=self._pending_heartbeat_reason or "pending_replan_plan",
+                replan_applied=True,
+            )
             return True
         if self._should_skip_heartbeat_after_task_completion():
+            snapshot = self.get_live_ui_snapshot() or {}
+            self._append_heartbeat_trace(
+                snapshot=snapshot,
+                heartbeat_due=False,
+                heartbeat_result="skipped",
+                heartbeat_reason="task_completed",
+                replan_skip_reason="task_completed",
+            )
             print_debug(
                 "[AGENT-HEARTBEAT] skipped after task completion "
                 f"pending_statements={self._pending_execution_statement_count()}",
@@ -1322,9 +1395,25 @@ class LLMController():
             return False
         now = time.time()
         if (not force) and (now - float(self.last_heartbeat_ts) < float(self.heartbeat_interval_seconds)):
+            snapshot = self.get_live_ui_snapshot() or {}
+            self._append_heartbeat_trace(
+                snapshot=snapshot,
+                heartbeat_due=False,
+                heartbeat_result="skipped",
+                heartbeat_reason="not_due",
+                replan_skip_reason="not_due",
+            )
             return False
         self.last_heartbeat_ts = now
         if getattr(self, "_replan_attempts", 0) >= int(self.replan_limit):
+            snapshot = self.get_live_ui_snapshot() or {}
+            self._append_heartbeat_trace(
+                snapshot=snapshot,
+                heartbeat_due=True,
+                heartbeat_result="blocked",
+                heartbeat_reason="replan_limit_reached",
+                replan_skip_reason="replan_limit_reached",
+            )
             print_t(f"[REPLAN-COUNT] current={self._replan_attempts} limit={self.replan_limit}")
             return False
         snapshot = self.get_live_ui_snapshot() or {}
@@ -1333,49 +1422,52 @@ class LLMController():
             stage="heartbeat",
             snapshot=snapshot,
         )
+        trigger_reason = ""
         if self._sandbox_trigger_enabled():
             should_call, reason = self._sandbox_trigger_decision(snapshot=snapshot, source="heartbeat")
+            trigger_reason = str(reason or "")
             if (not force) and (not should_call):
+                self._append_heartbeat_trace(
+                    snapshot=snapshot,
+                    heartbeat_due=True,
+                    heartbeat_result="skipped",
+                    heartbeat_reason="no_trigger",
+                    trigger_reason=trigger_reason,
+                    replan_skip_reason="no_trigger",
+                )
                 print_debug(
                     "[SANDBOX-TRIGGER] heartbeat skipped "
                     f"reason={reason}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
                 return False
-        response = self.planner.plan_agent_heartbeat(
-            task_description=sandbox_task,
-            snapshot=snapshot,
-            execution_history=self._build_execution_history_for_llm(),
-            current_plan=self.current_plan,
-            mission_original_plan=self._mission_original_plan,
-            current_active_plan=self._current_active_plan,
-            latest_full_replan_response=self._latest_full_replan_response,
-            full_replan_count=int(getattr(self, "_replan_attempts", 0)),
-            hard_gate=(self.framework_mode == MODE_AGENT_HEARTBEAT_HARDGATE),
-        )
-        benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
-        completed = [str(v).upper() for v in list(benchmark_progress.get("completed") or [])]
-        active_ids = [str(v).upper() for v in list((snapshot.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])]
-        remaining = [cid for cid in active_ids if cid not in set(completed)]
-        policy_evidence = self._build_runtime_policy_evidence()
-        self.task_run_logger.append_planning_trace(
-            trace={
-                **self.planner.get_last_heartbeat_trace(),
-                "planning_stage": "heartbeat",
-                "plan_source": "heartbeat_decision",
-                "llm_call_purpose": "heartbeat",
-                "selected_baseline_id": self.selected_pipeline_id,
-                "scene_id": self.baseline_scene_id,
-                "current_target_checkpoint": benchmark_progress.get("current_target"),
-                "true_completed_checkpoints": [str(v).upper() for v in list(completed or [])],
-                "true_remaining_checkpoints": [str(v).upper() for v in list(remaining or [])],
-                "completion_state_source": "benchmark_progress/dwell_tracker",
-                **policy_evidence,
-                "sandbox_prompt_context": self._last_sandbox_context,
-                "sandbox_state_features": dict(self._last_sandbox_state_features),
-            }
-        )
+        try:
+            response = self.planner.plan_agent_heartbeat(
+                task_description=sandbox_task,
+                snapshot=snapshot,
+                execution_history=self._build_execution_history_for_llm(),
+                current_plan=self.current_plan,
+                mission_original_plan=self._mission_original_plan,
+                current_active_plan=self._current_active_plan,
+                latest_full_replan_response=self._latest_full_replan_response,
+                full_replan_count=int(getattr(self, "_replan_attempts", 0)),
+                hard_gate=(self.framework_mode == MODE_AGENT_HEARTBEAT_HARDGATE),
+            )
+        except Exception as exc:
+            self._append_heartbeat_trace(
+                snapshot=snapshot,
+                heartbeat_due=True,
+                heartbeat_result="failed",
+                heartbeat_reason=f"exception:{exc}",
+                trigger_reason=trigger_reason,
+                llm_called=True,
+                replan_skip_reason="exception",
+            )
+            raise
         raw_response = str(response.get("raw_response", "") or "").strip()
+        trace_extra = dict(self.planner.get_last_heartbeat_trace())
+        if raw_response:
+            trace_extra["raw_response"] = raw_response
         if raw_response:
             self.append_message(f"[AGENT-HEARTBEAT-RAW] {raw_response}")
         response_type = str(response.get("response", "continue"))
@@ -1394,12 +1486,43 @@ class LLMController():
                     plan_text=plan_text,
                     raw_response=raw_response,
                 )
+                self._append_heartbeat_trace(
+                    snapshot=snapshot,
+                    heartbeat_due=True,
+                    heartbeat_result="replan",
+                    heartbeat_reason=reason or "full_replan_plan",
+                    trigger_reason=trigger_reason,
+                    llm_called=True,
+                    replan_applied=True,
+                    trace_extra={**trace_extra, "parsed_plan": plan_text},
+                )
                 print_t(f"[AGENT-HEARTBEAT] response=replan plan={plan_text}")
                 self.append_message(
                     f"[AGENT-HEARTBEAT-REPLAN] reason={reason if reason else 'n/a'}"
                 )
                 self.append_message(f"[AGENT-HEARTBEAT-REPLAN-PLAN] {plan_text}")
                 return True
+            self._append_heartbeat_trace(
+                snapshot=snapshot,
+                heartbeat_due=True,
+                heartbeat_result="blocked",
+                heartbeat_reason=reason or "empty_replan_plan",
+                trigger_reason=trigger_reason,
+                llm_called=True,
+                replan_skip_reason="empty_replan_plan",
+                trace_extra=trace_extra,
+            )
+            return False
+        self._append_heartbeat_trace(
+            snapshot=snapshot,
+            heartbeat_due=True,
+            heartbeat_result="continue",
+            heartbeat_reason=reason or "continue",
+            trigger_reason=trigger_reason,
+            llm_called=True,
+            replan_skip_reason="continue",
+            trace_extra=trace_extra,
+        )
         print_t(f"[AGENT-HEARTBEAT] response=continue reason={reason}")
         return False
 
@@ -1748,6 +1871,9 @@ class LLMController():
                 "scene_id": self.baseline_scene_id,
                 "baseline_scene_id": self.baseline_scene_id,
                 "framework_mode": selected_framework,
+                "active_zone_ids": list(self.active_objective_set.get("active_zone_ids") or []),
+                "active_checkpoint_ids": list(self.active_objective_set.get("active_checkpoint_ids") or []),
+                "completion_scope": "zone_scoped",
             },
         )
         self.append_message('[TASK]: ' + task_description)
@@ -2217,15 +2343,16 @@ class LLMController():
         prompt_fn = prompt_cfg.get("fn")
         if bool(prompt_cfg.get("enabled")) and callable(prompt_fn):
             try:
-                context_obj = prompt_fn(
+                context_obj = self._invoke_prompt_composer(
+                    prompt_fn=prompt_fn,
                     stage=stage,
                     task_description=composed_task,
                     encoded_state=encoded_state,
                     snapshot=snapshot,
-                    spec=spec_payload,
+                    spec_payload=spec_payload,
                 )
-            except TypeError:
-                context_obj = prompt_fn(stage, composed_task, encoded_state, spec_payload)
+            except Exception:
+                context_obj = ""
             if isinstance(context_obj, dict):
                 context_text = str(context_obj.get("prompt_context") or "")
             else:
@@ -2236,6 +2363,43 @@ class LLMController():
                 composed_task = f"{composed_task}\n\n[SANDBOX_PROMPT_CONTEXT]\n{context_text}"
 
         return composed_task
+
+    @staticmethod
+    def _invoke_prompt_composer(
+        *,
+        prompt_fn,
+        stage: str,
+        task_description: str,
+        encoded_state: dict,
+        snapshot: dict,
+        spec_payload: dict,
+    ):
+        # Preferred modern signature: keyword arguments.
+        try:
+            return prompt_fn(
+                stage=stage,
+                task_description=task_description,
+                encoded_state=encoded_state,
+                snapshot=snapshot,
+                spec=spec_payload,
+            )
+        except TypeError:
+            pass
+
+        last_exc: Exception | None = None
+        for args in [
+            (stage, task_description, encoded_state, snapshot, spec_payload),
+            (stage, task_description, encoded_state, snapshot),
+            (stage, task_description, encoded_state, spec_payload),
+            (stage, task_description, encoded_state),
+        ]:
+            try:
+                return prompt_fn(*args)
+            except TypeError as exc:
+                last_exc = exc
+        if last_exc is not None:
+            raise last_exc
+        return ""
 
     def get_selected_pipeline_config(self):
         return get_pipeline_config(self.selected_pipeline_id)
@@ -2647,6 +2811,16 @@ class LLMController():
             "final_termination_reason": str(termination_reason or ""),
             "final_true_completed_checkpoints": list(completion_state.get("true_completed_checkpoints", [])),
             "final_true_remaining_checkpoints": list(completion_state.get("true_remaining_checkpoints", [])),
+            "active_task_zone": str(completion_state.get("active_task_zone") or ""),
+            "active_zone_checkpoints": list(completion_state.get("active_checkpoint_ids", [])),
+            "completed_active_checkpoints": list(completion_state.get("true_completed_checkpoints", [])),
+            "remaining_active_checkpoints": list(completion_state.get("true_remaining_checkpoints", [])),
+            "completion_scope": "zone_scoped",
+            "mission_success_reason": (
+                "all_active_zone_checkpoints_completed"
+                if bool(mission_success)
+                else f"unfinished_active_zone_checkpoints:{completion_state.get('true_remaining_checkpoints', [])}"
+            ),
             "final_status_source": "benchmark_progress/dwell_tracker",
             "interrupted_for_replan": bool(self.interrupted_for_replan),
             "entered_awaiting_replan_response": bool(self.entered_awaiting_replan_response),
@@ -2665,7 +2839,9 @@ class LLMController():
         completed = [str(v).upper() for v in list(progress.get("completed") or [])]
         completed_in_scope = [cid for cid in completed if (not active_ids) or (cid in set(active_ids))]
         remaining = [cid for cid in active_ids if cid not in set(completed_in_scope)]
+        active_zone_ids = [str(v) for v in list(((snapshot or {}).get("active_objective_set") or {}).get("active_zone_ids") or [])]
         return {
+            "active_task_zone": ",".join(active_zone_ids),
             "active_checkpoint_ids": list(active_ids),
             "true_completed_checkpoints": list(completed_in_scope),
             "true_remaining_checkpoints": list(remaining),
