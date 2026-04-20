@@ -141,6 +141,12 @@ def cmd_diff_runtime_prompt_assets(args: argparse.Namespace) -> int:
     )
     return 0
 
+
+def cmd_read_evaluate_error_report(args: argparse.Namespace) -> int:
+    tools = ProposerToolbox(repo_root=_repo_root(), archive_root=_repo_root() / "proposer_archive_v2")
+    print(json.dumps(tools.read_evaluate_error_report(args.run_dir), ensure_ascii=False, indent=2))
+    return 0
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Restricted proposer MVP CLI")
     sp = p.add_subparsers(dest="cmd", required=True)
@@ -197,6 +203,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("harness_b")
     s.add_argument("--stage", choices=["initial", "replan", "heartbeat"], default="initial")
     s.set_defaults(func=cmd_diff_runtime_prompt_assets)
+
+    s = sp.add_parser("read-evaluate-error-report")
+    s.add_argument("run_dir")
+    s.set_defaults(func=cmd_read_evaluate_error_report)
 
     s = sp.add_parser("run-iteration")
     s.add_argument("--evaluate-baselines", action="store_true")

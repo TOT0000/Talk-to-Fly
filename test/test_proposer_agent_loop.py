@@ -36,6 +36,9 @@ class _FakeTools:
     def read_run_metadata(self, run_dir):
         return {}
 
+    def read_evaluate_error_report(self, run_dir):
+        return {}
+
     def search_traces(self, harness_id, needle, max_hits=12):
         return []
 

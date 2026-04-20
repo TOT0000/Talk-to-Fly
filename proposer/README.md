@@ -288,6 +288,7 @@ New proposer tools:
 - `list_runtime_prompt_assets(harness_id)`
 - `read_runtime_prompt_asset(harness_id, asset_name=None, stage=None)`
 - `diff_runtime_prompt_assets(harness_a, harness_b, stage="initial")`
+- `read_evaluate_error_report(run_dir)`
 
 These tools read real runtime prompt files under `controller/assets/tello/` using the same stage/variant routing rules as planner runtime.
 
@@ -304,6 +305,13 @@ Planning traces now include prompt-source evidence fields:
 - `evaluate_prompt_source` (summary block)
 
 Run metadata copies `evaluate_prompt_source`, so prompt-source alignment is verifiable during candidate evaluation.
+
+Each run now also emits `evaluate_error_report.json` with stable fields for proposer retrieval:
+- `error_type`
+- `failure_stage`
+- `module_context`
+- `prompt_source`
+- `config_key_alignment`
 
 ## Prompt/Runtime alignment hardening (latest)
 

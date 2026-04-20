@@ -155,6 +155,7 @@ class ProposerToolbox:
                             "metadata": bool(metadata),
                             "runtime_traces": runtime_files,
                             "planning_traces": planning_files,
+                            "evaluate_error_report": bool((run_dir / "evaluate_error_report.json").exists()),
                         },
                         "scene": metadata.get("scene"),
                         "task": metadata.get("task"),
@@ -346,6 +347,14 @@ class ProposerToolbox:
             return {}
         out = json.loads(path.read_text(encoding="utf-8"))
         self._record("read_run_metadata", run_dir=str(run_dir), has_metadata=bool(out))
+        return out
+
+    def read_evaluate_error_report(self, run_dir: str) -> Dict:
+        path = Path(str(run_dir)) / "evaluate_error_report.json"
+        if not path.exists():
+            return {}
+        out = json.loads(path.read_text(encoding="utf-8"))
+        self._record("read_evaluate_error_report", run_dir=str(run_dir), has_report=bool(out))
         return out
 
     def search_traces(self, harness_id: str, needle: str, max_hits: int = 12) -> List[Dict]:

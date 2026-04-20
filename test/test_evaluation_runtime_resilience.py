@@ -73,3 +73,11 @@ def test_capture_latest_saved_run_handles_missing_planning_trace(tmp_path: Path)
     assert Path(art.runtime_trace_path).exists()
     assert Path(art.planning_trace_path).exists()
     assert Path(art.planning_trace_path).read_text(encoding="utf-8") == ""
+    report_path = Path(art.metadata_path).parent / "evaluate_error_report.json"
+    assert report_path.exists()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["run_id"] == run_id
+    assert "error_type" in report
+    metadata = json.loads(Path(art.metadata_path).read_text(encoding="utf-8"))
+    assert "evaluate_error_report" in metadata
+    assert metadata["evaluate_error_report"]["run_id"] == run_id

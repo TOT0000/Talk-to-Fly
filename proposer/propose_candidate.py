@@ -62,6 +62,7 @@ def _available_agent_tools() -> List[Dict]:
         {"name": "diff_harnesses", "args": {"parent_harness": "str", "candidate_harness": "str", "file_name": "str"}},
         {"name": "list_runs", "args": {"harness_id": "str", "limit": "int"}},
         {"name": "read_run_metadata", "args": {"run_dir": "str"}},
+        {"name": "read_evaluate_error_report", "args": {"run_dir": "str"}},
         {"name": "search_traces", "args": {"harness_id": "str", "needle": "str", "max_hits": "int"}},
         {"name": "read_trace_snippet", "args": {"trace_path": "str", "line_no": "int", "window": "int"}},
         {"name": "list_runtime_prompt_assets", "args": {"harness_id": "str"}},
@@ -92,6 +93,8 @@ def _execute_agent_tool(tools: ProposerToolbox, tool_name: str, tool_args: Dict)
         return {"result": tools.list_runs(harness_id=str(args.get("harness_id") or ""), limit=int(args.get("limit") or 12))}
     if tool_name == "read_run_metadata":
         return {"result": tools.read_run_metadata(run_dir=str(args.get("run_dir") or ""))}
+    if tool_name == "read_evaluate_error_report":
+        return {"result": tools.read_evaluate_error_report(run_dir=str(args.get("run_dir") or ""))}
     if tool_name == "search_traces":
         return {
             "result": tools.search_traces(
@@ -152,7 +155,7 @@ def _run_proposer_agent_loop(
     run_evidence_tool_steps = 0
     run_evidence_hits = 0
     available_tools = _available_agent_tools()
-    run_evidence_tools = {"list_runs", "search_traces", "read_run_metadata", "read_trace_snippet"}
+    run_evidence_tools = {"list_runs", "search_traces", "read_run_metadata", "read_evaluate_error_report", "read_trace_snippet"}
     for step_idx in range(1, max(1, int(max_steps)) + 1):
         prompt = build_agent_next_action_prompt(
             step_idx=step_idx,

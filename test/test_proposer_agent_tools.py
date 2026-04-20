@@ -33,6 +33,7 @@ def test_toolbox_list_read_search_and_snippet(tmp_path):
     run_dir = archive / "candidates" / "candidate_0001" / "runs" / "run_0001"
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "metadata.json").write_text(json.dumps({"mission_success": True}), encoding="utf-8")
+    (run_dir / "evaluate_error_report.json").write_text(json.dumps({"run_id": "run_0001", "error_type": "none"}), encoding="utf-8")
     (run_dir / "runtime_trace.jsonl").write_text('{"risk":"near_miss"}\n{"risk":"ok"}\n', encoding="utf-8")
     (run_dir / "planning_trace.jsonl").write_text('{"event":"replan"}\n', encoding="utf-8")
     (archive / "index.json").write_text(
@@ -58,6 +59,7 @@ def test_toolbox_list_read_search_and_snippet(tmp_path):
     assert "encode_state_features" in tools.read_harness_code("baseline3", "state_features.py")
     assert tools.list_runs("candidate_0001")[0]["run_id"] == "run_0001"
     assert tools.read_run_metadata(str(run_dir))["mission_success"] is True
+    assert tools.read_evaluate_error_report(str(run_dir))["error_type"] == "none"
     hits = tools.search_traces("candidate_0001", "near_miss", max_hits=1)
     assert len(hits) == 1
     snippet = tools.read_trace_snippet(hits[0]["trace"], hits[0]["line_no"], window=1)

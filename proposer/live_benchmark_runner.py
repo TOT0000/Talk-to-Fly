@@ -86,6 +86,95 @@ class LiveBenchmarkRunner:
             return {}
         return {}
 
+    @staticmethod
+    def _latest_planning_row(planning_trace_path: Path) -> dict:
+        if not planning_trace_path.exists():
+            return {}
+        last_row: dict = {}
+        try:
+            for raw in planning_trace_path.read_text(encoding="utf-8").splitlines():
+                row = json.loads(raw)
+                if isinstance(row, dict):
+                    last_row = row
+        except Exception:
+            return {}
+        return last_row
+
+    @staticmethod
+    def _classify_error_type(*, run_status: str, mission_success: bool, termination_reason: str, failure_reason: str) -> str:
+        if mission_success and str(run_status).strip().lower() in {"completed", "success", "ok"}:
+            return "none"
+        reason_blob = f"{termination_reason} {failure_reason}".strip().lower()
+        if "collision" in reason_blob:
+            return "collision_failure"
+        if "queue_exhausted" in reason_blob:
+            return "queue_exhausted_with_unfinished"
+        if "replan_interrupt" in reason_blob:
+            return "replan_interrupt"
+        if "timeout" in reason_blob:
+            return "timeout"
+        return "mission_failure_or_unknown"
+
+    @staticmethod
+    def _build_config_key_alignment_block(summary: dict, planning_row: dict) -> dict:
+        observed = {
+            "selected_trigger_policy_name": summary.get("selected_trigger_policy_name") or planning_row.get("selected_trigger_policy_name"),
+            "selected_threshold_value": summary.get("selected_threshold_value") or planning_row.get("selected_threshold_value"),
+            "selected_heartbeat_seconds": summary.get("selected_heartbeat_seconds") or planning_row.get("selected_heartbeat_seconds"),
+            "selected_cooldown_seconds": summary.get("selected_cooldown_seconds") or planning_row.get("selected_cooldown_seconds"),
+        }
+        has_any = any(v is not None and str(v) != "" for v in observed.values())
+        return {
+            "status": ("observed_runtime_trigger_config" if has_any else "insufficient_evidence"),
+            "observed_runtime_trigger_config": observed,
+            "note": (
+                "Current runtime traces expose selected trigger config values, "
+                "but do not emit a full consumed-key list from trigger module internals."
+            ),
+        }
+
+    def _build_evaluate_error_report(
+        self,
+        *,
+        summary: dict,
+        run_summary: dict,
+        prompt_source_evidence: dict,
+        planning_row: dict,
+    ) -> dict:
+        run_status = str(summary.get("run_status") or run_summary.get("run_status") or "unknown")
+        mission_success = bool(summary.get("mission_success"))
+        termination_reason = str(summary.get("termination_reason") or run_summary.get("termination_reason") or "")
+        failure_reason = str(summary.get("failure_reason") or run_summary.get("failure_reason") or "")
+        return {
+            "run_id": str(summary.get("run_id") or run_summary.get("run_id") or ""),
+            "harness_id": self.harness_id,
+            "error_type": self._classify_error_type(
+                run_status=run_status,
+                mission_success=mission_success,
+                termination_reason=termination_reason,
+                failure_reason=failure_reason,
+            ),
+            "failure_stage": str(planning_row.get("planning_stage") or planning_row.get("llm_call_purpose") or "unknown"),
+            "run_status": run_status,
+            "mission_success": mission_success,
+            "termination_reason": termination_reason,
+            "failure_reason": failure_reason,
+            "module_context": {
+                "selected_harness_id": summary.get("selected_harness_id"),
+                "selected_harness_spec_path": summary.get("selected_harness_spec_path"),
+                "selected_trigger_policy_name": summary.get("selected_trigger_policy_name") or planning_row.get("selected_trigger_policy_name"),
+                "selected_trigger_mode": summary.get("selected_trigger_mode") or planning_row.get("selected_trigger_mode"),
+                "selected_prompt_module": prompt_source_evidence.get("selected_prompt_module") or planning_row.get("selected_prompt_module"),
+            },
+            "prompt_source": dict(prompt_source_evidence or {}),
+            "config_key_alignment": self._build_config_key_alignment_block(summary, planning_row),
+            "evidence_paths": {
+                "planning_trace": "planning_trace.jsonl",
+                "runtime_trace": "runtime_trace.jsonl",
+                "metadata": "metadata.json",
+            },
+        }
+
     def _capture_latest_saved_run(self, logger, scene_id: str, zone: str) -> RunArtifact:
         summary = logger.get_pending_run_summary() or {}
         if not summary:
@@ -105,6 +194,7 @@ class LiveBenchmarkRunner:
         runtime_out = target / "runtime_trace.jsonl"
         planning_out = target / "planning_trace.jsonl"
         metadata_out = target / "metadata.json"
+        error_report_out = target / "evaluate_error_report.json"
 
         if src_runtime.exists():
             shutil.copy2(src_runtime, runtime_out)
@@ -119,6 +209,13 @@ class LiveBenchmarkRunner:
         debug_payload = json.loads(src_debug.read_text(encoding="utf-8")) if src_debug.exists() else {}
 
         prompt_source_evidence = self._extract_prompt_source_evidence(planning_out)
+        latest_planning_row = self._latest_planning_row(planning_out)
+        evaluate_error_report = self._build_evaluate_error_report(
+            summary=summary,
+            run_summary=run_summary,
+            prompt_source_evidence=prompt_source_evidence,
+            planning_row=latest_planning_row,
+        )
         metadata = {
             "run_id": run_id,
             "scene_id": scene_id,
@@ -131,8 +228,11 @@ class LiveBenchmarkRunner:
             "run_summary": run_summary,
             "debug_summary": debug_payload,
             "evaluate_prompt_source": prompt_source_evidence,
+            "evaluate_error_report": evaluate_error_report,
+            "evaluate_error_report_path": error_report_out.as_posix(),
         }
         metadata_out.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        error_report_out.write_text(json.dumps(evaluate_error_report, ensure_ascii=False, indent=2), encoding="utf-8")
 
         return RunArtifact(
             run_id=run_id,
