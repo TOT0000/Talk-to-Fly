@@ -724,16 +724,27 @@ def propose_next_candidate(
             shutil.copy2(src, candidate_dir / name)
     # Ensure runtime-effect sandbox modules always exist for wiring checks,
     # even when parent harness is legacy-only (state_encoder/trigger_policy/prompt_builder).
+    scaffolded_runtime_modules: List[str] = []
     for required in ["state_features.py", "trigger_logic.py", "prompt_composer.py"]:
         path = candidate_dir / required
         if not path.exists():
             fallback = _default_sandbox_file_content(required)
             if fallback:
                 path.write_text(fallback, encoding="utf-8")
+                scaffolded_runtime_modules.append(required)
+
+    if scaffolded_runtime_modules:
+        existing_declared = {Path(str(x)).name for x in list(proposal.get("files_to_create_or_modify") or [])}
+        proposal["files_to_create_or_modify"] = list(existing_declared.union(set(scaffolded_runtime_modules)))
+        existing_changed = {Path(str(x)).name for x in list(proposal.get("changed_files") or [])}
+        proposal["changed_files"] = list(existing_changed.union(set(scaffolded_runtime_modules)))
 
     parent_spec = _load_json(parent_entry.dir_path / "spec.json")
 
     normalized_target_files = [Path(name).name for name in files_to_modify if Path(name).name in ALLOWED_MUTATION_FILES]
+    for scaffold_name in scaffolded_runtime_modules:
+        if scaffold_name not in normalized_target_files:
+            normalized_target_files.append(scaffold_name)
 
     for target_file in normalized_target_files:
         if target_file in {"proposer_note.txt", "README.md"}:
