@@ -22,6 +22,7 @@ except Exception:
 RUNS_SHEET = "runs"
 EVENTS_SHEET = "events"
 DEBUG_SHEET = "debug"
+DEFAULT_ARCHIVE_ROOT = "/home/jiafenli/typefly_logs_archive/archive/manual_runs"
 
 RUN_COLUMNS = [
     "timestamp",
@@ -143,9 +144,10 @@ class _RunRecord:
 
 
 class TaskRunLogger:
-    def __init__(self, excel_path: str = "logs/task_runs.xlsx"):
-        self.excel_path = excel_path
-        self.archive_dir = os.path.dirname(self.excel_path) or "."
+    def __init__(self, excel_path: Optional[str] = None):
+        archive_dir, resolved_excel_path = resolve_archive_root_and_excel_path(excel_path)
+        self.excel_path = resolved_excel_path
+        self.archive_dir = archive_dir
         self.debug_jsonl_path = os.path.join(
             self.archive_dir,
             "task_runs_debug.jsonl",
@@ -163,7 +165,12 @@ class TaskRunLogger:
         self._pending_completed: Optional[_RunRecord] = None
         self._enabled = _OPENPYXL_AVAILABLE
         self._warned_disabled = False
+        self._ensure_archive_dirs()
         self._ensure_workbook()
+
+    def _ensure_archive_dirs(self):
+        os.makedirs(self.archive_dir, exist_ok=True)
+        os.makedirs(os.path.join(self.archive_dir, "runs"), exist_ok=True)
 
     @staticmethod
     def _to_iso(ts: float) -> str:
@@ -484,7 +491,9 @@ class TaskRunLogger:
             json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
 
     def _run_file_path(self, run_id: str, suffix: str) -> str:
-        return os.path.join(self.archive_dir, f"{run_id}_{suffix}")
+        run_dir = os.path.join(self.archive_dir, "runs", str(run_id))
+        os.makedirs(run_dir, exist_ok=True)
+        return os.path.join(run_dir, f"{run_id}_{suffix}")
 
     def end_run(self, run_status: str, failure_reason: str = ""):
         with self._lock:
@@ -741,3 +750,19 @@ class TaskRunLogger:
             "[WARN] TaskRunLogger disabled because openpyxl is not installed. "
             "Install dependency with: pip install openpyxl"
         )
+
+
+def resolve_archive_root_and_excel_path(explicit_excel_path: Optional[str] = None) -> tuple[str, str]:
+    explicit_xlsx = str(explicit_excel_path or "").strip()
+    env_xlsx = str(os.getenv("TYPEFLY_TASK_LOG_XLSX", "") or "").strip()
+    env_root = str(os.getenv("TYPEFLY_ARCHIVE_ROOT", "") or "").strip()
+
+    chosen_xlsx = explicit_xlsx or env_xlsx
+    if chosen_xlsx:
+        xlsx_path = os.path.abspath(os.path.expanduser(chosen_xlsx))
+        archive_root = os.path.dirname(xlsx_path) or DEFAULT_ARCHIVE_ROOT
+    else:
+        archive_root = os.path.abspath(os.path.expanduser(env_root or DEFAULT_ARCHIVE_ROOT))
+        xlsx_path = os.path.join(archive_root, "task_runs.xlsx")
+
+    return archive_root, xlsx_path

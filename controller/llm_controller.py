@@ -181,7 +181,7 @@ class LLMController():
         self.execution_time = time.time()
         self.latest_safety_context = None
         self.scenario_manager = ScenarioManager(default_name=os.getenv("TYPEFLY_SCENARIO", "SAFE"))
-        self.task_run_logger = TaskRunLogger(excel_path=os.getenv("TYPEFLY_TASK_LOG_XLSX", "logs/task_runs.xlsx"))
+        self.task_run_logger = TaskRunLogger(excel_path=os.getenv("TYPEFLY_TASK_LOG_XLSX"))
         self._task_id_counter = 0
         self.latest_scenario_report = None
         self.initial_scenario_state = None
@@ -246,6 +246,15 @@ class LLMController():
         self._mission_original_plan: Optional[str] = None
         self._current_active_plan: Optional[str] = None
         self._latest_full_replan_response: Optional[str] = None
+        self._agent_heartbeat_index = 0
+        self._agent_pending_replan_records: list[dict] = []
+        self._agent_feedback_memory_packets: list[dict] = []
+        self._agent_ready_for_eval_records: list[dict] = []
+        self._agent_eval_results_pending_commit: list[dict] = []
+        self._agent_eval_lock = threading.Lock()
+        self._agent_eval_thread: Optional[threading.Thread] = None
+        self._agent_eval_inflight = False
+        self._agent_eval_generation = 0
         self.mission_start_ts: Optional[float] = None
         self.mission_end_ts: Optional[float] = None
         self.final_mission_summary: Optional[dict] = None
@@ -1274,6 +1283,258 @@ class LLMController():
     def _is_threshold_replan_mode(self) -> bool:
         return self.framework_mode == MODE_TYPEFLY_THRESHOLD_REPLAN
 
+    def _is_agent_feedback_pipeline(self) -> bool:
+        return str(getattr(self, "selected_pipeline_id", "")).strip().lower() == "agent"
+
+    @staticmethod
+    def _safe_float(value):
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _safe_vec3(value):
+        try:
+            if value is None:
+                return None
+            x, y, z = value
+            return [float(x), float(y), float(z)]
+        except Exception:
+            return None
+
+    @staticmethod
+    def _safe_vec2(value):
+        try:
+            if value is None:
+                return None
+            x, y = value
+            return [float(x), float(y)]
+        except Exception:
+            return None
+
+    def _compute_closest_worker_distance(self, snapshot: dict) -> Optional[float]:
+        drone = snapshot.get("drone_est_bias_corrected") or snapshot.get("drone_est") or snapshot.get("drone_gt")
+        if drone is None:
+            return None
+        try:
+            dx, dy = float(drone[0]), float(drone[1])
+        except Exception:
+            return None
+        min_dist = None
+        for worker in list(snapshot.get("workers") or []):
+            wxy = worker.get("ui_xy") or worker.get("est_xy_bias_corrected") or worker.get("gt_xy")
+            if not wxy:
+                continue
+            try:
+                d = float(math.hypot(dx - float(wxy[0]), dy - float(wxy[1])))
+            except Exception:
+                continue
+            if min_dist is None or d < min_dist:
+                min_dist = d
+        return min_dist
+
+    def _build_agent_decision_context(self, snapshot: dict, heartbeat_index: int, timestamp: float) -> dict:
+        safety_context = snapshot.get("safety_context")
+        benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
+        completed = [str(v).upper() for v in list(benchmark_progress.get("completed") or [])]
+        active_ids = [str(v).upper() for v in list((snapshot.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])]
+        remaining = [cid for cid in active_ids if cid not in set(completed)]
+        workers_summary = []
+        for worker in list(snapshot.get("workers") or []):
+            workers_summary.append(
+                {
+                    "id": str(worker.get("id", "")),
+                    "xy": self._safe_vec2(worker.get("ui_xy") or worker.get("est_xy_bias_corrected") or worker.get("gt_xy")),
+                }
+            )
+        active_run = getattr(self.task_run_logger, "_active", None)
+        return {
+            "heartbeat_index": int(heartbeat_index),
+            "timestamp": float(timestamp),
+            "pipeline_id": str(self.selected_pipeline_id),
+            "task_id": (None if active_run is None else str(getattr(active_run, "task_id", ""))),
+            "run_id": (None if active_run is None else str(getattr(active_run, "run_id", ""))),
+            "uav_estimated_position": self._safe_vec3(snapshot.get("drone_est_bias_corrected") or snapshot.get("drone_est") or snapshot.get("drone_gt")),
+            "uav_heading": self._safe_float(snapshot.get("drone_yaw_rad")),
+            "worker_positions_summary": workers_summary,
+            "remaining_checkpoints": list(remaining),
+            "current_target_checkpoint": benchmark_progress.get("current_target"),
+            "task_progress_summary": {
+                "completed_count": int(len(completed)),
+                "active_count": int(len(active_ids)),
+                "completion_ratio": (None if not active_ids else float(len(completed) / max(1, len(active_ids)))),
+                "completed_checkpoints": list(completed),
+            },
+            "predicted_collision_probability": (None if safety_context is None else float(getattr(safety_context, "predicted_collision_probability", 0.0))),
+            "per_worker_collision_probabilities": ([] if safety_context is None else list(getattr(safety_context, "per_worker_collision_probabilities", []) or [])),
+            "dominant_risky_worker": (None if safety_context is None else str(getattr(safety_context, "dominant_threat_id", "") or "")),
+            "active_objective_set": dict(snapshot.get("active_objective_set") or {}),
+        }
+
+    def _build_agent_outcome_metrics(self, snapshot: dict, now_ts: float) -> dict:
+        safety_context = snapshot.get("safety_context")
+        benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
+        completed = [str(v).upper() for v in list(benchmark_progress.get("completed") or [])]
+        active_ids = [str(v).upper() for v in list((snapshot.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])]
+        return {
+            "timestamp": float(now_ts),
+            "risk": (None if safety_context is None else float(getattr(safety_context, "predicted_collision_probability", 0.0))),
+            "closest_worker_distance": self._compute_closest_worker_distance(snapshot),
+            "near_miss_count": int(snapshot.get("near_miss_count", 0) or 0),
+            "collision_count": int(snapshot.get("collision_count", 0) or 0),
+            "completed_checkpoint_count": int(len(completed)),
+            "elapsed_time": (None if self.mission_start_ts is None else float(now_ts - float(self.mission_start_ts))),
+            "task_progress_ratio": (None if not active_ids else float(len(completed) / max(1, len(active_ids)))),
+            "current_target_checkpoint": benchmark_progress.get("current_target"),
+        }
+
+    def _maybe_mature_agent_replan_records(self, current_heartbeat_index: int, snapshot: dict, now_ts: float):
+        if not self._is_agent_feedback_pipeline():
+            return
+        remaining = []
+        current_metrics = self._build_agent_outcome_metrics(snapshot, now_ts=now_ts)
+        for record in list(self._agent_pending_replan_records or []):
+            replan_idx = int(record.get("replan_heartbeat_index", -1))
+            if replan_idx + 1 != int(current_heartbeat_index):
+                remaining.append(record)
+                continue
+            start = dict(record.get("baseline_metrics") or {})
+            delta = {
+                "replan_heartbeat_index": int(replan_idx),
+                "matured_at_heartbeat_index": int(current_heartbeat_index),
+                "observation_window_heartbeats": 1,
+                "observation_window_seconds": (None if start.get("timestamp") is None else float(now_ts - float(start.get("timestamp")))),
+                "execution_progress_observed": bool((current_metrics.get("completed_checkpoint_count", 0) - start.get("completed_checkpoint_count", 0)) != 0),
+                "risk_delta": (None if start.get("risk") is None or current_metrics.get("risk") is None else float(current_metrics["risk"] - start["risk"])),
+                "closest_worker_distance_delta": (None if start.get("closest_worker_distance") is None or current_metrics.get("closest_worker_distance") is None else float(current_metrics["closest_worker_distance"] - start["closest_worker_distance"])),
+                "near_miss_delta": int(current_metrics.get("near_miss_count", 0) - int(start.get("near_miss_count", 0) or 0)),
+                "collision_delta": int(current_metrics.get("collision_count", 0) - int(start.get("collision_count", 0) or 0)),
+                "completed_checkpoint_delta": int(current_metrics.get("completed_checkpoint_count", 0) - int(start.get("completed_checkpoint_count", 0) or 0)),
+                "elapsed_time_delta": (None if start.get("elapsed_time") is None or current_metrics.get("elapsed_time") is None else float(current_metrics["elapsed_time"] - start["elapsed_time"])),
+                "task_progress_delta": (None if start.get("task_progress_ratio") is None or current_metrics.get("task_progress_ratio") is None else float(current_metrics["task_progress_ratio"] - start["task_progress_ratio"])),
+                "current_target_changed": bool(start.get("current_target_checkpoint") != current_metrics.get("current_target_checkpoint")),
+            }
+            matured_record = {
+                "decision_context": dict(record.get("decision_context") or {}),
+                "chosen_action": dict(record.get("chosen_action") or {}),
+                "outcome_delta": delta,
+            }
+            with self._agent_eval_lock:
+                self._agent_ready_for_eval_records.append(matured_record)
+            if bool(self.archive_enabled):
+                self.task_run_logger.append_planning_trace(
+                    trace={
+                        "planning_stage": "heartbeat",
+                        "llm_call_purpose": "agent_replan_matured_ready_for_eval",
+                        "plan_source": "agent_feedback_eval_queue",
+                        "parsed_plan": {
+                            "replan_record": matured_record,
+                        },
+                        "selected_baseline_id": self.selected_pipeline_id,
+                        "scene_id": self.baseline_scene_id,
+                    }
+                )
+        self._agent_pending_replan_records = remaining
+
+    def _start_agent_eval_worker_if_needed(self):
+        if not self._is_agent_feedback_pipeline():
+            return
+        with self._agent_eval_lock:
+            if self._agent_eval_inflight:
+                return
+            if not self._agent_ready_for_eval_records:
+                return
+            generation = int(self._agent_eval_generation)
+            self._agent_eval_inflight = True
+            self._agent_eval_thread = threading.Thread(
+                target=self._agent_eval_worker_loop,
+                args=(generation,),
+                daemon=True,
+            )
+            self._agent_eval_thread.start()
+
+    def _agent_eval_worker_loop(self, generation: int):
+        while True:
+            with self._agent_eval_lock:
+                if generation != int(self._agent_eval_generation):
+                    self._agent_eval_inflight = False
+                    self._agent_eval_thread = None
+                    return
+                if not self._agent_ready_for_eval_records:
+                    self._agent_eval_inflight = False
+                    self._agent_eval_thread = None
+                    return
+                record = self._agent_ready_for_eval_records.pop(0)
+            eval_result = self.planner.evaluate_agent_replan_record(record)
+            completed_ts = float(time.time())
+            with self._agent_eval_lock:
+                if generation != int(self._agent_eval_generation):
+                    continue
+                self._agent_eval_results_pending_commit.append(
+                    {
+                        "replan_record": record,
+                        "evaluator_prompt": eval_result.get("prompt"),
+                        "evaluator_raw_response": eval_result.get("raw_response"),
+                        "evaluator_used_model_name": eval_result.get("used_model_name"),
+                        "evaluator_parsed_json": eval_result.get("parsed"),
+                        "evaluator_completed_ts": completed_ts,
+                    }
+                )
+
+    def _commit_agent_eval_results(self, current_heartbeat_index: int):
+        if not self._is_agent_feedback_pipeline():
+            return
+        with self._agent_eval_lock:
+            pending = list(self._agent_eval_results_pending_commit)
+            self._agent_eval_results_pending_commit = []
+        if not pending:
+            return
+        for item in pending:
+            replan_record = dict(item.get("replan_record") or {})
+            outcome_delta = dict(replan_record.get("outcome_delta") or {})
+            replan_heartbeat_index = int(outcome_delta.get("replan_heartbeat_index", -1))
+            available_from_heartbeat_index = max(
+                int(replan_heartbeat_index) + 2,
+                int(current_heartbeat_index),
+            )
+            packet = {
+                "decision_context": dict(replan_record.get("decision_context") or {}),
+                "chosen_action": dict(replan_record.get("chosen_action") or {}),
+                "outcome_delta": outcome_delta,
+                "evaluator_feedback": dict(item.get("evaluator_parsed_json") or {}),
+                "available_from_heartbeat_index": int(available_from_heartbeat_index),
+            }
+            self._agent_feedback_memory_packets.append(packet)
+            if bool(self.archive_enabled):
+                self.task_run_logger.append_planning_trace(
+                    trace={
+                        "planning_stage": "heartbeat",
+                        "llm_call_purpose": "agent_replan_evaluator",
+                        "plan_source": "agent_feedback_eval",
+                        "prompt": str(item.get("evaluator_prompt") or ""),
+                        "raw_response": str(item.get("evaluator_raw_response") or ""),
+                        "parsed_plan": {
+                            "replan_record": replan_record,
+                            "evaluator_used_model_name": item.get("evaluator_used_model_name"),
+                            "evaluator_parsed_json": item.get("evaluator_parsed_json"),
+                            "matured_feedback_packet": packet,
+                            "evaluator_completed_ts": item.get("evaluator_completed_ts"),
+                        },
+                        "selected_baseline_id": self.selected_pipeline_id,
+                        "scene_id": self.baseline_scene_id,
+                    }
+                )
+
+    def _build_injected_feedback_memory(self, heartbeat_index: int) -> list[dict]:
+        packets = []
+        for packet in list(self._agent_feedback_memory_packets or []):
+            if int(packet.get("available_from_heartbeat_index", 10**9)) <= int(heartbeat_index):
+                packets.append(packet)
+        return packets
+
     def _pending_execution_statement_count(self) -> int:
         queue_obj = getattr(Statement, "execution_queue", None)
         if queue_obj is None:
@@ -1319,6 +1580,15 @@ class LLMController():
             print_t(f"[REPLAN-COUNT] current={self._replan_attempts} limit={self.replan_limit}")
             return False
         snapshot = self.get_live_ui_snapshot() or {}
+        heartbeat_index = int(self._agent_heartbeat_index) + 1
+        now_ts = time.time()
+        self._commit_agent_eval_results(current_heartbeat_index=heartbeat_index)
+        self._maybe_mature_agent_replan_records(
+            current_heartbeat_index=heartbeat_index,
+            snapshot=snapshot,
+            now_ts=now_ts,
+        )
+        feedback_memory_injected = self._build_injected_feedback_memory(heartbeat_index)
         response = self.planner.plan_agent_heartbeat(
             task_description=self.current_task_description,
             snapshot=snapshot,
@@ -1329,25 +1599,37 @@ class LLMController():
             latest_full_replan_response=self._latest_full_replan_response,
             full_replan_count=int(getattr(self, "_replan_attempts", 0)),
             hard_gate=(self.framework_mode == MODE_AGENT_HEARTBEAT_HARDGATE),
+            feedback_memory_packets=feedback_memory_injected,
         )
+        self._agent_heartbeat_index = heartbeat_index
         benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
         completed = [str(v).upper() for v in list(benchmark_progress.get("completed") or [])]
         active_ids = [str(v).upper() for v in list((snapshot.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])]
         remaining = [cid for cid in active_ids if cid not in set(completed)]
-        self.task_run_logger.append_planning_trace(
-            trace={
-                **self.planner.get_last_heartbeat_trace(),
-                "planning_stage": "heartbeat",
-                "plan_source": "heartbeat_decision",
-                "llm_call_purpose": "heartbeat",
-                "selected_baseline_id": self.selected_pipeline_id,
-                "scene_id": self.baseline_scene_id,
-                "current_target_checkpoint": benchmark_progress.get("current_target"),
-                "true_completed_checkpoints": [str(v).upper() for v in list(completed or [])],
-                "true_remaining_checkpoints": [str(v).upper() for v in list(remaining or [])],
-                "completion_state_source": "benchmark_progress/dwell_tracker",
-            }
-        )
+        should_log_heartbeat_trace = not (self._is_agent_feedback_pipeline() and (not bool(self.archive_enabled)))
+        if should_log_heartbeat_trace:
+            self.task_run_logger.append_planning_trace(
+                trace={
+                    **self.planner.get_last_heartbeat_trace(),
+                    "planning_stage": "heartbeat",
+                    "plan_source": "heartbeat_decision",
+                    "llm_call_purpose": "heartbeat",
+                    "selected_baseline_id": self.selected_pipeline_id,
+                    "scene_id": self.baseline_scene_id,
+                    "current_target_checkpoint": benchmark_progress.get("current_target"),
+                    "parsed_plan": (
+                        {
+                            "feedback_memory_injected": feedback_memory_injected,
+                            "heartbeat_used_model_name": self.planner.get_last_heartbeat_trace().get("used_model_name"),
+                        }
+                        if bool(self.archive_enabled)
+                        else None
+                    ),
+                    "true_completed_checkpoints": [str(v).upper() for v in list(completed or [])],
+                    "true_remaining_checkpoints": [str(v).upper() for v in list(remaining or [])],
+                    "completion_state_source": "benchmark_progress/dwell_tracker",
+                }
+            )
         raw_response = str(response.get("raw_response", "") or "").strip()
         if raw_response:
             self.append_message(f"[AGENT-HEARTBEAT-RAW] {raw_response}")
@@ -1356,6 +1638,36 @@ class LLMController():
         if response_type == "full_replan_plan":
             plan_text = self._sanitize_minispec_plan(response.get("plan", ""))
             if plan_text:
+                if self._is_agent_feedback_pipeline():
+                    replan_record = {
+                        "replan_heartbeat_index": int(heartbeat_index),
+                        "decision_context": self._build_agent_decision_context(
+                            snapshot=snapshot,
+                            heartbeat_index=heartbeat_index,
+                            timestamp=now_ts,
+                        ),
+                        "chosen_action": {
+                            "raw_llm_response": raw_response,
+                        },
+                        "baseline_metrics": self._build_agent_outcome_metrics(snapshot, now_ts=now_ts),
+                    }
+                    self._agent_pending_replan_records.append(replan_record)
+                    if bool(self.archive_enabled):
+                        self.task_run_logger.append_planning_trace(
+                            trace={
+                                "planning_stage": "heartbeat",
+                                "llm_call_purpose": "agent_replan_record",
+                                "plan_source": "agent_replan_record_created",
+                                "parsed_plan": {
+                                    "replan_record": {
+                                        "decision_context": replan_record.get("decision_context"),
+                                        "chosen_action": replan_record.get("chosen_action"),
+                                    }
+                                },
+                                "selected_baseline_id": self.selected_pipeline_id,
+                                "scene_id": self.baseline_scene_id,
+                            }
+                        )
                 self._pending_heartbeat_replan_plan = plan_text
                 self._pending_heartbeat_reason = reason
                 self._set_runtime_replan_event(
@@ -1372,7 +1684,9 @@ class LLMController():
                     f"[AGENT-HEARTBEAT-REPLAN] reason={reason if reason else 'n/a'}"
                 )
                 self.append_message(f"[AGENT-HEARTBEAT-REPLAN-PLAN] {plan_text}")
+                self._start_agent_eval_worker_if_needed()
                 return True
+        self._start_agent_eval_worker_if_needed()
         print_t(f"[AGENT-HEARTBEAT] response=continue reason={reason}")
         return False
 
@@ -1660,6 +1974,8 @@ class LLMController():
         pipeline = self.get_selected_pipeline_config()
         if pipeline.id in {"baseline1", "baseline2"}:
             framework_mode = MODE_AGENT_HEARTBEAT_SOFT
+        elif pipeline.id == "agent":
+            framework_mode = MODE_AGENT_HEARTBEAT_SOFT
         elif pipeline.id == "baseline3":
             framework_mode = MODE_TYPEFLY_THRESHOLD_REPLAN
         selected_framework = self._normalize_framework_mode(framework_mode)
@@ -1718,6 +2034,15 @@ class LLMController():
         self._mission_original_plan = None
         self._current_active_plan = None
         self._latest_full_replan_response = None
+        self._agent_heartbeat_index = 0
+        self._agent_pending_replan_records = []
+        self._agent_feedback_memory_packets = []
+        with self._agent_eval_lock:
+            self._agent_eval_generation += 1
+            self._agent_ready_for_eval_records = []
+            self._agent_eval_results_pending_commit = []
+            self._agent_eval_inflight = False
+            self._agent_eval_thread = None
         self.mission_start_ts = time.time()
         self.mission_end_ts = None
         self.final_mission_summary = None
