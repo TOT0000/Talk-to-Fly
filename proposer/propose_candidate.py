@@ -35,6 +35,12 @@ def _load_json(path: Path) -> Dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _ensure_dict(value, default: Dict | None = None) -> Dict:
+    if isinstance(value, dict):
+        return dict(value)
+    return dict(default or {})
+
+
 def _extract_json_object(text: str) -> Dict:
     raw = str(text or "").strip()
     if raw.startswith("```"):
@@ -837,7 +843,7 @@ def propose_next_candidate(
             spec_obj["id"] = candidate_id
             spec_obj["kind"] = "candidate"
             spec_obj["parent"] = parent_id
-            lineage = dict(spec_obj.get("lineage") or {})
+            lineage = _ensure_dict(spec_obj.get("lineage"))
             lineage.update(
                 {
                     "parent_id": parent_id,
@@ -846,7 +852,7 @@ def propose_next_candidate(
                 }
             )
             spec_obj["lineage"] = lineage
-            spec_obj.setdefault("mutation", {})
+            spec_obj["mutation"] = _ensure_dict(spec_obj.get("mutation"))
             spec_obj["mutation"]["type"] = "llm_agent_driven"
             (candidate_dir / target_file).write_text(json.dumps(spec_obj, ensure_ascii=False, indent=2), encoding="utf-8")
         else:
@@ -858,7 +864,7 @@ def propose_next_candidate(
         spec["id"] = candidate_id
         spec["kind"] = "candidate"
         spec["parent"] = parent_id
-        spec.setdefault("lineage", {})
+        spec["lineage"] = _ensure_dict(spec.get("lineage"))
         spec["lineage"]["parent_id"] = parent_id
         spec["lineage"]["parent_kind"] = "baseline" if parent_id.startswith("baseline") else "candidate"
         spec["lineage"]["derived_from"] = parent_id
@@ -878,7 +884,7 @@ def propose_next_candidate(
         }
         spec.setdefault("manifest", {})
         spec["manifest"] = {
-            "lineage": dict(spec.get("lineage") or {}),
+            "lineage": _ensure_dict(spec.get("lineage")),
             "active_sandbox_modules": [
                 "state_features.py",
                 "trigger_logic.py",

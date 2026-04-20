@@ -1,7 +1,7 @@
 import json
 
 from proposer import prompts
-from proposer.propose_candidate import _build_file_generation_prompt, _prepare_proposal_contract
+from proposer.propose_candidate import _build_file_generation_prompt, _ensure_dict, _prepare_proposal_contract
 
 
 def test_system_prompt_contains_new_alignment_constraints_and_no_axis_bias():
@@ -87,6 +87,12 @@ def test_prepare_contract_accepts_minimal_fallback_with_hypothesis_modules():
     }
     out = _prepare_proposal_contract(payload)
     assert "trigger_logic.py" in out["hypothesis_target_modules"]
+
+
+def test_ensure_dict_defends_against_non_mapping_lineage_payload():
+    assert _ensure_dict({"a": 1}) == {"a": 1}
+    assert _ensure_dict(["bad", "lineage"]) == {}
+    assert _ensure_dict("bad") == {}
 
 
 def test_proposer_prompts_doc_syncs_with_runtime_contract_keywords():
