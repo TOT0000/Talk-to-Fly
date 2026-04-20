@@ -270,3 +270,55 @@ python -m proposer.cli run-iteration --focus-text "improve risk timing"
 `top-k` defaults to formal-only entries; add `--include-screening` to include screening-stage candidates.
 
 > If no LLM key/provider is configured, propose/run-iteration may fail unless `--allow-fallback-heuristic` is provided.
+
+## Default proposer pool exclusions (anchoring guard)
+
+- `candidate_0001` remains in archive/history and can still be manually inspected.
+- But it is removed from default proposer candidate retrieval/parent pool:
+  - default `list_harnesses(kind="candidate"|"all")` excludes `candidate_0001`
+  - archive summary candidate pool excludes `candidate_0001`
+  - proposer rejects `parent_harness=candidate_0001` unless `TYPEFLY_ALLOW_EXCLUDED_PARENT=1`
+
+Manual inspection is still available through direct lookup APIs (`read_harness_spec("candidate_0001")`, CLI summary, direct file reads).
+
+## Runtime prompt asset tools (proposer toolbox)
+
+New proposer tools:
+
+- `list_runtime_prompt_assets(harness_id)`
+- `read_runtime_prompt_asset(harness_id, asset_name=None, stage=None)`
+- `diff_runtime_prompt_assets(harness_a, harness_b, stage="initial")`
+
+These tools read real runtime prompt files under `controller/assets/tello/` using the same stage/variant routing rules as planner runtime.
+
+## Evaluate prompt-source evidence
+
+Planning traces now include prompt-source evidence fields:
+
+- `selected_prompt_module`
+- `selected_prompt_module_path`
+- `selected_prompt_asset_path`
+- `selected_prompt_asset_name`
+- `prompt_hash_sha256`
+- `rendered_prompt_source`
+- `evaluate_prompt_source` (summary block)
+
+Run metadata copies `evaluate_prompt_source`, so prompt-source alignment is verifiable during candidate evaluation.
+
+## Prompt/Runtime alignment hardening (latest)
+
+Runtime proposer prompts now explicitly require:
+
+- no default preference among optimization axes
+- primary hypothesis modules must be actual runtime-loaded modules or runtime-used prompt assets
+- prompt-change claims must match evaluation runtime prompt source
+- trigger-change claims must use config keys actually read by runtime-loaded trigger module
+
+`_prepare_proposal_contract(...)` enforces the expanded contract shape for:
+
+- `runtime_wiring_plan.primary_runtime_entrypoints`
+- `runtime_wiring_plan.runtime_prompt_source_plan`
+- `runtime_wiring_plan.config_key_alignment_plan`
+- `smoke_test_evidence_to_check.evaluate_prompt_source_evidence`
+
+so these constraints are not prompt-only statements.

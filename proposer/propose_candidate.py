@@ -18,7 +18,7 @@ from proposer.archive_reader import summarize_archive_for_proposer
 from proposer.consistency import validate_candidate_contract_alignment
 from proposer.evaluate_candidate import mark_pareto
 from proposer.prompts import build_agent_next_action_prompt, build_self_review_prompt
-from proposer.registry import ALLOWED_MUTATION_FILES, TRACKED_CONTRACT_FILES, HarnessRegistry, validate_candidate_boundary
+from proposer.registry import ALLOWED_MUTATION_FILES, DEFAULT_EXCLUDED_PROPOSER_CANDIDATES, TRACKED_CONTRACT_FILES, HarnessRegistry, validate_candidate_boundary
 
 
 def _next_candidate_id(candidates_dir: Path) -> str:
@@ -64,6 +64,9 @@ def _available_agent_tools() -> List[Dict]:
         {"name": "read_run_metadata", "args": {"run_dir": "str"}},
         {"name": "search_traces", "args": {"harness_id": "str", "needle": "str", "max_hits": "int"}},
         {"name": "read_trace_snippet", "args": {"trace_path": "str", "line_no": "int", "window": "int"}},
+        {"name": "list_runtime_prompt_assets", "args": {"harness_id": "str"}},
+        {"name": "read_runtime_prompt_asset", "args": {"harness_id": "str", "asset_name": "str?", "stage": "initial|replan|heartbeat?"}},
+        {"name": "diff_runtime_prompt_assets", "args": {"harness_a": "str", "harness_b": "str", "stage": "initial|replan|heartbeat"}},
         {"name": "validate_candidate", "args": {"candidate_dir": "str", "parent_dir": "str"}},
         {"name": "smoke_check_candidate", "args": {"candidate_dir": "str"}},
     ]
@@ -72,7 +75,7 @@ def _available_agent_tools() -> List[Dict]:
 def _execute_agent_tool(tools: ProposerToolbox, tool_name: str, tool_args: Dict) -> Dict:
     args = dict(tool_args or {})
     if tool_name == "list_harnesses":
-        return {"result": tools.list_harnesses(kind=str(args.get("kind") or "all"))}
+        return {"result": tools.list_harnesses(kind=str(args.get("kind") or "all"), include_archived=bool(args.get("include_archived", False)))}
     if tool_name == "read_harness_spec":
         return {"result": tools.read_harness_spec(str(args.get("harness_id") or ""))}
     if tool_name == "read_harness_code":
@@ -103,6 +106,24 @@ def _execute_agent_tool(tools: ProposerToolbox, tool_name: str, tool_args: Dict)
                 trace_path=str(args.get("trace_path") or ""),
                 line_no=int(args.get("line_no") or 1),
                 window=int(args.get("window") or 2),
+            )
+        }
+    if tool_name == "list_runtime_prompt_assets":
+        return {"result": tools.list_runtime_prompt_assets(harness_id=str(args.get("harness_id") or ""))}
+    if tool_name == "read_runtime_prompt_asset":
+        return {
+            "result": tools.read_runtime_prompt_asset(
+                harness_id=str(args.get("harness_id") or ""),
+                asset_name=(str(args.get("asset_name")) if args.get("asset_name") else None),
+                stage=(str(args.get("stage")) if args.get("stage") else None),
+            )
+        }
+    if tool_name == "diff_runtime_prompt_assets":
+        return {
+            "result": tools.diff_runtime_prompt_assets(
+                harness_a=str(args.get("harness_a") or ""),
+                harness_b=str(args.get("harness_b") or ""),
+                stage=str(args.get("stage") or "initial"),
             )
         }
     if tool_name == "validate_candidate":
@@ -213,10 +234,12 @@ def _normalize_files_to_modify(proposal: Dict) -> List[str]:
 def _prepare_proposal_contract(proposal: Dict) -> Dict:
     required_keys = [
         "parent_harness",
+        "candidate_id",
         "one_sentence_hypothesis",
         "weakness_being_addressed",
         "expected_tradeoff",
         "expected_runtime_effect",
+        "hypothesis_target_modules",
         "proposer_note_text",
         "implementation_contract",
         "invariants",
@@ -244,6 +267,30 @@ def _prepare_proposal_contract(proposal: Dict) -> Dict:
         if section not in implementation_contract:
             raise ValueError(f"implementation_contract missing section: {section}")
 
+    runtime_wiring_plan = dict(proposal.get("runtime_wiring_plan") or {})
+    for key in [
+        "sandbox_modules_changed",
+        "runtime_load_path_or_entrypoint",
+        "spec_manifest_loader_alignment",
+        "legacy_sync_plan",
+        "primary_runtime_entrypoints",
+        "runtime_prompt_source_plan",
+        "config_key_alignment_plan",
+    ]:
+        if key not in runtime_wiring_plan:
+            raise ValueError(f"runtime_wiring_plan missing key: {key}")
+
+    smoke_evidence = dict(proposal.get("smoke_test_evidence_to_check") or {})
+    for key in [
+        "trigger_logic_evidence",
+        "state_features_evidence",
+        "prompt_composer_evidence",
+        "evidence_limitations",
+        "evaluate_prompt_source_evidence",
+    ]:
+        if key not in smoke_evidence:
+            raise ValueError(f"smoke_test_evidence_to_check missing key: {key}")
+
     invariants = list(proposal.get("invariants") or [])
     if not invariants:
         raise ValueError("LLM proposer output missing invariants")
@@ -253,10 +300,12 @@ def _prepare_proposal_contract(proposal: Dict) -> Dict:
     normalized["implementation_contract"] = implementation_contract
     normalized["invariants"] = invariants
     normalized["sandbox_modules_to_modify"] = [Path(str(v)).name for v in list(proposal.get("sandbox_modules_to_modify") or [])]
-    normalized["hypothesis_target_modules"] = list(normalized["sandbox_modules_to_modify"])
+    normalized["hypothesis_target_modules"] = [Path(str(v)).name for v in list(proposal.get("hypothesis_target_modules") or [])]
+    if not normalized["hypothesis_target_modules"]:
+        normalized["hypothesis_target_modules"] = list(normalized["sandbox_modules_to_modify"])
     normalized["changed_files"] = [Path(str(v)).name for v in list(proposal.get("changed_files") or [])]
-    normalized["runtime_wiring_plan"] = dict(proposal.get("runtime_wiring_plan") or {})
-    normalized["smoke_test_evidence_to_check"] = dict(proposal.get("smoke_test_evidence_to_check") or {})
+    normalized["runtime_wiring_plan"] = runtime_wiring_plan
+    normalized["smoke_test_evidence_to_check"] = smoke_evidence
     return normalized
 
 
@@ -570,20 +619,38 @@ def _build_file_generation_prompt(
     return (
         "You are generating one bounded harness file for UAV harness optimization.\n"
         "Allowed harness boundary files: spec.json, state_features.py, trigger_logic.py, prompt_composer.py, archive_selector.py, validator_rules.py, state_encoder.py, trigger_policy.py, prompt_builder.py, proposer_note.txt, README.md\n"
-        "Runtime-first rule: prioritize sandbox runtime-effect modules and wiring alignment.\n"
-        "Primary editable targets are sandbox modules: state_features.py, trigger_logic.py, prompt_composer.py, archive_selector.py, validator_rules.py.\n"
+        "Runtime-first rule: Prioritize sandbox runtime-effect modules, actual runtime prompt assets, and wiring alignment.\n"
+        "Primary editable targets are:\n"
+        "- state_features.py\n"
+        "- trigger_logic.py\n"
+        "- prompt_composer.py\n"
+        "- archive_selector.py\n"
+        "- validator_rules.py\n"
         "Legacy files (state_encoder.py, trigger_policy.py, prompt_builder.py) are compatibility wrappers/metadata mirrors, not primary targets.\n"
-        "Do not create legacy-vs-sandbox ambiguity; forbidden example: editing trigger_logic.py while spec/loader still routes to trigger_policy.py.\n"
-        "If legacy sync is required for compatibility, keep it explicitly consistent with spec/manifest/runtime_wiring_plan.\n"
-        "You must output ONLY the full content of the requested file, no markdown fences.\n"
-        "Do not modify simulator/PX4/controller/executor/collision math/checkpoint rules.\n\n"
+        "Do not create legacy-vs-sandbox ambiguity.\n"
+        "Do not generate a candidate that is only a near-duplicate of prior candidates unless the proposal contract explicitly justifies that narrow direction with evidence.\n"
+        "If the proposal targets planning prompt content:\n"
+        "- make the prompt change concrete and behaviorally meaningful\n"
+        "- do not only change template metadata\n"
+        "- ensure the changed prompt is the one evaluation runtime will actually render and send\n"
+        "If the proposal targets trigger behavior:\n"
+        "- ensure the proposed config keys are actually read by the runtime-loaded trigger module\n"
+        "- do not declare a trigger improvement that depends on unused config keys\n"
+        "You must output ONLY the full content of the requested file, with no markdown fences.\n"
+        "Do not modify simulator / PX4 / controller / executor / collision math / checkpoint rules.\n\n"
         f"Parent harness: {parent_harness_id}\n"
         f"Parent spec:\n{json.dumps(parent_spec, ensure_ascii=False, indent=2)}\n\n"
         f"Proposal contract:\n{json.dumps(proposal, ensure_ascii=False, indent=2)}\n\n"
         f"Requested file: {parent_file_name}\n"
         "Current parent file content:\n"
         f"{parent_file_content}\n\n"
-        "Generate improved content aligned with the proposal hypothesis and weakness.\n"
+        "Generate improved content aligned with:\n"
+        "- the proposal hypothesis\n"
+        "- the identified failure mode in baselines and prior candidates\n"
+        "- runtime wiring alignment\n"
+        "- the declared primary hypothesis modules\n"
+        "- the declared supporting/generated artifacts\n"
+        "- the actual evaluation prompt / trigger / state execution path\n"
         "If requested file is spec.json, ensure valid JSON and keep candidate lineage metadata."
     )
 
@@ -651,12 +718,16 @@ def propose_next_candidate(
                 "runtime_load_path_or_entrypoint": "controller.harness_sandbox runtime sandbox loader",
                 "spec_manifest_loader_alignment": "spec.sandbox + spec.manifest.active_sandbox_modules include trigger_logic.py",
                 "legacy_sync_plan": "none",
+                "primary_runtime_entrypoints": ["controller.harness_sandbox.load_harness_sandbox_profile"],
+                "runtime_prompt_source_plan": "prompt assets remain inherited from parent; no prompt module claim in this fallback",
+                "config_key_alignment_plan": "trigger logic fallback does not introduce new trigger config keys",
             },
             "smoke_test_evidence_to_check": {
                 "trigger_logic_evidence": "smoke/import checks and runtime_metadata.changed_files include trigger_logic.py",
                 "state_features_evidence": "not changed in this fallback candidate",
                 "prompt_composer_evidence": "not changed in this fallback candidate",
                 "evidence_limitations": "fallback path due to proposer LLM failure",
+                "evaluate_prompt_source_evidence": "planning trace evaluate_prompt_source should continue to report inherited baseline prompt source",
             },
             "invariants": [
                 "proposal_contract files must match actual changed files",
@@ -668,6 +739,8 @@ def propose_next_candidate(
     parent_id = str(proposal.get("parent_harness") or "").strip()
     if not parent_id:
         raise ValueError("LLM proposer output missing parent_harness")
+    if parent_id in DEFAULT_EXCLUDED_PROPOSER_CANDIDATES and os.getenv("TYPEFLY_ALLOW_EXCLUDED_PARENT", "0").strip() != "1":
+        raise ValueError(f"parent_harness {parent_id} is excluded from default proposer parent pool")
 
     parent_entry = reg.get(parent_id)
 
@@ -701,16 +774,27 @@ def propose_next_candidate(
             shutil.copy2(src, candidate_dir / name)
     # Ensure runtime-effect sandbox modules always exist for wiring checks,
     # even when parent harness is legacy-only (state_encoder/trigger_policy/prompt_builder).
+    scaffolded_runtime_modules: List[str] = []
     for required in ["state_features.py", "trigger_logic.py", "prompt_composer.py"]:
         path = candidate_dir / required
         if not path.exists():
             fallback = _default_sandbox_file_content(required)
             if fallback:
                 path.write_text(fallback, encoding="utf-8")
+                scaffolded_runtime_modules.append(required)
+
+    if scaffolded_runtime_modules:
+        existing_declared = {Path(str(x)).name for x in list(proposal.get("files_to_create_or_modify") or [])}
+        proposal["files_to_create_or_modify"] = list(existing_declared.union(set(scaffolded_runtime_modules)))
+        existing_changed = {Path(str(x)).name for x in list(proposal.get("changed_files") or [])}
+        proposal["changed_files"] = list(existing_changed.union(set(scaffolded_runtime_modules)))
 
     parent_spec = _load_json(parent_entry.dir_path / "spec.json")
 
     normalized_target_files = [Path(name).name for name in files_to_modify if Path(name).name in ALLOWED_MUTATION_FILES]
+    for scaffold_name in scaffolded_runtime_modules:
+        if scaffold_name not in normalized_target_files:
+            normalized_target_files.append(scaffold_name)
 
     for target_file in normalized_target_files:
         if target_file in {"proposer_note.txt", "README.md"}:
@@ -794,7 +878,7 @@ def propose_next_candidate(
             "expected_tradeoff": str(proposal.get("expected_tradeoff") or ""),
             "expected_runtime_effect": str(proposal.get("expected_runtime_effect") or ""),
             "sandbox_modules_to_modify": list(proposal.get("sandbox_modules_to_modify") or []),
-            "hypothesis_target_modules": list(proposal.get("sandbox_modules_to_modify") or []),
+            "hypothesis_target_modules": list(proposal.get("hypothesis_target_modules") or proposal.get("sandbox_modules_to_modify") or []),
             "files_to_create_or_modify": normalized_target_files,
             "changed_files": list(proposal.get("changed_files") or []),
             "runtime_wiring_plan": dict(proposal.get("runtime_wiring_plan") or {}),

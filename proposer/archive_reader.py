@@ -5,6 +5,8 @@ import importlib.util
 from pathlib import Path
 from typing import Dict, List
 
+from proposer.registry import DEFAULT_EXCLUDED_PROPOSER_CANDIDATES
+
 
 def _read_json(path: Path, default):
     try:
@@ -18,18 +20,24 @@ def read_archive_index(archive_root: Path) -> Dict:
     return _read_json(archive_root / "index.json", {"entries": []})
 
 
-def summarize_archive_for_proposer(repo_root: Path, archive_root: Path, max_entries: int = 12) -> Dict:
+def summarize_archive_for_proposer(
+    repo_root: Path,
+    archive_root: Path,
+    max_entries: int = 12,
+    excluded_candidates: set[str] | None = None,
+) -> Dict:
     repo_root = Path(repo_root)
     archive_root = Path(archive_root)
     idx = read_archive_index(archive_root)
     entries = list(idx.get("entries", []))
+    excluded = set(DEFAULT_EXCLUDED_PROPOSER_CANDIDATES if excluded_candidates is None else excluded_candidates)
 
     baselines = [e.get("candidate_id") for e in entries if e.get("kind") == "baseline"]
-    candidates = [e.get("candidate_id") for e in entries if e.get("kind") == "candidate"]
-    pareto = [e.get("candidate_id") for e in entries if bool(e.get("pareto_frontier"))]
+    candidates = [e.get("candidate_id") for e in entries if e.get("kind") == "candidate" and e.get("candidate_id") not in excluded]
+    pareto = [e.get("candidate_id") for e in entries if bool(e.get("pareto_frontier")) and e.get("candidate_id") not in excluded]
     latest = entries[-1].get("candidate_id") if entries else "(none)"
 
-    selected_entries = list(entries[-max_entries:])
+    selected_entries = [e for e in list(entries[-max_entries:]) if e.get("candidate_id") not in excluded]
     snippets = collect_representative_trace_snippets(repo_root=repo_root, archive_root=archive_root, max_traces=6)
 
     selector = _load_archive_selector(repo_root, entries)
@@ -61,6 +69,7 @@ def summarize_archive_for_proposer(repo_root: Path, archive_root: Path, max_entr
     return {
         "baseline_list": baselines,
         "candidate_list": candidates,
+        "archival_candidate_list": [e.get("candidate_id") for e in entries if e.get("kind") == "candidate"],
         "pareto_list": pareto,
         "latest_harness": latest,
         "entries": compact_entries,

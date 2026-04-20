@@ -146,6 +146,9 @@ def test_propose_flow_runs_self_review_loop_and_emits_audit(tmp_path, monkeypatc
     calls = {"self_review": 0}
 
     class _FakeLLM:
+        def __init__(self):
+            self._loop_calls = 0
+
         def request(self, prompt: str, model_name: str, stream: bool = False):
             if "performing proposer self-review" in prompt:
                 calls["self_review"] += 1
@@ -161,29 +164,59 @@ def test_propose_flow_runs_self_review_loop_and_emits_audit(tmp_path, monkeypatc
                         "state_encoder": {"module": "state_encoder.py", "include_fields": ["predicted_collision_probability"]},
                         "prompt_builder": {"module": "prompt_builder.py", "template_family": "baseline3_prompt", "include_example": True},
                     }
-                )
+                    )
             if "Requested file: trigger_logic.py" in prompt:
                 return "def should_trigger_replan(state, memory, spec):\n    return (True, 'risk')\n"
             if "Requested file:" in prompt:
                 return "def placeholder(*args, **kwargs):\n    return {}\n"
+            self._loop_calls += 1
+            if self._loop_calls == 1:
+                return json.dumps(
+                    {
+                        "action": "tool_call",
+                        "tool_name": "list_runs",
+                        "tool_args": {"harness_id": "baseline3", "limit": 1},
+                        "reason": "collect run evidence first",
+                    }
+                )
             return json.dumps(
                 {
-                    "parent_harness": "baseline3",
-                    "candidate_id": "candidate_0001",
-                    "one_sentence_hypothesis": "introduce tighter event threshold",
-                    "weakness_being_addressed": "late event trigger",
-                    "expected_tradeoff": "slightly more replans",
-                    "expected_runtime_effect": "more responsive replan trigger",
-                    "sandbox_modules_to_modify": ["trigger_logic.py", "state_features.py", "prompt_composer.py"],
-                    "files_to_create_or_modify": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
-                    "changed_files": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
-                    "proposer_note_text": "placeholder",
-                    "implementation_contract": {
-                        "trigger_policy": {},
-                        "state_encoder": {},
-                        "prompt_builder": {},
+                    "action": "final_proposal",
+                    "proposal": {
+                        "parent_harness": "baseline3",
+                        "candidate_id": "candidate_0001",
+                        "one_sentence_hypothesis": "introduce tighter event threshold",
+                        "weakness_being_addressed": "late event trigger",
+                        "expected_tradeoff": "slightly more replans",
+                        "expected_runtime_effect": "more responsive replan trigger",
+                        "hypothesis_target_modules": ["trigger_logic.py"],
+                        "sandbox_modules_to_modify": ["trigger_logic.py", "state_features.py", "prompt_composer.py"],
+                        "files_to_create_or_modify": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
+                        "changed_files": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
+                        "runtime_wiring_plan": {
+                            "sandbox_modules_changed": ["trigger_logic.py"],
+                            "runtime_load_path_or_entrypoint": "controller.harness_sandbox.load_harness_sandbox_profile",
+                            "spec_manifest_loader_alignment": "spec.sandbox and manifest aligned",
+                            "legacy_sync_plan": "legacy wrappers mirror sandbox intent",
+                            "primary_runtime_entrypoints": ["controller.harness_sandbox.load_harness_sandbox_profile"],
+                            "runtime_prompt_source_plan": "no prompt change in this candidate",
+                            "config_key_alignment_plan": "trigger keys map to runtime-loaded trigger module",
+                        },
+                        "smoke_test_evidence_to_check": {
+                            "trigger_logic_evidence": "runtime_wiring_verification + changed_files",
+                            "state_features_evidence": "unchanged",
+                            "prompt_composer_evidence": "unchanged",
+                            "evidence_limitations": "none",
+                            "evaluate_prompt_source_evidence": "planning trace evaluate_prompt_source",
+                        },
+                        "proposer_note_text": "placeholder",
+                        "implementation_contract": {
+                            "trigger_policy": {},
+                            "state_encoder": {},
+                            "prompt_builder": {},
+                        },
+                        "invariants": ["hard guardrails must pass"],
                     },
-                    "invariants": ["hard guardrails must pass"],
                 }
             )
 
@@ -234,6 +267,9 @@ def test_propose_flow_backfills_missing_runtime_sandbox_modules_for_legacy_paren
     _write_parent_legacy(baseline)
 
     class _FakeLLM:
+        def __init__(self):
+            self._loop_calls = 0
+
         def request(self, prompt: str, model_name: str, stream: bool = False):
             if "performing proposer self-review" in prompt:
                 return json.dumps({"status": "pass", "issues": [], "files_to_modify": [], "revision_plan": "ok"})
@@ -251,20 +287,50 @@ def test_propose_flow_backfills_missing_runtime_sandbox_modules_for_legacy_paren
                 return "def should_trigger_replan(state, memory, spec):\n    return (True, 'risk')\n"
             if "Requested file:" in prompt:
                 return "def placeholder(*args, **kwargs):\n    return {}\n"
+            self._loop_calls += 1
+            if self._loop_calls == 1:
+                return json.dumps(
+                    {
+                        "action": "tool_call",
+                        "tool_name": "list_runs",
+                        "tool_args": {"harness_id": "baseline3", "limit": 1},
+                        "reason": "collect run evidence first",
+                    }
+                )
             return json.dumps(
                 {
-                    "parent_harness": "baseline3",
-                    "candidate_id": "candidate_0001",
-                    "one_sentence_hypothesis": "test",
-                    "weakness_being_addressed": "test",
-                    "expected_tradeoff": "test",
-                    "expected_runtime_effect": "test",
-                    "sandbox_modules_to_modify": ["trigger_logic.py"],
-                    "files_to_create_or_modify": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
-                    "changed_files": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
-                    "proposer_note_text": "test",
-                    "implementation_contract": {"trigger_policy": {}, "state_encoder": {}, "prompt_builder": {}},
-                    "invariants": ["test"],
+                    "action": "final_proposal",
+                    "proposal": {
+                        "parent_harness": "baseline3",
+                        "candidate_id": "candidate_0001",
+                        "one_sentence_hypothesis": "test",
+                        "weakness_being_addressed": "test",
+                        "expected_tradeoff": "test",
+                        "expected_runtime_effect": "test",
+                        "hypothesis_target_modules": ["trigger_logic.py"],
+                        "sandbox_modules_to_modify": ["trigger_logic.py"],
+                        "files_to_create_or_modify": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
+                        "changed_files": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
+                        "runtime_wiring_plan": {
+                            "sandbox_modules_changed": ["trigger_logic.py"],
+                            "runtime_load_path_or_entrypoint": "controller.harness_sandbox.load_harness_sandbox_profile",
+                            "spec_manifest_loader_alignment": "spec.sandbox and manifest aligned",
+                            "legacy_sync_plan": "legacy wrappers mirror sandbox intent",
+                            "primary_runtime_entrypoints": ["controller.harness_sandbox.load_harness_sandbox_profile"],
+                            "runtime_prompt_source_plan": "no prompt change in this candidate",
+                            "config_key_alignment_plan": "trigger keys map to runtime-loaded trigger module",
+                        },
+                        "smoke_test_evidence_to_check": {
+                            "trigger_logic_evidence": "runtime_wiring_verification + changed_files",
+                            "state_features_evidence": "unchanged",
+                            "prompt_composer_evidence": "unchanged",
+                            "evidence_limitations": "none",
+                            "evaluate_prompt_source_evidence": "planning trace evaluate_prompt_source",
+                        },
+                        "proposer_note_text": "test",
+                        "implementation_contract": {"trigger_policy": {}, "state_encoder": {}, "prompt_builder": {}},
+                        "invariants": ["test"],
+                    },
                 }
             )
 
@@ -278,3 +344,6 @@ def test_propose_flow_backfills_missing_runtime_sandbox_modules_for_legacy_paren
     created = propose_next_candidate(repo_root=repo, focus_text="legacy parent test", max_revision_rounds=0)
     assert (created / "state_features.py").exists()
     assert (created / "prompt_composer.py").exists()
+    spec = json.loads((created / "spec.json").read_text(encoding="utf-8"))
+    declared = set(spec.get("proposal_contract", {}).get("files_to_create_or_modify", []))
+    assert {"state_features.py", "trigger_logic.py", "prompt_composer.py"}.issubset(declared)
