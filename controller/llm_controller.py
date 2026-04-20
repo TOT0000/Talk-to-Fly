@@ -12,8 +12,6 @@ import numpy as np
 
 from .shared_frame import SharedFrame, Frame
 from .gcs_safety_assessment import GcsSafetyAssessmentService
-from .yolo_client import YoloClient
-from .yolo_grpc_client import YoloGRPCClient
 from .tello_wrapper import TelloWrapper
 from .virtual_robot_wrapper import VirtualRobotWrapper
 from .px4_sim_robot_wrapper import Px4SimRobotWrapper
@@ -86,10 +84,14 @@ class LLMController():
         self.robot_type = robot_type
         self.enable_video = enable_video
         self.shared_frame = SharedFrame()
-        if use_http:
-            self.yolo_client = YoloClient(shared_frame=self.shared_frame)
-        else:
-            self.yolo_client = YoloGRPCClient(shared_frame=self.shared_frame)
+        self.yolo_client = None
+        if self.enable_video:
+            if use_http:
+                from .yolo_client import YoloClient
+                self.yolo_client = YoloClient(shared_frame=self.shared_frame)
+            else:
+                from .yolo_grpc_client import YoloGRPCClient
+                self.yolo_client = YoloGRPCClient(shared_frame=self.shared_frame)
         self.vision = VisionSkillWrapper(self.shared_frame, enabled=enable_video)
         self.latest_frame = None
         self.controller_active = True
