@@ -181,7 +181,7 @@ class LLMController():
         self.execution_time = time.time()
         self.latest_safety_context = None
         self.scenario_manager = ScenarioManager(default_name=os.getenv("TYPEFLY_SCENARIO", "SAFE"))
-        self.task_run_logger = TaskRunLogger(excel_path=os.getenv("TYPEFLY_TASK_LOG_XLSX", "logs/task_runs.xlsx"))
+        self.task_run_logger = TaskRunLogger(excel_path=os.getenv("TYPEFLY_TASK_LOG_XLSX"))
         self._task_id_counter = 0
         self.latest_scenario_report = None
         self.initial_scenario_state = None

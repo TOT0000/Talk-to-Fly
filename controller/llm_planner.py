@@ -9,6 +9,7 @@ from .utils import print_debug, print_t
 from .minispec_interpreter import MiniSpecValueType, evaluate_value
 from .abs.robot_wrapper import RobotType
 from .benchmark_layout import CHECKPOINT_DWELL_SECONDS, CHECKPOINT_RADIUS_M, UAV_RADIUS_M, WORKER_RADIUS_M
+from .task_run_logger import resolve_archive_root_and_excel_path
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.70
@@ -801,7 +802,8 @@ class LLMPlanner():
         )
         dump_prompt = str(os.getenv("TYPEFLY_DUMP_LLM_PROMPT", "1")).strip().lower() not in {"0", "false", "no"}
         if dump_prompt:
-            dump_path = os.getenv("TYPEFLY_LAST_PROMPT_PATH", os.path.join(CURRENT_DIR, "..", "logs", "last_llm_prompt.txt"))
+            default_archive_root, _ = resolve_archive_root_and_excel_path(None)
+            dump_path = os.getenv("TYPEFLY_LAST_PROMPT_PATH", os.path.join(default_archive_root, "last_llm_prompt.txt"))
             try:
                 os.makedirs(os.path.dirname(dump_path), exist_ok=True)
                 with open(dump_path, "w") as f:
