@@ -13,10 +13,11 @@ This file mirrors the runtime constants in `proposer/prompts.py`.
 ## Key runtime behavior enforced
 
 - Evidence-first multi-round tool loop (tool calls before final proposal).
-- Baseline-first evidence when candidate evidence is absent; baseline+candidate evidence when available.
-- Runtime prompt assets are valid evidence source (not only template metadata).
-- Proposal contract includes `runtime_wiring_plan`, `smoke_test_evidence_to_check`, and `hypothesis_target_modules`.
-- Runtime-first self-review defaults to `revise` when wiring mismatch / unsupported prompt-change claim occurs.
+- No pre-selected optimization axis; trigger/state/prompt are all evidence-driven options.
+- Primary hypothesis modules must be runtime-loaded modules or runtime-used prompt assets.
+- Prompt-change claims must align to actual evaluation prompt source.
+- Trigger-change claims must align to runtime-loaded trigger module config keys.
+- Runtime-first self-review defaults to revise on wiring/prompt-source/config-key misalignment.
 
 ## Current contract keys (15)
 
@@ -35,6 +36,8 @@ This file mirrors the runtime constants in `proposer/prompts.py`.
 - `proposer_note_text`
 - `implementation_contract`
 - `invariants`
+
+Keyword parity: `runtime_wiring_plan`, `smoke_test_evidence_to_check`, `hypothesis_target_modules`, `primary_runtime_entrypoints`, `runtime_prompt_source_plan`, `config_key_alignment_plan`, `evaluate_prompt_source_evidence`.
 
 ## Sync policy
 

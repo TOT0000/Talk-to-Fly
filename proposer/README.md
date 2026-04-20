@@ -304,3 +304,21 @@ Planning traces now include prompt-source evidence fields:
 - `evaluate_prompt_source` (summary block)
 
 Run metadata copies `evaluate_prompt_source`, so prompt-source alignment is verifiable during candidate evaluation.
+
+## Prompt/Runtime alignment hardening (latest)
+
+Runtime proposer prompts now explicitly require:
+
+- no default preference among optimization axes
+- primary hypothesis modules must be actual runtime-loaded modules or runtime-used prompt assets
+- prompt-change claims must match evaluation runtime prompt source
+- trigger-change claims must use config keys actually read by runtime-loaded trigger module
+
+`_prepare_proposal_contract(...)` enforces the expanded contract shape for:
+
+- `runtime_wiring_plan.primary_runtime_entrypoints`
+- `runtime_wiring_plan.runtime_prompt_source_plan`
+- `runtime_wiring_plan.config_key_alignment_plan`
+- `smoke_test_evidence_to_check.evaluate_prompt_source_evidence`
+
+so these constraints are not prompt-only statements.

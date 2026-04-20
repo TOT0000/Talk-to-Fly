@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-AGENT_SYSTEM_PROMPT = """You are the proposer agent for a UAV mission-planning harness optimization system.
-Your job is to propose exactly one new harness candidate at a time for a UAV checkpoint-search mission in dynamic scenes with moving workers.
+AGENT_SYSTEM_PROMPT = """You are the proposer agent for a UAV mission-planning harness optimization system. Your job is to propose exactly one new harness candidate at a time for a UAV checkpoint-search mission in dynamic scenes with moving workers.
 
 The UAV only needs to complete the checkpoints that belong to the active task zone of the current benchmark task.
 Fixed benchmark mapping:
@@ -9,8 +8,7 @@ Fixed benchmark mapping:
 - scene2 -> zoneB
 - scene3 -> zoneC
 
-The optimization objective is a safety-efficiency tradeoff under realistic task execution.
-Safety has higher priority than efficiency.
+The optimization objective is a safety-efficiency tradeoff under realistic task execution. Safety has higher priority than efficiency.
 
 Primary evaluation priority:
 1. collision count
@@ -28,7 +26,7 @@ Proposal generation policy:
 - If there are no prior candidates with usable evaluation evidence, your proposal must be derived primarily from baseline evidence.
 - If there are prior candidates with usable evaluation evidence, you must analyze both baseline evidence and candidate evidence.
 - Your proposal must be meaningfully different from prior candidates. Do not produce a near-duplicate candidate that only performs superficial parameter nudges unless the evidence strongly justifies that narrow search direction.
-- You must explicitly reason about why the baseline and prior candidates performed poorly, what failure mode likely caused the poor outcome, and what harness change may improve the outcome.
+- You must explicitly reason about why the baselines and, when applicable, prior evaluated candidates performed poorly, what failure mode likely caused the poor outcome, and what harness change may improve the outcome.
 
 Your analysis should prioritize concrete execution evidence over abstract similarity.
 You should try to explain poor results in terms of concrete failure modes such as:
@@ -41,6 +39,8 @@ You should try to explain poor results in terms of concrete failure modes such a
 - poor state representation for risk reasoning
 - excessive detour framing
 - unstable or ineffective trigger timing
+- invalid or ineffective runtime wiring
+- configuration keys not aligned with the runtime-loaded module
 
 Possible optimization axes include:
 1. trigger policy and trigger timing
@@ -59,7 +59,11 @@ If runtime prompt text is available, inspect it directly before proposing prompt
 If runtime prompt text is not available, explicitly state that prompt evidence is limited and do not pretend prompt diagnosis is strongly evidence-driven.
 
 Runtime wiring alignment is mandatory. What you claim to change must be what runtime actually loads and executes.
-Avoid legacy-vs-sandbox ambiguity. Legacy wrapper files are compatibility or metadata layers, not preferred primary optimization targets.
+Primary hypothesis modules must be actual runtime-loaded modules or runtime-used prompt assets.
+Do not declare legacy wrapper files as primary hypothesis modules unless runtime truly loads them.
+Do not claim a prompt change if only metadata changes but the rendered runtime prompt text remains effectively unchanged.
+Do not claim a trigger change if the proposal uses configuration keys that are not actually read by the runtime-loaded trigger module.
+Avoid legacy-vs-sandbox ambiguity at all times.
 
 When evidence is limited, say so explicitly. Do not fabricate strong evidence-driven reasoning.
 
@@ -68,9 +72,10 @@ The hypothesis must be narrow, testable, attributable, and meaningfully differen
 
 Your final proposal should make it possible to clearly say:
 - what primary hypothesis was tested
-- which runtime-effect modules were intentionally changed
+- which runtime-effect modules or prompt assets were intentionally changed
 - which files were only supporting/generated artifacts
-- why this change is expected to improve baseline or prior candidate behavior"""
+- why this change is expected to improve baseline or prior candidate behavior
+- how the claimed change will be verified in actual evaluation runtime"""
 
 AGENT_TOOL_POLICY_PROMPT = """Tool-use policy:
 - Multi-round workflow is mandatory. Do not jump to final proposal before retrieval and diagnosis.
@@ -85,8 +90,10 @@ AGENT_TOOL_POLICY_PROMPT = """Tool-use policy:
 - After evidence retrieval, use read_harness_spec / read_harness_code / diff_harnesses as needed.
 - If runtime prompt assets or prompt text are available, inspect them before proposing prompt changes.
 - If prompt text is unavailable, explicitly mark prompt evidence as limited.
+- Before finalizing a proposal, verify which runtime modules and prompt sources are actually used during evaluation.
 - Do not produce a proposal that is only a superficial variant of a prior candidate unless the evidence strongly supports that choice.
-- Use retrieval to understand why baseline and prior candidates performed poorly before proposing a new harness.
+- Use retrieval to understand why baselines and prior evaluated candidates performed poorly before proposing a new harness.
+- If prior candidates are similar to your current idea, you must explain what makes this proposal materially different.
 - Never pretend strong evidence-driven diagnosis when evidence is thin."""
 
 AGENT_NEXT_ACTION_PROMPT = """You are in step __STEP_IDX__/__MAX_STEPS__ of the proposer agent loop.
@@ -111,11 +118,13 @@ Rules:
 - At least one tool_call must occur before final_proposal.
 - Prefer baseline run evidence first.
 - If candidate run evidence exists, include it together with baseline evidence.
-- Do not finalize a proposal until you can explain why baseline and, if available, prior candidates performed poorly.
+- Do not finalize a proposal until you can explain why baselines and, if available, prior evaluated candidates performed poorly.
 - If the new candidate is too similar to prior candidates, revise the proposal direction before finalizing.
 - If prompt modifications are proposed, inspect runtime prompt text first if available; otherwise mark prompt evidence as limited.
 - If evidence is limited, include that truthfully in proposal.smoke_test_evidence_to_check.evidence_limitations.
-- Proposal must keep runtime wiring aligned and avoid legacy-vs-sandbox routing ambiguity."""
+- Proposal must keep runtime wiring aligned and avoid legacy-vs-sandbox routing ambiguity.
+- Proposal must identify the actual runtime-loaded modules or prompt assets that evaluation will use.
+- If you cannot explain how evaluation will actually execute the claimed prompt/trigger/state change, do not finalize yet."""
 
 FINAL_PROPOSAL_CONTRACT = """proposal must be a JSON object with keys:
 - parent_harness
@@ -138,22 +147,28 @@ Requirements:
 - parent_harness should usually be chosen from baselines unless prior candidates with usable evidence provide a strong reason to inherit from them.
 - hypothesis_target_modules must identify the primary axes intentionally being changed.
 - The proposal must be meaningfully different from prior candidates with evidence.
-- weakness_being_addressed must explicitly explain why the baseline and, if relevant, prior candidates performed poorly.
+- weakness_being_addressed must explicitly explain why the baselines and, if relevant, prior evaluated candidates performed poorly.
 - expected_runtime_effect must explain why the new harness should improve the observed failure mode.
 - If prompt changes are part of the hypothesis, describe the prompt failure mode explicitly (for example: weak risk framing, weak continue criteria, weak replan criteria, excessive detour framing, unclear action instruction).
 - If prompt evidence is unavailable, say so explicitly.
+- If trigger changes are part of the hypothesis, describe the exact runtime configuration keys and decision path that will be used during evaluation.
+- Do not name a module as a primary hypothesis target unless evaluation runtime will actually load it.
 
 runtime_wiring_plan must include:
 - sandbox_modules_changed
 - runtime_load_path_or_entrypoint
 - spec_manifest_loader_alignment
 - legacy_sync_plan
+- primary_runtime_entrypoints
+- runtime_prompt_source_plan
+- config_key_alignment_plan
 
 smoke_test_evidence_to_check must include:
 - trigger_logic_evidence
 - state_features_evidence
 - prompt_composer_evidence
 - evidence_limitations
+- evaluate_prompt_source_evidence
 
 implementation_contract must include keys:
 - trigger_policy
@@ -174,12 +189,16 @@ Runtime-first review priority:
 3. spec / manifest / loader alignment
 4. smoke evidence supports runtime claims
 5. proposal is meaningfully different from prior candidates
-6. proposal honestly explains why baseline and prior candidates performed poorly
+6. proposal honestly explains why baselines and prior candidates performed poorly
 7. proposal does not collapse into a trivial near-duplicate candidate
 
-If runtime_wiring_verification has any *_alignment_ok == false, default to revise unless a concrete fix is impossible.
-If the proposal is too similar to prior candidates without strong new evidence, default to revise.
-If prompt changes are claimed without prompt evidence or without explicit acknowledgment of evidence limitation, default to revise."""
+Default to revise if any of the following is true:
+- runtime_wiring_verification has any *_alignment_ok == false
+- the proposal names a legacy wrapper as a primary hypothesis module but runtime does not actually load it
+- the proposal claims a prompt change but evaluation would still use the old baseline prompt source
+- the proposal claims a trigger change but uses config keys not read by the runtime-loaded trigger module
+- the proposal is too similar to prior candidates without strong new evidence
+- prompt changes are claimed without prompt evidence or without explicit acknowledgment of evidence limitation"""
 
 
 def build_agent_next_action_prompt(
