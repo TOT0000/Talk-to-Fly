@@ -50,9 +50,10 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._active_command_start_time: Optional[float] = None
         # Offboard warmup dominates per-command latency in px4_sim mode.
         # Keep it tunable and skip warmup entirely once already OFFBOARD+ARMED.
-        self._offboard_warmup_s = max(0.0, float(os.getenv("TYPEFLY_PX4_OFFBOARD_WARMUP_S", "0.25")))
-        self._offboard_confirm_timeout_s = max(0.1, float(os.getenv("TYPEFLY_PX4_OFFBOARD_CONFIRM_TIMEOUT_S", "1.0")))
-        self._offboard_max_attempts = max(1, int(os.getenv("TYPEFLY_PX4_OFFBOARD_MAX_ATTEMPTS", "2")))
+        self._offboard_warmup_s = max(0.0, float(os.getenv("TYPEFLY_PX4_OFFBOARD_WARMUP_S", "0.35")))
+        self._offboard_confirm_timeout_s = max(0.1, float(os.getenv("TYPEFLY_PX4_OFFBOARD_CONFIRM_TIMEOUT_S", "1.5")))
+        self._offboard_max_attempts = max(1, int(os.getenv("TYPEFLY_PX4_OFFBOARD_MAX_ATTEMPTS", "6")))
+        self._position_ready_timeout_s = max(1.0, float(os.getenv("TYPEFLY_PX4_POSITION_READY_TIMEOUT_S", "8.0")))
 
     def set_state_provider(self, state_provider):
         self._state_provider = state_provider
@@ -497,7 +498,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._begin_motion_debug("takeoff", 1.0)
 
         if self._state_provider is not None and hasattr(self._state_provider, "wait_for_position"):
-            if not self._state_provider.wait_for_position(timeout_s=3.0):
+            if not self._state_provider.wait_for_position(timeout_s=self._position_ready_timeout_s):
                 print("[PX4_SIM] takeoff aborted: no valid local position")
                 return False
 
@@ -505,7 +506,10 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
 
         # 1) Warm-up offboard stream, switch to offboard mode, and arm.
         if not self._ensure_offboard_control(x, y, z, yaw):
-            print("[PX4_SIM] takeoff aborted: failed to enter offboard+armed state")
+            print(
+                "[PX4_SIM] takeoff aborted: failed to enter offboard+armed state "
+                f"nav_state={self.get_navigation_state()} arming_state={self.get_arming_state()}"
+            )
             return False
 
         # 2) Climb by setting higher target in local NED (z more negative = up).
