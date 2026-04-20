@@ -183,7 +183,7 @@ class TypeFly:
                         label="Execution Mode",
                     )
                     self.baseline_selector = gr.Dropdown(
-                        choices=list(PIPELINE_REGISTRY.keys()),
+                        choices=[(cfg.name, cfg.id) for cfg in PIPELINE_REGISTRY.values()],
                         value=self.selected_baseline_id,
                         label="Baseline Pipeline",
                     )
