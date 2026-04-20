@@ -1,4 +1,4 @@
-Example C (TypeFly replan: triggered by predicted future collision, larger conservative detour first)
+Example R1 (Agent continuation replan: clearly elevated future risk, conservative detour first)
 Scene:
 - active zones: zone_A
 - active checkpoints: A1, A2, A3, A4
@@ -11,9 +11,9 @@ Scene:
 - dominant risky worker: worker_2
 - predicted_collision_probability over the next 3 seconds: 0.740
 Task: [A] Replan and finish remaining checkpoints in zone_A.
-Response: lo('high risk conservative detour first');mb(0.9);ml(1.0);tu(25);d(0.4);gc('A1');d(2.0);gc('A3');d(2.0);
+Response: lo('agent replan high-risk conservative detour first');mb(0.9);ml(1.0);tu(25);d(0.4);gc('A1');d(2.0);gc('A3');d(2.0);
 
-Example D (TypeFly replan: threshold-crossing future risk, small preventive detour)
+Example R2 (Agent continuation replan: mildly elevated future risk, small preventive detour)
 Scene:
 - active zones: zone_A
 - active checkpoints: A1, A2, A3, A4
@@ -26,4 +26,4 @@ Scene:
 - dominant risky worker: worker_1
 - predicted_collision_probability over the next 3 seconds: 0.710
 Task: [A] Continue mission and finish remaining checkpoints in zone_A.
-Response: lo('mild future risk small preventive shift');ml(0.3);tu(8);gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
+Response: lo('agent replan mild-risk preventive shift');ml(0.3);tu(8);gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
