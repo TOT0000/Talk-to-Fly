@@ -42,6 +42,15 @@ class _FakeTools:
     def read_trace_snippet(self, trace_path, line_no, window=2):
         return []
 
+
+    def list_runtime_prompt_assets(self, harness_id):
+        return []
+
+    def read_runtime_prompt_asset(self, harness_id, asset_name=None, stage=None):
+        return {}
+
+    def diff_runtime_prompt_assets(self, harness_a, harness_b, stage="initial"):
+        return {}
     def validate_candidate(self, candidate_dir, parent_dir):
         return {"ok": True}
 

@@ -2003,7 +2003,15 @@ class LLMController():
                                 "selected_baseline_id": pipeline.id,
                                 "scene_id": self.baseline_scene_id,
                                 "sandbox_prompt_context": self._last_sandbox_context,
+                                "sandbox_prompt_context_hash_sha256": self.planner._hash_text(self._last_sandbox_context),
                                 "sandbox_state_features": dict(self._last_sandbox_state_features),
+                                **dict(getattr(self, "_last_sandbox_prompt_source", {}) or {}),
+                                "evaluate_prompt_source": {
+                                    "selected_prompt_module": (dict(getattr(self, "_last_sandbox_prompt_source", {}) or {}).get("selected_prompt_module") or ""),
+                                    "selected_prompt_asset_path": self.planner.get_last_plan_trace().get("selected_prompt_asset_path"),
+                                    "selected_prompt_asset_name": self.planner.get_last_plan_trace().get("selected_prompt_asset_name"),
+                                    "rendered_prompt_hash_sha256": self.planner.get_last_plan_trace().get("prompt_hash_sha256"),
+                                },
                                 **policy_evidence,
                             }
                         )
@@ -2328,6 +2336,7 @@ class LLMController():
         composed_task = str(task_description or "")
         self._last_sandbox_context = ""
         self._last_sandbox_state_features = {}
+        self._last_sandbox_prompt_source = {"selected_prompt_module": "", "selected_prompt_module_path": "", "rendered_prompt_source": "runtime_prompt_assets_only"}
 
         state_cfg = dict(profile.get("state_features") or {})
         state_fn = state_cfg.get("fn")
@@ -2342,6 +2351,13 @@ class LLMController():
         prompt_cfg = dict(profile.get("prompt_composer") or {})
         prompt_fn = prompt_cfg.get("fn")
         if bool(prompt_cfg.get("enabled")) and callable(prompt_fn):
+            module_name = str(prompt_cfg.get("module") or "")
+            harness_dir = str(profile.get("harness_dir") or "")
+            self._last_sandbox_prompt_source = {
+                "selected_prompt_module": module_name,
+                "selected_prompt_module_path": (os.path.join(harness_dir, module_name) if harness_dir and module_name else ""),
+                "rendered_prompt_source": "runtime_prompt_assets_plus_candidate_prompt_composer",
+            }
             try:
                 context_obj = self._invoke_prompt_composer(
                     prompt_fn=prompt_fn,

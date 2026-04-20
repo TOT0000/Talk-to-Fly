@@ -113,6 +113,17 @@ PLANNING_TRACE_ALLOWED_KEYS = {
     "completion_scope",
     "selected_harness_spec_path",
     "runtime_mode_source",
+    "prompt_hash_sha256",
+    "prompt_asset_report",
+    "selected_prompt_asset_path",
+    "selected_prompt_asset_name",
+    "selected_prompt_module",
+    "selected_prompt_module_path",
+    "rendered_prompt_source",
+    "sandbox_prompt_context",
+    "sandbox_prompt_context_hash_sha256",
+    "sandbox_state_features",
+    "evaluate_prompt_source",
 }
 
 

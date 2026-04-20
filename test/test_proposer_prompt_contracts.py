@@ -4,20 +4,14 @@ from proposer import prompts
 from proposer.propose_candidate import _build_file_generation_prompt
 
 
-def test_system_prompt_uses_sandbox_worldview_and_runtime_alignment_language():
+def test_system_prompt_uses_runtime_alignment_and_evidence_first_language():
     text = prompts.SYSTEM_PROMPT
     for required in [
-        "state_features.py",
-        "trigger_logic.py",
-        "prompt_composer.py",
-        "archive_selector.py",
-        "validator_rules.py",
-        "runtime wiring alignment",
+        "Runtime wiring alignment is mandatory",
+        "Evidence-first retrieval policy",
+        "baseline and candidate runtime prompt assets or prompt text",
     ]:
         assert required in text
-    assert "State Encoder" not in text
-    assert "Trigger Policy" not in text
-    assert "Prompt Builder" not in text
 
 
 def test_output_contract_contains_runtime_wiring_and_smoke_evidence_fields():
@@ -31,9 +25,9 @@ def test_output_contract_contains_runtime_wiring_and_smoke_evidence_fields():
 
 def test_self_review_contract_is_runtime_first():
     text = prompts.SELF_REVIEW_CONTRACT
-    assert "runtime can load changed sandbox modules" in text
-    assert "spec/manifest/loader alignment" in text
-    assert "=> revise" in text
+    assert "runtime can load and execute the claimed changed modules" in text
+    assert "spec / manifest / loader alignment" in text
+    assert "default to revise" in text
 
 
 def test_file_generation_prompt_is_sandbox_first_and_blocks_ambiguous_mixing():
@@ -60,18 +54,14 @@ def test_proposer_prompts_doc_syncs_with_runtime_contract_keywords():
     shared_keywords = [
         "runtime_wiring_plan",
         "smoke_test_evidence_to_check",
-        "state_features.py",
-        "trigger_logic.py",
-        "prompt_composer.py",
-        "archive_selector.py",
-        "validator_rules.py",
+        "hypothesis_target_modules",
     ]
     for keyword in shared_keywords:
         assert keyword in doc
         assert keyword in runtime
 
-    # Ensure doc references the exact 14-key contract change.
-    assert "14" in doc
+    # Ensure doc references current 15-key contract shape.
+    assert "15" in doc
 
     # Basic parse sanity: output contract still describes JSON object.
     assert "JSON object" in prompts.OUTPUT_CONTRACT

@@ -3,12 +3,13 @@ from __future__ import annotations
 import difflib
 import json
 import py_compile
+from hashlib import sha256
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 from proposer.archive_reader import read_archive_index
 from proposer.consistency import validate_candidate_contract_alignment
-from proposer.registry import ALLOWED_MUTATION_FILES, HarnessRegistry
+from proposer.registry import ALLOWED_MUTATION_FILES, DEFAULT_EXCLUDED_PROPOSER_CANDIDATES, HarnessRegistry
 
 
 class ProposerToolbox:
@@ -175,12 +176,126 @@ class ProposerToolbox:
             debug["reason"] = "no_runs_truly_exist_or_unmapped"
         return runs[: max(1, int(limit))], debug
 
-    def list_harnesses(self, kind: str = "all") -> List[Dict]:
+
+    def _runtime_prompt_asset_root(self) -> Path:
+        return self.repo_root / "controller" / "assets" / "tello"
+
+    def _runtime_prompt_variant_for_harness(self, harness_id: str) -> str:
+        try:
+            spec = self.read_harness_spec(harness_id)
+        except Exception:
+            return "default"
+        return str((spec.get("runtime") or {}).get("prompt_variant") or "default")
+
+    def _resolve_runtime_prompt_stage_asset(self, harness_id: str, stage: str) -> Dict:
+        asset_root = self._runtime_prompt_asset_root()
+        prompt_variant = self._runtime_prompt_variant_for_harness(harness_id)
+        norm_stage = str(stage or "").strip().lower()
+        stage_to_kind = {"initial": "plan_initial", "replan": "plan_replan", "heartbeat": "heartbeat_soft"}
+        kind = stage_to_kind.get(norm_stage, norm_stage)
+
+        defaults = {
+            "plan_initial": "prompt_plan_initial.txt",
+            "plan_replan": "prompt_plan_replan.txt",
+            "heartbeat_soft": "agent_heartbeat_soft_prompt.txt",
+        }
+        baseline_paths = {
+            "plan_initial": f"{harness_id}_prompt_plan_initial.txt",
+            "plan_replan": f"{harness_id}_prompt_plan_replan.txt",
+            "heartbeat_soft": f"{harness_id}_prompt_heartbeat_soft.txt",
+        }
+
+        selected_name = defaults.get(kind, "")
+        selected_variant = "default"
+        if prompt_variant.startswith("baseline"):
+            baseline_id = prompt_variant.replace("_prompt", "")
+            named = baseline_paths.get(kind, "")
+            path = asset_root / named
+            if kind in {"plan_initial", "heartbeat_soft"} and path.exists():
+                selected_name = named
+                selected_variant = baseline_id
+            elif kind == "plan_replan":
+                if baseline_id == "baseline3" and path.exists():
+                    selected_name = named
+                    selected_variant = baseline_id
+                elif baseline_id in {"baseline1", "baseline2"}:
+                    reuse = asset_root / f"{baseline_id}_prompt_plan_initial.txt"
+                    if reuse.exists():
+                        selected_name = reuse.name
+                        selected_variant = baseline_id
+
+        resolved_path = asset_root / selected_name if selected_name else asset_root / ""
+        exists = resolved_path.exists()
+        text = resolved_path.read_text(encoding="utf-8") if exists else ""
+        return {
+            "harness_id": harness_id,
+            "prompt_variant": prompt_variant,
+            "stage": norm_stage or kind,
+            "asset_kind": kind,
+            "asset_name": selected_name,
+            "source_path": resolved_path.as_posix(),
+            "selected_variant": selected_variant,
+            "exists": exists,
+            "text": text,
+            "sha256": (sha256(text.encode("utf-8")).hexdigest() if text else ""),
+        }
+
+    def list_runtime_prompt_assets(self, harness_id: str) -> List[Dict]:
+        assets = [
+            self._resolve_runtime_prompt_stage_asset(harness_id, "initial"),
+            self._resolve_runtime_prompt_stage_asset(harness_id, "replan"),
+            self._resolve_runtime_prompt_stage_asset(harness_id, "heartbeat"),
+        ]
+        out = [
+            {k: v for k, v in item.items() if k != "text"}
+            for item in assets
+        ]
+        self._record("list_runtime_prompt_assets", harness_id=harness_id, count=len(out))
+        return out
+
+    def read_runtime_prompt_asset(self, harness_id: str, asset_name: str | None = None, stage: str | None = None) -> Dict:
+        if asset_name:
+            path = self._runtime_prompt_asset_root() / Path(str(asset_name)).name
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            out = {
+                "harness_id": harness_id,
+                "asset_name": path.name,
+                "source_path": path.as_posix(),
+                "exists": path.exists(),
+                "text": text,
+                "sha256": (sha256(text.encode("utf-8")).hexdigest() if text else ""),
+            }
+        else:
+            out = self._resolve_runtime_prompt_stage_asset(harness_id, stage or "initial")
+        self._record("read_runtime_prompt_asset", harness_id=harness_id, asset_name=asset_name, stage=stage, exists=bool(out.get("exists")))
+        return out
+
+    def diff_runtime_prompt_assets(self, harness_a: str, harness_b: str, stage: str = "initial") -> Dict:
+        left = self._resolve_runtime_prompt_stage_asset(harness_a, stage)
+        right = self._resolve_runtime_prompt_stage_asset(harness_b, stage)
+        diff = "".join(
+            difflib.unified_diff(
+                str(left.get("text") or "").splitlines(keepends=True),
+                str(right.get("text") or "").splitlines(keepends=True),
+                fromfile=f"{harness_a}:{left.get('asset_name')}",
+                tofile=f"{harness_b}:{right.get('asset_name')}",
+            )
+        )
+        out = {
+            "stage": stage,
+            "harness_a": {k: v for k, v in left.items() if k != "text"},
+            "harness_b": {k: v for k, v in right.items() if k != "text"},
+            "diff": diff,
+        }
+        self._record("diff_runtime_prompt_assets", harness_a=harness_a, harness_b=harness_b, stage=stage, diff_bytes=len(diff))
+        return out
+
+    def list_harnesses(self, kind: str = "all", include_archived: bool = False) -> List[Dict]:
         entries = []
         if kind in {"all", "baseline"}:
             entries.extend(self.registry.list_baselines())
         if kind in {"all", "candidate"}:
-            entries.extend(self.registry.list_candidates())
+            entries.extend(self.registry.list_candidates(include_excluded_for_proposer=bool(include_archived)))
         out = [
             {
                 "harness_id": e.harness_id,
@@ -190,7 +305,7 @@ class ProposerToolbox:
             }
             for e in entries
         ]
-        self._record("list_harnesses", kind=kind, count=len(out))
+        self._record("list_harnesses", kind=kind, include_archived=bool(include_archived), excluded=list(DEFAULT_EXCLUDED_PROPOSER_CANDIDATES), count=len(out))
         return out
 
     def read_harness_spec(self, harness_id: str) -> Dict:
