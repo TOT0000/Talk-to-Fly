@@ -99,21 +99,30 @@ evidence-rich baselines/candidates and only falls back to spec/code-first behavi
   - Runtime-effect detection now verifies actual changed modules and can be extended by `validator_rules.runtime_effect_modules()`.
   - Candidate contract must include expected `changed_files`, and final accepted spec stores actual changed files + diff metadata.
 
-## Contract alignment guardrails (new)
+## Proposer external repair loops (new)
 
-`propose_next_candidate()` now applies **minimal hard guardrails + bounded self-review revise loop**.
+`proposer/run_loop.py` now drives a **two-layer external feedback loop** (instead of relying on fuzzy internal self-review).
 
-- Hard guardrails focus only on:
-  - boundary safety,
-  - required artifacts (`spec`, `manifest`, `runtime_metadata`, `proposer_note`, diff/audit files),
-  - py_compile + import checks,
-  - structured runtime wiring smoke verification artifact,
-  - runtime wiring consistency for sandbox modules,
-  - at least one runtime-effect module changed.
-- High-level narrative/string semantics are intentionally not hard-failed by system validator.
-- If guardrails/smoke fail, proposer enters bounded revise loop (default up to 2 revisions) and asks the coding agent to self-fix files, then re-check.
+Phase B: **validator repair loop** (max 3 rounds by default)
+- Runs boundary/contract/runtime-wiring checks.
+- Produces structured validator feedback JSON (`error_stage=validator`) with:
+  - `is_system_error`
+  - `is_proposer_fixable`
+  - `summary/expected/observed`
+  - `evidence_paths`
+- If `is_system_error=true`, loop stops immediately.
+- If proposer-fixable, feedback is passed into next `propose_next_candidate()` revision context.
 
-If any check fails, proposer **fails fast** and removes the just-created candidate directory instead of silently accepting an inconsistent candidate.
+Phase C: **screening evaluator repair loop** (max 2 rounds by default)
+- Runs candidate screening protocol (scene1/2/3 × 2 runs).
+- On failure, emits structured evaluator feedback (`error_stage=evaluator_screening`) including:
+  - `scene`, `run_id`, `error_type`
+  - `is_system_error` vs `is_proposer_fixable`
+  - trace/metadata evidence paths
+- System errors stop loop; proposer-fixable failures trigger revision.
+
+Global hard stop:
+- `TOTAL_REPAIR_MAX_ROUNDS` prevents infinite loops across validator + screening revisions.
 
 ### Structured runtime wiring smoke verification
 
@@ -141,6 +150,14 @@ with fields including:
 `spec.runtime_metadata` now records:
 - `runtime_wiring_verification_path`
 - `runtime_wiring_verification_passed`
+- `proposal_iteration_id`
+- `proposal_revision_round`
+- `validator_round_index`
+- `evaluator_round_index`
+- `proposer_loop_status`
+- `latest_validator_feedback_path`
+- `latest_evaluator_feedback_path`
+- `revision_history_path`
 
 If wiring verification fails for any claimed/changed line, proposer treats it as smoke/guardrail failure and pushes the candidate into self-review/revise (bounded rounds) or final reject.
 
