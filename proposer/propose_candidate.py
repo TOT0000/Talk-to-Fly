@@ -722,6 +722,7 @@ def propose_next_candidate(
             "weakness_being_addressed": "LLM unavailable during proposal call",
             "expected_tradeoff": "Minimal structured change",
             "expected_runtime_effect": "Preserve baseline runtime behavior while keeping proposer alive.",
+            "hypothesis_target_modules": ["trigger_logic.py"],
             "files_to_create_or_modify": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
             "proposer_note_text": "Fallback proposal generated because LLM proposer call failed.",
             "sandbox_modules_to_modify": ["trigger_logic.py"],
