@@ -318,6 +318,51 @@ def _prepare_proposal_contract(proposal: Dict) -> Dict:
     return normalized
 
 
+def _build_candidate_manifest(*, candidate_id: str, parent_id: str, proposal: Dict, changed_files: List[str]) -> Dict:
+    touched_modules = [Path(str(v)).name for v in list(proposal.get("hypothesis_target_modules") or proposal.get("sandbox_modules_to_modify") or [])]
+    axes = []
+    if any("trigger" in m for m in touched_modules):
+        axes.append("trigger")
+    if any("state" in m for m in touched_modules):
+        axes.append("state")
+    if any("prompt" in m for m in touched_modules):
+        axes.append("prompt")
+    if not axes:
+        axes.append("runtime_adapter")
+    return {
+        "candidate_id": candidate_id,
+        "parent_candidate_ids": [parent_id],
+        "change_axes": sorted(set(axes)),
+        "hypothesis": str(proposal.get("one_sentence_hypothesis") or ""),
+        "expected_metric_direction": {
+            "collision_count": "down",
+            "near_miss_count": "down",
+            "mission_success": "up",
+            "completion_time": "down_or_flat",
+            "llm_calls": "down_or_flat",
+        },
+        "safety_constraints": {
+            "safety_priority": "collision_and_near_miss_before_efficiency",
+            "must_not_increase_collisions_vs_parent": True,
+        },
+        "artifact_bindings": {
+            "trigger_module": "trigger_logic.py",
+            "state_module": "state_features.py",
+            "prompt_module": "prompt_composer.py",
+            "spec": "spec.json",
+        },
+        "declared_files_changed": sorted(set(changed_files)),
+        "evaluation_requirements": {
+            "require_runtime_verifier": True,
+            "require_screening_then_formal_split": True,
+        },
+        "rollback_conditions": {
+            "collision_regression": True,
+            "near_miss_regression": True,
+        },
+    }
+
+
 def _git_parent_commit(repo_root: Path) -> str:
     try:
         out = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=str(repo_root), text=True).strip()
@@ -912,6 +957,12 @@ def propose_next_candidate(
             "implementation_contract": dict(proposal.get("implementation_contract") or {}),
             "invariants": list(proposal.get("invariants") or []),
         }
+        spec["candidate_manifest"] = _build_candidate_manifest(
+            candidate_id=candidate_id,
+            parent_id=parent_id,
+            proposal=proposal,
+            changed_files=list(normalized_target_files),
+        )
         (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
 
         proposer_note_text = str(proposal.get("proposer_note_text") or "").strip()
@@ -962,6 +1013,12 @@ def propose_next_candidate(
             "evaluator_round_index": int(evaluator_round_index),
             "proposer_loop_status": str(proposer_loop_status or "proposed"),
         }
+        spec["candidate_manifest"] = _build_candidate_manifest(
+            candidate_id=candidate_id,
+            parent_id=parent_id,
+            proposal=proposal,
+            changed_files=sorted(changed_files),
+        )
         (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
         (candidate_dir / "parent_diff.patch").write_text(
             _build_parent_diff(parent_entry.dir_path, candidate_dir, changed_files),
@@ -1035,6 +1092,12 @@ def propose_next_candidate(
                 "runtime_wiring_verification_path": "runtime_wiring_verification.json",
                 "runtime_wiring_verification_passed": bool(wiring_verification.get("passed")),
             }
+            spec["candidate_manifest"] = _build_candidate_manifest(
+                candidate_id=candidate_id,
+                parent_id=parent_id,
+                proposal=proposal,
+                changed_files=sorted(changed_files),
+            )
             (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
             (candidate_dir / "parent_diff.patch").write_text(
                 _build_parent_diff(parent_entry.dir_path, candidate_dir, changed_files),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,11 @@ from controller.harness_protocol import (
 )
 from proposer.live_benchmark_runner import LiveBenchmarkRunner, RunArtifact
 from proposer.registry import HarnessRegistry
+from proposer.contract_validator import validate_candidate_contract
+from proposer.runtime_verifier import verify_runtime_artifact, TRACE_SCHEMA_VERSION
+from proposer.candidate_manifest import build_provenance_bundle
+from proposer.evaluation_pipeline import build_failure_dossier, write_dossier
+from proposer.archive_manager import persist_evidence_bundle
 
 
 PARETO_MINIMIZE_KEYS = [
@@ -121,6 +127,19 @@ def evaluate_candidate_live(
         evaluation_protocol=evaluation_protocol,
     )
     runs = runner.run()
+    commit_hash = "unknown"
+    try:
+        commit_hash = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo_root, text=True).strip()
+    except Exception:
+        pass
+
+    spec_payload = harness_entry.spec
+    manifest = dict(spec_payload.get("candidate_manifest") or spec_payload.get("proposal_contract") or {})
+    if harness_entry.kind == "candidate" and manifest:
+        parent_id = str(spec_payload.get("parent") or "")
+        if parent_id:
+            parent_dir = HarnessRegistry(repo_root).get(parent_id).dir_path
+            validate_candidate_contract(candidate_dir=harness_entry.dir_path, parent_dir=parent_dir)
 
     # copy harness source/spec snapshot
     for name in [
@@ -201,6 +220,57 @@ def evaluate_candidate_live(
     }
 
     per_run_payload = [r.__dict__ for r in runs]
+    dossiers: List[Dict] = []
+    for row in per_run_payload:
+        metadata_path = Path(str(row.get("metadata_path") or ""))
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+        prompt_source = dict(metadata.get("evaluate_prompt_source") or {})
+        prompt_asset = str(prompt_source.get("selected_prompt_asset_path") or "")
+        prompt_asset_text = Path(prompt_asset).read_text(encoding="utf-8") if prompt_asset and Path(prompt_asset).exists() else ""
+        rendered_prompt = str(prompt_source.get("rendered_prompt") or "")
+        provenance = build_provenance_bundle(
+            candidate_id=harness_id,
+            commit_hash=commit_hash,
+            config_payload=spec_payload,
+            prompt_asset_text=prompt_asset_text,
+            rendered_prompt_text=rendered_prompt,
+            state_schema_version=str(spec_payload.get("state_schema_version") or "state_schema_v1"),
+            trigger_policy_version=str(spec_payload.get("trigger_policy_version") or "trigger_policy_v1"),
+            benchmark_pack_id=str(evaluation_protocol.get("version") or "benchmark_unknown"),
+            scene_id=str(row.get("scene_id") or ""),
+            zone_id=str(row.get("task_zone") or ""),
+            seed=int(row.get("seed") or 0),
+            evaluator_version=f"{stage}_v1",
+            trace_schema_version=TRACE_SCHEMA_VERSION,
+        )
+        metadata["provenance"] = provenance
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        verification = verify_runtime_artifact(candidate_manifest=manifest, run_artifact=row, metadata=metadata)
+        row["runtime_verification"] = {"passed": verification.passed, "checks": verification.checks, "errors": verification.errors}
+        if not verification.passed or (not bool(row.get("mission_success"))):
+            dossier = build_failure_dossier(
+                candidate_id=harness_id,
+                baseline_id=str(spec_payload.get("parent") or "baseline1"),
+                run=row,
+                metadata=metadata,
+                verification=verification.checks,
+            )
+            dossier_path = target / "runs" / str(row.get("run_id")) / "failure_dossier.json"
+            write_dossier(dossier_path, dossier)
+            dossiers.append(dossier)
+    evidence_path = persist_evidence_bundle(
+        archive_root=archive_root,
+        candidate_id=harness_id,
+        payload={
+            "candidate_manifest": manifest,
+            "artifact_hashes": {},
+            "state_schema_version": str(spec_payload.get("state_schema_version") or "state_schema_v1"),
+            "trigger_policy_version": str(spec_payload.get("trigger_policy_version") or "trigger_policy_v1"),
+            "lineage": {"parent": spec_payload.get("parent")},
+            "failure_dossiers_count": len(dossiers),
+        },
+    )
+    eval_summary["evidence_bundle_path"] = evidence_path.as_posix()
     with (target / _run_file_name(stage)).open("w", encoding="utf-8") as f:
         json.dump(per_run_payload, f, ensure_ascii=False, indent=2)
     with (target / _summary_file_name(stage)).open("w", encoding="utf-8") as f:

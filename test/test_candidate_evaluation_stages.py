@@ -55,6 +55,7 @@ class FakeRunner:
                         completion_time_mission_sec=10.0,
                         llm_call_count=1,
                         replan_count=1,
+                        seed=0,
                         runtime_trace_path=(run_dir / "runtime_trace.jsonl").as_posix(),
                         planning_trace_path=(run_dir / "planning_trace.jsonl").as_posix(),
                         metadata_path=(run_dir / "metadata.json").as_posix(),
