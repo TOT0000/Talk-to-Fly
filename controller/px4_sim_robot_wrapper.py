@@ -50,9 +50,10 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._active_command_start_time: Optional[float] = None
         # Offboard warmup dominates per-command latency in px4_sim mode.
         # Keep it tunable and skip warmup entirely once already OFFBOARD+ARMED.
-        self._offboard_warmup_s = max(0.0, float(os.getenv("TYPEFLY_PX4_OFFBOARD_WARMUP_S", "0.25")))
-        self._offboard_confirm_timeout_s = max(0.1, float(os.getenv("TYPEFLY_PX4_OFFBOARD_CONFIRM_TIMEOUT_S", "1.0")))
-        self._offboard_max_attempts = max(1, int(os.getenv("TYPEFLY_PX4_OFFBOARD_MAX_ATTEMPTS", "2")))
+        self._offboard_warmup_s = max(0.0, float(os.getenv("TYPEFLY_PX4_OFFBOARD_WARMUP_S", "0.35")))
+        self._offboard_confirm_timeout_s = max(0.1, float(os.getenv("TYPEFLY_PX4_OFFBOARD_CONFIRM_TIMEOUT_S", "1.5")))
+        self._offboard_max_attempts = max(1, int(os.getenv("TYPEFLY_PX4_OFFBOARD_MAX_ATTEMPTS", "6")))
+        self._position_ready_timeout_s = max(1.0, float(os.getenv("TYPEFLY_PX4_POSITION_READY_TIMEOUT_S", "8.0")))
 
     def set_state_provider(self, state_provider):
         self._state_provider = state_provider
@@ -203,7 +204,11 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         for attempt in range(1, max_attempts + 1):
             time.sleep(warmup_s)
             self._publish_vehicle_command(cmd_mode, param1=1.0, param2=6.0)
-            self._publish_vehicle_command(cmd_arm, param1=1.0)
+            # PX4 SITL can intermittently reject normal arm command during startup races
+            # (for example: mode switched to OFFBOARD but arming state remains STANDBY).
+            # Retry with force-arm magic value in later attempts to reduce flaky bring-up.
+            force_arm = attempt >= max(2, int(math.ceil(float(max_attempts) * 0.5)))
+            self._publish_vehicle_command(cmd_arm, param1=1.0, param2=(21196.0 if force_arm else 0.0))
             if self._wait_for_offboard_ready(timeout_s=confirm_timeout_s):
                 print_debug(
                     f"[PX4-OFFBOARD] ready attempt={attempt} "
@@ -213,6 +218,11 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             print_debug(
                 f"[PX4-OFFBOARD] retry attempt={attempt} "
                 f"nav_state={self.get_navigation_state()} arming_state={self.get_arming_state()}"
+            )
+        if int(self.get_navigation_state()) == int(self._nav_state_offboard) and int(self.get_arming_state()) != int(self._arming_state_armed):
+            print(
+                "[PX4_SIM] offboard entered but arming stayed disarmed. "
+                "Check preflight/arm conditions in PX4 (QGC health checks, estimator readiness, arm auth)."
             )
         return False
 
@@ -497,7 +507,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._begin_motion_debug("takeoff", 1.0)
 
         if self._state_provider is not None and hasattr(self._state_provider, "wait_for_position"):
-            if not self._state_provider.wait_for_position(timeout_s=3.0):
+            if not self._state_provider.wait_for_position(timeout_s=self._position_ready_timeout_s):
                 print("[PX4_SIM] takeoff aborted: no valid local position")
                 return False
 
@@ -505,7 +515,10 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
 
         # 1) Warm-up offboard stream, switch to offboard mode, and arm.
         if not self._ensure_offboard_control(x, y, z, yaw):
-            print("[PX4_SIM] takeoff aborted: failed to enter offboard+armed state")
+            print(
+                "[PX4_SIM] takeoff aborted: failed to enter offboard+armed state "
+                f"nav_state={self.get_navigation_state()} arming_state={self.get_arming_state()}"
+            )
             return False
 
         # 2) Climb by setting higher target in local NED (z more negative = up).
