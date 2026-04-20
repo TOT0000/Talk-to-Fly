@@ -1,7 +1,7 @@
 import json
 
 from proposer import prompts
-from proposer.propose_candidate import _build_file_generation_prompt
+from proposer.propose_candidate import _build_file_generation_prompt, _ensure_dict, _prepare_proposal_contract
 
 
 def test_system_prompt_contains_new_alignment_constraints_and_no_axis_bias():
@@ -51,6 +51,48 @@ def test_file_generation_prompt_includes_prompt_and_trigger_alignment_rules():
     )
     assert "ensure the changed prompt is the one evaluation runtime will actually render and send" in generated
     assert "ensure the proposed config keys are actually read by the runtime-loaded trigger module" in generated
+
+
+def test_prepare_contract_accepts_minimal_fallback_with_hypothesis_modules():
+    payload = {
+        "parent_harness": "baseline3",
+        "candidate_id": "",
+        "one_sentence_hypothesis": "fallback",
+        "weakness_being_addressed": "llm unavailable",
+        "expected_tradeoff": "minimal change",
+        "expected_runtime_effect": "stable runtime",
+        "hypothesis_target_modules": ["trigger_logic.py"],
+        "files_to_create_or_modify": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
+        "proposer_note_text": "fallback",
+        "sandbox_modules_to_modify": ["trigger_logic.py"],
+        "changed_files": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
+        "implementation_contract": {"trigger_policy": {}, "state_encoder": {}, "prompt_builder": {}},
+        "runtime_wiring_plan": {
+            "sandbox_modules_changed": ["trigger_logic.py"],
+            "runtime_load_path_or_entrypoint": "controller.harness_sandbox runtime sandbox loader",
+            "spec_manifest_loader_alignment": "aligned",
+            "legacy_sync_plan": "none",
+            "primary_runtime_entrypoints": ["controller.harness_sandbox.load_harness_sandbox_profile"],
+            "runtime_prompt_source_plan": "inherited",
+            "config_key_alignment_plan": "no new keys",
+        },
+        "smoke_test_evidence_to_check": {
+            "trigger_logic_evidence": "changed",
+            "state_features_evidence": "unchanged",
+            "prompt_composer_evidence": "unchanged",
+            "evidence_limitations": "fallback",
+            "evaluate_prompt_source_evidence": "inherited",
+        },
+        "invariants": ["contract and runtime metadata align"],
+    }
+    out = _prepare_proposal_contract(payload)
+    assert "trigger_logic.py" in out["hypothesis_target_modules"]
+
+
+def test_ensure_dict_defends_against_non_mapping_lineage_payload():
+    assert _ensure_dict({"a": 1}) == {"a": 1}
+    assert _ensure_dict(["bad", "lineage"]) == {}
+    assert _ensure_dict("bad") == {}
 
 
 def test_proposer_prompts_doc_syncs_with_runtime_contract_keywords():

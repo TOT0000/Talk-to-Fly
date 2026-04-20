@@ -35,6 +35,12 @@ def _load_json(path: Path) -> Dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _ensure_dict(value, default: Dict | None = None) -> Dict:
+    if isinstance(value, dict):
+        return dict(value)
+    return dict(default or {})
+
+
 def _extract_json_object(text: str) -> Dict:
     raw = str(text or "").strip()
     if raw.startswith("```"):
@@ -618,7 +624,14 @@ def _build_file_generation_prompt(
     parent_file_name: str,
     parent_file_content: str,
     proposal: Dict,
+    external_feedback_context: Dict | None = None,
 ) -> str:
+    feedback_block = ""
+    if external_feedback_context:
+        feedback_block = (
+            "\n\nExternal structured feedback context (must be addressed in revisions):\n"
+            f"{json.dumps(external_feedback_context, ensure_ascii=False, indent=2)}\n"
+        )
     return (
         "You are generating one bounded harness file for UAV harness optimization.\n"
         "Allowed harness boundary files: spec.json, state_features.py, trigger_logic.py, prompt_composer.py, archive_selector.py, validator_rules.py, state_encoder.py, trigger_policy.py, prompt_builder.py, proposer_note.txt, README.md\n"
@@ -647,6 +660,7 @@ def _build_file_generation_prompt(
         f"Requested file: {parent_file_name}\n"
         "Current parent file content:\n"
         f"{parent_file_content}\n\n"
+        f"{feedback_block}"
         "Generate improved content aligned with:\n"
         "- the proposal hypothesis\n"
         "- the identified failure mode in baselines and prior candidates\n"
@@ -663,8 +677,15 @@ def propose_next_candidate(
     note: str = "",
     focus_text: str = "Improve safety-aware replan timing while avoiding unnecessary detours.",
     allow_fallback_heuristic: bool = False,
-    max_revision_rounds: int = 2,
+    max_revision_rounds: int = 0,
     max_agent_steps: int = 10,
+    parent_harness_override: str | None = None,
+    external_feedback_context: Dict | None = None,
+    proposal_iteration_id: str | None = None,
+    proposal_revision_round: int = 0,
+    validator_round_index: int = 0,
+    evaluator_round_index: int = 0,
+    proposer_loop_status: str = "proposed",
 ) -> Path:
     repo_root = Path(repo_root)
     reg = HarnessRegistry(repo_root)
@@ -707,6 +728,7 @@ def propose_next_candidate(
             "weakness_being_addressed": "LLM unavailable during proposal call",
             "expected_tradeoff": "Minimal structured change",
             "expected_runtime_effect": "Preserve baseline runtime behavior while keeping proposer alive.",
+            "hypothesis_target_modules": ["trigger_logic.py"],
             "files_to_create_or_modify": ["spec.json", "trigger_logic.py", "proposer_note.txt"],
             "proposer_note_text": "Fallback proposal generated because LLM proposer call failed.",
             "sandbox_modules_to_modify": ["trigger_logic.py"],
@@ -739,7 +761,7 @@ def propose_next_candidate(
         })
         agent_meta = {"fallback_used": True, "reason": "agent_loop_or_llm_failure"}
 
-    parent_id = str(proposal.get("parent_harness") or "").strip()
+    parent_id = str(parent_harness_override or proposal.get("parent_harness") or "").strip()
     if not parent_id:
         raise ValueError("LLM proposer output missing parent_harness")
     if parent_id in DEFAULT_EXCLUDED_PROPOSER_CANDIDATES and os.getenv("TYPEFLY_ALLOW_EXCLUDED_PARENT", "0").strip() != "1":
@@ -813,6 +835,7 @@ def propose_next_candidate(
             parent_file_name=target_file,
             parent_file_content=parent_file_content,
             proposal=proposal,
+            external_feedback_context=external_feedback_context,
         )
         generated = _normalize_generated_text(str(llm.request(prompt=file_prompt, model_name=proposer_model or MODEL_NAME, stream=False) or "").strip())
         if target_file == "spec.json":
@@ -820,7 +843,7 @@ def propose_next_candidate(
             spec_obj["id"] = candidate_id
             spec_obj["kind"] = "candidate"
             spec_obj["parent"] = parent_id
-            lineage = dict(spec_obj.get("lineage") or {})
+            lineage = _ensure_dict(spec_obj.get("lineage"))
             lineage.update(
                 {
                     "parent_id": parent_id,
@@ -829,7 +852,7 @@ def propose_next_candidate(
                 }
             )
             spec_obj["lineage"] = lineage
-            spec_obj.setdefault("mutation", {})
+            spec_obj["mutation"] = _ensure_dict(spec_obj.get("mutation"))
             spec_obj["mutation"]["type"] = "llm_agent_driven"
             (candidate_dir / target_file).write_text(json.dumps(spec_obj, ensure_ascii=False, indent=2), encoding="utf-8")
         else:
@@ -841,7 +864,7 @@ def propose_next_candidate(
         spec["id"] = candidate_id
         spec["kind"] = "candidate"
         spec["parent"] = parent_id
-        spec.setdefault("lineage", {})
+        spec["lineage"] = _ensure_dict(spec.get("lineage"))
         spec["lineage"]["parent_id"] = parent_id
         spec["lineage"]["parent_kind"] = "baseline" if parent_id.startswith("baseline") else "candidate"
         spec["lineage"]["derived_from"] = parent_id
@@ -861,7 +884,7 @@ def propose_next_candidate(
         }
         spec.setdefault("manifest", {})
         spec["manifest"] = {
-            "lineage": dict(spec.get("lineage") or {}),
+            "lineage": _ensure_dict(spec.get("lineage")),
             "active_sandbox_modules": [
                 "state_features.py",
                 "trigger_logic.py",
@@ -933,6 +956,11 @@ def propose_next_candidate(
             "agent_loop_meta": dict(agent_meta or {}),
             "runtime_wiring_verification_path": "runtime_wiring_verification.json",
             "runtime_wiring_verification_passed": bool(wiring_verification.get("passed")),
+            "proposal_iteration_id": str(proposal_iteration_id or ""),
+            "proposal_revision_round": int(proposal_revision_round),
+            "validator_round_index": int(validator_round_index),
+            "evaluator_round_index": int(evaluator_round_index),
+            "proposer_loop_status": str(proposer_loop_status or "proposed"),
         }
         (candidate_dir / "spec.json").write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
         (candidate_dir / "parent_diff.patch").write_text(
