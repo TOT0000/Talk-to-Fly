@@ -1,0 +1,32 @@
+{
+  "SCENE1": {
+    "task_zone": "zoneA",
+    "runs": 8,
+    "mission_success_rate": 1.0,
+    "collision_count_avg": 3.875,
+    "near_miss_count_avg": 5.75,
+    "completion_time_sec_avg": 136.786375,
+    "llm_call_count_avg": 28.375,
+    "replan_count_avg": 3.75
+  },
+  "SCENE2": {
+    "task_zone": "zoneB",
+    "runs": 8,
+    "mission_success_rate": 1.0,
+    "collision_count_avg": 0.75,
+    "near_miss_count_avg": 0.875,
+    "completion_time_sec_avg": 101.663375,
+    "llm_call_count_avg": 19.25,
+    "replan_count_avg": 1.375
+  },
+  "SCENE3": {
+    "task_zone": "zoneC",
+    "runs": 8,
+    "mission_success_rate": 1.0,
+    "collision_count_avg": 2.375,
+    "near_miss_count_avg": 4.5,
+    "completion_time_sec_avg": 206.338625,
+    "llm_call_count_avg": 40.25,
+    "replan_count_avg": 6.25
+  }
+}

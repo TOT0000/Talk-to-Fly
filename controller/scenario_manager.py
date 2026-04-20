@@ -85,6 +85,14 @@ class ScenarioManager:
         repositioned = False
         if drone is not None and hasattr(drone, "reposition_for_scenario"):
             repositioned = bool(drone.reposition_for_scenario(scenario))
+            robot_type = getattr(controller, "robot_type", None)
+            robot_type_name = str(getattr(robot_type, "name", robot_type or ""))
+            requires_airborne_start = float(scenario.drone_position_3d[2]) < -0.2
+            if (not repositioned) and requires_airborne_start and robot_type_name == "PX4_SIM":
+                raise RuntimeError(
+                    "px4_sim_takeoff_or_offboard_failed: scenario reposition did not complete; "
+                    "vehicle likely failed to enter offboard+armed state"
+                )
 
         # Runtime calibration: adjust user offset using measured uncertainty/gap until
         # measured level is close to selected mode.

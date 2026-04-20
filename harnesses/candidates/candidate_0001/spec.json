@@ -1,0 +1,66 @@
+{
+  "id": "candidate_0001",
+  "name": "Event-PredRisk-0.5",
+  "kind": "candidate",
+  "description": "Event trigger when predicted collision risk crosses threshold.",
+  "base_mode": "typefly-threshold-replan",
+  "state_encoder": {
+    "module": "state_encoder.py",
+    "include_fields": [
+      "uav_pose_heading",
+      "worker_positions",
+      "remaining_checkpoints",
+      "task_progress",
+      "predicted_collision_probability",
+      "risk_summary"
+    ],
+    "summary_style": "risk_aware",
+    "include_risk_related": true,
+    "include_targets": true,
+    "include_geometry_flags": true
+  },
+  "trigger_policy": {
+    "module": "trigger_policy.py",
+    "type": "hybrid",
+    "heartbeat_seconds": 5.0,
+    "cooldown_seconds": 0.0,
+    "threshold": 0.45,
+    "strictly_greater": true,
+    "consecutive_high_risk": 2,
+    "hysteresis": 0.05
+  },
+  "prompt_builder": {
+    "module": "prompt_builder.py",
+    "template_family": "baseline3_prompt",
+    "paragraph_order": [
+      "opening",
+      "task",
+      "runtime",
+      "risk",
+      "examples",
+      "output"
+    ],
+    "include_example": true,
+    "example_family": "baseline3_example",
+    "stages": [
+      "initial",
+      "replan",
+      "heartbeat"
+    ]
+  },
+  "runtime": {
+    "prompt_variant": "baseline3_prompt",
+    "example_variant": "baseline3_example",
+    "use_output_example": true,
+    "replan_cap": 8
+  },
+  "parent": "baseline3",
+  "mutation": {
+    "type": "heuristic_threshold_and_prompt_order"
+  },
+  "lineage": {
+    "parent_id": "baseline3",
+    "parent_kind": "baseline",
+    "derived_from": "baseline3"
+  }
+}

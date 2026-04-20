@@ -1,0 +1,21 @@
+{
+  "harness_id": "baseline1",
+  "status": "evaluated_from_archive",
+  "evaluation_protocol": {
+    "version": "uav_search_v1",
+    "scene_to_task_zone": {
+      "SCENE1": "zoneA",
+      "SCENE2": "zoneB",
+      "SCENE3": "zoneC"
+    }
+  },
+  "total_runs": 24,
+  "metrics": {
+    "mission_success_rate": 1.0,
+    "collision_count_avg": 1.9583333333333333,
+    "near_miss_count_avg": 2.2916666666666665,
+    "completion_time_sec_avg": 113.84545833333334,
+    "llm_call_count_avg": 20.208333333333332,
+    "replan_count_avg": 0.041666666666666664
+  }
+}
