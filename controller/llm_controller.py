@@ -249,6 +249,12 @@ class LLMController():
         self._agent_heartbeat_index = 0
         self._agent_pending_replan_records: list[dict] = []
         self._agent_feedback_memory_packets: list[dict] = []
+        self._agent_ready_for_eval_records: list[dict] = []
+        self._agent_eval_results_pending_commit: list[dict] = []
+        self._agent_eval_lock = threading.Lock()
+        self._agent_eval_thread: Optional[threading.Thread] = None
+        self._agent_eval_inflight = False
+        self._agent_eval_generation = 0
         self.mission_start_ts: Optional[float] = None
         self.mission_end_ts: Optional[float] = None
         self.final_mission_summary: Optional[dict] = None
@@ -1388,7 +1394,6 @@ class LLMController():
     def _maybe_mature_agent_replan_records(self, current_heartbeat_index: int, snapshot: dict, now_ts: float):
         if not self._is_agent_feedback_pipeline():
             return
-        matured = []
         remaining = []
         current_metrics = self._build_agent_outcome_metrics(snapshot, now_ts=now_ts)
         for record in list(self._agent_pending_replan_records or []):
@@ -1417,28 +1422,93 @@ class LLMController():
                 "chosen_action": dict(record.get("chosen_action") or {}),
                 "outcome_delta": delta,
             }
-            eval_result = self.planner.evaluate_agent_replan_record(matured_record)
+            with self._agent_eval_lock:
+                self._agent_ready_for_eval_records.append(matured_record)
+            if bool(self.archive_enabled):
+                self.task_run_logger.append_planning_trace(
+                    trace={
+                        "planning_stage": "heartbeat",
+                        "llm_call_purpose": "agent_replan_matured_ready_for_eval",
+                        "plan_source": "agent_feedback_eval_queue",
+                        "parsed_plan": {
+                            "replan_record": matured_record,
+                        },
+                        "selected_baseline_id": self.selected_pipeline_id,
+                        "scene_id": self.baseline_scene_id,
+                    }
+                )
+        self._agent_pending_replan_records = remaining
+
+    def _start_agent_eval_worker_if_needed(self):
+        if not self._is_agent_feedback_pipeline():
+            return
+        with self._agent_eval_lock:
+            if self._agent_eval_inflight:
+                return
+            if not self._agent_ready_for_eval_records:
+                return
+            generation = int(self._agent_eval_generation)
+            self._agent_eval_inflight = True
+            self._agent_eval_thread = threading.Thread(
+                target=self._agent_eval_worker_loop,
+                args=(generation,),
+                daemon=True,
+            )
+            self._agent_eval_thread.start()
+
+    def _agent_eval_worker_loop(self, generation: int):
+        while True:
+            with self._agent_eval_lock:
+                if generation != int(self._agent_eval_generation):
+                    self._agent_eval_inflight = False
+                    self._agent_eval_thread = None
+                    return
+                if not self._agent_ready_for_eval_records:
+                    self._agent_eval_inflight = False
+                    self._agent_eval_thread = None
+                    return
+                record = self._agent_ready_for_eval_records.pop(0)
+            eval_result = self.planner.evaluate_agent_replan_record(record)
+            completed_ts = float(time.time())
+            with self._agent_eval_lock:
+                if generation != int(self._agent_eval_generation):
+                    continue
+                self._agent_eval_results_pending_commit.append(
+                    {
+                        "replan_record": record,
+                        "evaluator_prompt": eval_result.get("prompt"),
+                        "evaluator_raw_response": eval_result.get("raw_response"),
+                        "evaluator_used_model_name": eval_result.get("used_model_name"),
+                        "evaluator_parsed_json": eval_result.get("parsed"),
+                        "evaluator_completed_ts": completed_ts,
+                    }
+                )
+
+    def _commit_agent_eval_results(self, current_heartbeat_index: int):
+        if not self._is_agent_feedback_pipeline():
+            return
+        with self._agent_eval_lock:
+            pending = list(self._agent_eval_results_pending_commit)
+            self._agent_eval_results_pending_commit = []
+        if not pending:
+            return
+        for item in pending:
+            replan_record = dict(item.get("replan_record") or {})
+            outcome_delta = dict(replan_record.get("outcome_delta") or {})
+            replan_heartbeat_index = int(outcome_delta.get("replan_heartbeat_index", -1))
+            available_from_heartbeat_index = max(
+                int(replan_heartbeat_index) + 2,
+                int(current_heartbeat_index),
+            )
             packet = {
-                "decision_context": matured_record["decision_context"],
-                "chosen_action": matured_record["chosen_action"],
-                "outcome_delta": matured_record["outcome_delta"],
-                "evaluator_feedback": dict(eval_result.get("parsed") or {}),
-                "available_from_heartbeat_index": int(current_heartbeat_index) + 1,
+                "decision_context": dict(replan_record.get("decision_context") or {}),
+                "chosen_action": dict(replan_record.get("chosen_action") or {}),
+                "outcome_delta": outcome_delta,
+                "evaluator_feedback": dict(item.get("evaluator_parsed_json") or {}),
+                "available_from_heartbeat_index": int(available_from_heartbeat_index),
             }
             self._agent_feedback_memory_packets.append(packet)
-            matured.append(
-                {
-                    "replan_record": matured_record,
-                    "evaluator_prompt": eval_result.get("prompt"),
-                    "evaluator_raw_response": eval_result.get("raw_response"),
-                    "evaluator_used_model_name": eval_result.get("used_model_name"),
-                    "evaluator_parsed_json": eval_result.get("parsed"),
-                    "matured_feedback_packet": packet,
-                }
-            )
-        self._agent_pending_replan_records = remaining
-        if bool(self.archive_enabled):
-            for item in matured:
+            if bool(self.archive_enabled):
                 self.task_run_logger.append_planning_trace(
                     trace={
                         "planning_stage": "heartbeat",
@@ -1447,10 +1517,11 @@ class LLMController():
                         "prompt": str(item.get("evaluator_prompt") or ""),
                         "raw_response": str(item.get("evaluator_raw_response") or ""),
                         "parsed_plan": {
-                            "replan_record": item.get("replan_record"),
+                            "replan_record": replan_record,
                             "evaluator_used_model_name": item.get("evaluator_used_model_name"),
                             "evaluator_parsed_json": item.get("evaluator_parsed_json"),
-                            "matured_feedback_packet": item.get("matured_feedback_packet"),
+                            "matured_feedback_packet": packet,
+                            "evaluator_completed_ts": item.get("evaluator_completed_ts"),
                         },
                         "selected_baseline_id": self.selected_pipeline_id,
                         "scene_id": self.baseline_scene_id,
@@ -1511,6 +1582,7 @@ class LLMController():
         snapshot = self.get_live_ui_snapshot() or {}
         heartbeat_index = int(self._agent_heartbeat_index) + 1
         now_ts = time.time()
+        self._commit_agent_eval_results(current_heartbeat_index=heartbeat_index)
         self._maybe_mature_agent_replan_records(
             current_heartbeat_index=heartbeat_index,
             snapshot=snapshot,
@@ -1612,7 +1684,9 @@ class LLMController():
                     f"[AGENT-HEARTBEAT-REPLAN] reason={reason if reason else 'n/a'}"
                 )
                 self.append_message(f"[AGENT-HEARTBEAT-REPLAN-PLAN] {plan_text}")
+                self._start_agent_eval_worker_if_needed()
                 return True
+        self._start_agent_eval_worker_if_needed()
         print_t(f"[AGENT-HEARTBEAT] response=continue reason={reason}")
         return False
 
@@ -1963,6 +2037,12 @@ class LLMController():
         self._agent_heartbeat_index = 0
         self._agent_pending_replan_records = []
         self._agent_feedback_memory_packets = []
+        with self._agent_eval_lock:
+            self._agent_eval_generation += 1
+            self._agent_ready_for_eval_records = []
+            self._agent_eval_results_pending_commit = []
+            self._agent_eval_inflight = False
+            self._agent_eval_thread = None
         self.mission_start_ts = time.time()
         self.mission_end_ts = None
         self.final_mission_summary = None
