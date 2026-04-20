@@ -23,6 +23,7 @@ class RunArtifact:
     completion_time_mission_sec: float | None
     llm_call_count: int
     replan_count: int
+    seed: int
     runtime_trace_path: str
     planning_trace_path: str
     metadata_path: str
@@ -175,7 +176,7 @@ class LiveBenchmarkRunner:
             },
         }
 
-    def _capture_latest_saved_run(self, logger, scene_id: str, zone: str) -> RunArtifact:
+    def _capture_latest_saved_run(self, logger, scene_id: str, zone: str, seed: int) -> RunArtifact:
         summary = logger.get_pending_run_summary() or {}
         if not summary:
             raise RuntimeError("No pending run summary available after execution.")
@@ -230,6 +231,7 @@ class LiveBenchmarkRunner:
             "evaluate_prompt_source": prompt_source_evidence,
             "evaluate_error_report": evaluate_error_report,
             "evaluate_error_report_path": error_report_out.as_posix(),
+            "seed": int(seed),
         }
         metadata_out.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         error_report_out.write_text(json.dumps(evaluate_error_report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -246,6 +248,7 @@ class LiveBenchmarkRunner:
             completion_time_mission_sec=summary.get("completion_time_mission_sec"),
             llm_call_count=int(run_summary.get("llm_call_count") or 0),
             replan_count=int(summary.get("replan_count") or 0),
+            seed=int(seed),
             runtime_trace_path=runtime_out.as_posix(),
             planning_trace_path=planning_out.as_posix(),
             metadata_path=metadata_out.as_posix(),
@@ -262,11 +265,11 @@ class LiveBenchmarkRunner:
                 zone = str(pair["task_zone"])
                 runs = int(pair["runs"])
                 task_text = self._task_text_for_zone(zone)
-                for _ in range(runs):
+                for idx in range(runs):
                     controller.set_baseline_scene(scene_id)
                     controller.apply_baseline_scene()
                     controller.execute_task_description(task_text)
-                    art = self._capture_latest_saved_run(logger=logger, scene_id=scene_id, zone=zone)
+                    art = self._capture_latest_saved_run(logger=logger, scene_id=scene_id, zone=zone, seed=idx)
                     artifacts.append(art)
         finally:
             self._shutdown_controller(controller)
