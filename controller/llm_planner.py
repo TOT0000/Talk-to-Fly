@@ -41,6 +41,7 @@ class LLMPlanner():
         self.agent_heartbeat_hardgate_prompt_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_heartbeat_hardgate_prompt.txt")
         self.agent_heartbeat_soft_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_heartbeat_soft_examples.txt")
         self.agent_heartbeat_hardgate_examples_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_heartbeat_hardgate_examples.txt")
+        self.agent_evaluator_prompt_path = os.path.join(CURRENT_DIR, f"./assets/{type_folder_name}/agent_evaluator_prompt.txt")
         self.runtime_prompt_variant = "default"
         self.runtime_example_variant = "default"
         self.runtime_use_output_example = True
@@ -67,6 +68,11 @@ class LLMPlanner():
             self.agent_heartbeat_soft_examples = f.read()
         with open(self.agent_heartbeat_hardgate_examples_path, "r") as f:
             self.agent_heartbeat_hardgate_examples = f.read()
+        if os.path.exists(self.agent_evaluator_prompt_path):
+            with open(self.agent_evaluator_prompt_path, "r") as f:
+                self.agent_evaluator_prompt = f.read()
+        else:
+            self.agent_evaluator_prompt = ""
         with open(self.prompt_plan_initial_path, "r") as f:
             self.prompt_plan_initial = f.read()
         with open(self.prompt_plan_replan_path, "r") as f:
@@ -270,19 +276,22 @@ class LLMPlanner():
                 "heartbeat_hardgate_prompt": self.agent_heartbeat_hardgate_prompt,
             }
         }
-        for baseline_id in ("baseline1", "baseline2", "baseline3"):
+        for baseline_id in ("baseline1", "baseline2", "baseline3", "agent"):
             key = f"{baseline_id}_prompt"
             init_path = os.path.join(base_dir, f"{baseline_id}_prompt_plan_initial.txt")
             replan_path = os.path.join(base_dir, f"{baseline_id}_prompt_plan_replan.txt")
             hb_soft_path = os.path.join(base_dir, f"{baseline_id}_prompt_heartbeat_soft.txt")
             payload = dict(variants["default"])
-            if baseline_id in {"baseline1", "baseline2"}:
+            if baseline_id in {"baseline1", "baseline2", "agent"}:
                 if not (os.path.exists(init_path) and os.path.exists(hb_soft_path)):
                     variants[key] = payload
                     continue
                 payload["plan_initial_prompt"] = self._read_text(init_path)
-                # baseline1/2 do not keep a dedicated replan-plan prompt; reuse initial prompt.
-                payload["plan_replan_prompt"] = payload["plan_initial_prompt"]
+                if baseline_id in {"baseline1", "baseline2"}:
+                    # baseline1/2 do not keep a dedicated replan-plan prompt; reuse initial prompt.
+                    payload["plan_replan_prompt"] = payload["plan_initial_prompt"]
+                else:
+                    payload["plan_replan_prompt"] = self._read_text(replan_path) if os.path.exists(replan_path) else payload["plan_initial_prompt"]
                 payload["heartbeat_soft_prompt"] = self._read_text(hb_soft_path)
             elif baseline_id == "baseline3":
                 if not (os.path.exists(init_path) and os.path.exists(replan_path)):
@@ -305,19 +314,22 @@ class LLMPlanner():
                 "heartbeat_hardgate_examples": self.agent_heartbeat_hardgate_examples,
             }
         }
-        for baseline_id in ("baseline1", "baseline2", "baseline3"):
+        for baseline_id in ("baseline1", "baseline2", "baseline3", "agent"):
             key = f"{baseline_id}_example"
             init_ex_path = os.path.join(base_dir, f"{baseline_id}_example_initial.txt")
             replan_ex_path = os.path.join(base_dir, f"{baseline_id}_example_replan.txt")
             hb_soft_ex_path = os.path.join(base_dir, f"{baseline_id}_example_heartbeat_soft.txt")
             payload = dict(variants["default"])
-            if baseline_id in {"baseline1", "baseline2"}:
+            if baseline_id in {"baseline1", "baseline2", "agent"}:
                 if not (os.path.exists(init_ex_path) and os.path.exists(hb_soft_ex_path)):
                     variants[key] = payload
                     continue
                 payload["initial_examples"] = self._read_text(init_ex_path)
-                # baseline1/2 do not keep dedicated replan examples; reuse initial examples.
-                payload["replan_examples"] = payload["initial_examples"]
+                if baseline_id in {"baseline1", "baseline2"}:
+                    # baseline1/2 do not keep dedicated replan examples; reuse initial examples.
+                    payload["replan_examples"] = payload["initial_examples"]
+                else:
+                    payload["replan_examples"] = self._read_text(replan_ex_path) if os.path.exists(replan_ex_path) else payload["initial_examples"]
                 payload["heartbeat_soft_examples"] = self._read_text(hb_soft_ex_path)
             elif baseline_id == "baseline3":
                 if not (os.path.exists(init_ex_path) and os.path.exists(replan_ex_path)):
@@ -429,6 +441,8 @@ class LLMPlanner():
             return "baseline2"
         if variant.startswith("baseline3_"):
             return "baseline3"
+        if variant.startswith("agent_"):
+            return "baseline2"
         return "default"
 
     def _build_opening_block(self) -> str:
@@ -806,6 +820,7 @@ class LLMPlanner():
         latest_full_replan_response: Optional[str] = None,
         full_replan_count: int = 0,
         hard_gate: bool = False,
+        feedback_memory_packets: Optional[list] = None,
     ) -> dict:
         safety_context = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
         collision_probability = 0.0 if safety_context is None else float(getattr(safety_context, "predicted_collision_probability", 0.0))
@@ -873,6 +888,12 @@ class LLMPlanner():
             current_executing_plan=current_plan,
             queue_progress=benchmark_progress,
             execution_history=execution_history,
+            feedback_memory_packets=json.dumps(feedback_memory_packets or [], ensure_ascii=False),
+        )
+        feedback_block = (
+            "Matured evaluator feedback memory packets (persist across heartbeats):\n"
+            f"{json.dumps(feedback_memory_packets or [], ensure_ascii=False, indent=2)}\n\n"
+            "Use these packets as episodic evidence. Do not assume any hidden intent beyond these records.\n\n"
         )
         examples_block = ""
         if self.runtime_use_output_example:
@@ -882,6 +903,7 @@ class LLMPlanner():
             )
         prompt = (
             f"{prompt}\n\n"
+            f"{feedback_block}"
             f"Hard gate policy note: {hard_gate_rule}\n\n"
             f"{examples_block}"
             "Return JSON only."
@@ -916,6 +938,63 @@ class LLMPlanner():
             "source": "agent_heartbeat",
         }
         return result
+
+    def evaluate_agent_replan_record(self, replan_record: dict) -> dict:
+        prompt_template = str(self.agent_evaluator_prompt or "").strip()
+        if not prompt_template:
+            prompt_template = (
+                "You are an evaluator LLM. Return JSON with keys necessity_assessment, outcome_assessment, "
+                "evidence_summary, timing_suggestion, content_suggestion, next_time_hint, confidence."
+            )
+        prompt = (
+            f"{prompt_template}\n\n"
+            f"decision_context:\n{json.dumps(replan_record.get('decision_context', {}), ensure_ascii=False, indent=2)}\n\n"
+            f"chosen_action:\n{json.dumps(replan_record.get('chosen_action', {}), ensure_ascii=False, indent=2)}\n\n"
+            f"outcome_delta:\n{json.dumps(replan_record.get('outcome_delta', {}), ensure_ascii=False, indent=2)}\n"
+        )
+        raw = str(self.llm.request(prompt, self.model_name, stream=False) or "").strip()
+        parsed, parsed_ok = self._parse_agent_evaluator_json(raw)
+        if not parsed_ok:
+            parsed = {
+                "necessity_assessment": "uncertain",
+                "outcome_assessment": "uncertain",
+                "evidence_summary": "parser_failed_or_non_json_response",
+                "timing_suggestion": "insufficient_evidence",
+                "content_suggestion": "insufficient_evidence",
+                "next_time_hint": "keep conservative until clearer evidence appears",
+                "confidence": "low",
+            }
+        return {
+            "prompt": prompt,
+            "raw_response": raw,
+            "parsed": parsed,
+            "parsed_ok": bool(parsed_ok),
+        }
+
+    @staticmethod
+    def _parse_agent_evaluator_json(raw: str) -> tuple[dict, bool]:
+        parsed, ok = LLMPlanner._parse_heartbeat_response_json(raw)
+        if not ok or not isinstance(parsed, dict):
+            return {}, False
+        necessity = str(parsed.get("necessity_assessment", "uncertain")).strip().lower()
+        outcome = str(parsed.get("outcome_assessment", "uncertain")).strip().lower()
+        confidence = str(parsed.get("confidence", "low")).strip().lower()
+        if necessity not in {"likely_necessary", "possibly_unnecessary", "uncertain"}:
+            necessity = "uncertain"
+        if outcome not in {"improved_safety", "little_change", "worsened", "uncertain"}:
+            outcome = "uncertain"
+        if confidence not in {"low", "medium", "high"}:
+            confidence = "low"
+        normalized = {
+            "necessity_assessment": necessity,
+            "outcome_assessment": outcome,
+            "evidence_summary": str(parsed.get("evidence_summary", "")).strip(),
+            "timing_suggestion": str(parsed.get("timing_suggestion", "")).strip(),
+            "content_suggestion": str(parsed.get("content_suggestion", "")).strip(),
+            "next_time_hint": str(parsed.get("next_time_hint", "")).strip(),
+            "confidence": confidence,
+        }
+        return normalized, True
 
     @staticmethod
     def _parse_heartbeat_response_json(raw: str) -> tuple[dict, bool]:
