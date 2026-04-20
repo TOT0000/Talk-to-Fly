@@ -232,6 +232,23 @@ You can verify applied config in:
 - per-run `metadata.json` (contains `run_summary`/`debug_summary`)
 - planning trace rows (`planning_trace.jsonl`) with trigger evidence fields
 
+Heartbeat observability fields now include:
+- `heartbeat_mode_enabled`
+- `heartbeat_due`
+- `heartbeat_result` (`continue` / `replan` / `skipped` / `blocked` / `failed`)
+- `heartbeat_reason`
+- `trigger_reason`
+- `replan_applied`
+- `replan_skip_reason`
+
+Completion observability fields now use active-zone scope:
+- `active_task_zone`
+- `active_zone_checkpoints`
+- `completed_active_checkpoints`
+- `remaining_active_checkpoints`
+- `mission_success_reason`
+- `completion_scope=zone_scoped`
+
 ## CLI
 
 ```bash

@@ -31,6 +31,14 @@ class _NoopLogger:
         return None
 
 
+class _CapturePlanningLogger(_NoopLogger):
+    def __init__(self):
+        self.planning = []
+
+    def append_planning_trace(self, trace):
+        self.planning.append(dict(trace or {}))
+
+
 def _install_minimal_skillset(gc_replan: bool):
     low = SkillSet(level="low")
     counters = {"gc": 0, "d": 0}
@@ -138,6 +146,68 @@ def test_typefly_replan_uses_fresh_llm_response_and_discards_old_queue(monkeypat
     assert len(planner_calls) == 2
     assert queued_programs == ["gc('A1');d(2.0);", "ml(1.0);gc('A2');d(2.0);"]
     assert queued_programs[1] != queued_programs[0]
+
+
+def test_objective_resolution_keeps_zone_scope_for_zone_only_task_text():
+    pytest.importorskip("PIL")
+    from controller.llm_controller import LLMController
+
+    controller = LLMController.__new__(LLMController)
+    resolved = controller._resolve_active_objective_set("Search zone A only and complete all checkpoints in this zone.")
+
+    assert resolved["source"] == "task_parse_zone"
+    assert resolved["active_zone_ids"] == ["zone_A"]
+    assert set(resolved["active_checkpoint_ids"]) == {"A1", "A2", "A3", "A4"}
+
+
+def test_heartbeat_not_due_is_recorded_with_reason():
+    pytest.importorskip("PIL")
+    from controller.llm_controller import LLMController
+
+    controller = LLMController.__new__(LLMController)
+    logger = _CapturePlanningLogger()
+    controller.task_run_logger = logger
+    controller.framework_mode = "agent-heartbeat-soft"
+    controller._pending_heartbeat_replan_plan = None
+    controller._pending_heartbeat_reason = ""
+    controller.last_heartbeat_ts = 100.0
+    controller.heartbeat_interval_seconds = 30.0
+    controller._replan_attempts = 0
+    controller.replan_limit = 5
+    controller.selected_pipeline_id = "candidate_0001"
+    controller.baseline_scene_id = "SCENE1"
+    controller._last_sandbox_context = ""
+    controller._last_sandbox_state_features = {}
+    controller.active_objective_set = {"active_zone_ids": ["zone_A"], "active_checkpoint_ids": ["A1", "A2"]}
+    controller.latest_benchmark_progress = {"completed": ["A1"], "current_target": "A2"}
+    controller._build_runtime_policy_evidence = lambda: {
+        "selected_harness_id": "candidate_0001",
+        "selected_trigger_mode": "agent-heartbeat-soft",
+        "selected_trigger_policy_name": "hybrid",
+        "selected_heartbeat_seconds": 2.0,
+        "selected_threshold_value": 0.4,
+        "selected_cooldown_seconds": 1.0,
+        "selected_harness_spec_path": "harnesses/candidates/candidate_0001/spec.json",
+        "runtime_mode_source": "harness_spec",
+    }
+    controller._pending_execution_statement_count = lambda: 1
+    controller.get_live_ui_snapshot = lambda: {
+        "benchmark_progress": {"completed": ["A1"], "current_target": "A2"},
+        "active_objective_set": {"active_zone_ids": ["zone_A"], "active_checkpoint_ids": ["A1", "A2"]},
+    }
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("controller.llm_controller.time.time", lambda: 110.0)
+    try:
+        out = controller._maybe_run_agent_heartbeat(force=False)
+    finally:
+        monkeypatch.undo()
+
+    assert out is False
+    assert logger.planning
+    row = logger.planning[-1]
+    assert row["heartbeat_due"] is False
+    assert row["heartbeat_result"] == "skipped"
+    assert row["heartbeat_reason"] == "not_due"
     plan_markers = [msg for msg in displayed_messages if isinstance(msg, str) and msg.startswith("[Plan]:")]
     assert len(plan_markers) == 2
 
