@@ -30,6 +30,10 @@ python tools/run_model_grid_experiment.py --block-by planner
 python tools/run_model_grid_experiment.py --block-by evaluator
 ```
 
+Single-endpoint note: with only one LM Studio instance/endpoint, use default `--single-endpoint-mode` (ON).  
+In this mode, only diagonal pairs (`planner_model == evaluator_model`) are executed reliably.  
+So this mode is for 7 diagonal combinations, not full 49 cross combinations.
+
 Default outputs:
 
 - `~/typefly_logs/model_grid_results.csv`

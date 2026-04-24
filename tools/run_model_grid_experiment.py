@@ -121,6 +121,24 @@ def run(args: argparse.Namespace):
 
     logger = ExperimentResultLogger(csv_path=args.output_csv, xlsx_path=args.output_xlsx)
     done_keys = logger.load_completed_keys()
+    print(
+        f"[MODE] single-endpoint mode = {'ON' if args.single_endpoint_mode else 'OFF'}"
+    )
+    if args.single_endpoint_mode:
+        print(
+            "[MODE] Single LM Studio endpoint can only reliably support planner_model == evaluator_model. "
+            "Off-diagonal combinations will be skipped."
+        )
+    all_pairs = [(p, e) for p in args.models for e in args.models]
+    allowed_pairs = [
+        (p, e)
+        for p, e in all_pairs
+        if (not args.single_endpoint_mode) or (p == e)
+    ]
+    print(
+        f"[PLAN] total_pairs={len(all_pairs)} allowed_pairs={len(allowed_pairs)} repeats={args.repeats} "
+        f"planned_runs={len(allowed_pairs) * int(args.repeats)}"
+    )
 
     controller = LLMController(
         robot_type=RobotType.PX4_SIM,
@@ -141,6 +159,12 @@ def run(args: argparse.Namespace):
         for block_idx, (block_model, pair_list) in enumerate(blocks, start=1):
             pending_pairs = []
             for planner_model, evaluator_model in pair_list:
+                if args.single_endpoint_mode and planner_model != evaluator_model:
+                    print(
+                        "[SKIP] single-endpoint mode requires planner_model == evaluator_model "
+                        f"(planner={planner_model}, evaluator={evaluator_model})"
+                    )
+                    continue
                 has_remaining = False
                 for repeat_idx in range(1, args.repeats + 1):
                     key = ExperimentKey(planner_model=planner_model, evaluator_model=evaluator_model, repeat_idx=repeat_idx)
@@ -171,6 +195,8 @@ def run(args: argparse.Namespace):
                 )
 
             for planner_model, evaluator_model in pair_list:
+                if args.single_endpoint_mode and planner_model != evaluator_model:
+                    continue
                 for repeat_idx in range(1, args.repeats + 1):
                     key = ExperimentKey(planner_model=planner_model, evaluator_model=evaluator_model, repeat_idx=repeat_idx)
                     if key in done_keys:
@@ -276,6 +302,15 @@ def parse_args() -> argparse.Namespace:
         "--strict-run-model-check",
         action="store_true",
         help="Before each run, require both planner/evaluator model IDs to be visible in /v1/models.",
+    )
+    parser.add_argument(
+        "--single-endpoint-mode",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "When enabled (default), only planner_model == evaluator_model runs are allowed "
+            "for single LM Studio endpoint environments."
+        ),
     )
     return parser.parse_args()
 
