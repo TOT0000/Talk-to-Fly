@@ -38,6 +38,9 @@ RESULT_COLUMNS = [
     "remaining_checkpoints",
     "run_id",
     "task_id",
+    "block_by",
+    "block_model",
+    "block_index",
 ]
 
 

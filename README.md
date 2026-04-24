@@ -23,6 +23,13 @@ The default model IDs are centralized in `controller/model_grid_config.py` (`DEF
 python tools/run_model_grid_experiment.py
 ```
 
+For LM Studio manual model-loading workflow, run by blocks:
+
+```bash
+python tools/run_model_grid_experiment.py --block-by planner
+python tools/run_model_grid_experiment.py --block-by evaluator
+```
+
 Default outputs:
 
 - `~/typefly_logs/model_grid_results.csv`
@@ -35,6 +42,8 @@ The script deduplicates by tuple:
 - `(planner_model, evaluator_model, repeat_idx)`
 
 If a tuple already exists in the CSV, that run is skipped. This supports interruption and resume without rewriting finished rows.
+
+In block mode, the script pauses at each block transition and asks for Enter confirmation after you manually load the fixed block model in LM Studio.
 
 ### What is intentionally *not* archived in experiment mode
 
