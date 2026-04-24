@@ -203,6 +203,7 @@ class LLMController():
         self.predicted_collision_replan_strictly_greater = False
         self.heartbeat_interval_seconds = float(AGENT_HEARTBEAT_INTERVAL_SECONDS)
         self.active_objective_set = self._default_active_objective_set()
+        self._active_objective_set_override: Optional[dict] = None
         self.latest_benchmark_progress = {
             "completed": [],
             "current_target": None,
@@ -276,6 +277,22 @@ class LLMController():
             "active_checkpoint_ids": list(BENCHMARK_CHECKPOINT_ORDER),
             "source": "default_all",
         }
+
+    def set_active_objective_set_override(self, objective_set: Optional[dict]) -> dict:
+        if objective_set is None:
+            self._active_objective_set_override = None
+            return self._default_active_objective_set()
+        zone_ids = [str(v) for v in list((objective_set or {}).get("active_zone_ids") or [])]
+        checkpoint_ids = [str(v).upper() for v in list((objective_set or {}).get("active_checkpoint_ids") or [])]
+        self._active_objective_set_override = {
+            "active_zone_ids": zone_ids,
+            "active_checkpoint_ids": checkpoint_ids,
+            "source": str((objective_set or {}).get("source") or "manual_override"),
+        }
+        return dict(self._active_objective_set_override)
+
+    def clear_active_objective_set_override(self):
+        self._active_objective_set_override = None
 
     def _reset_benchmark_progress_tracking(self):
         self._benchmark_completed = set()
@@ -1990,7 +2007,10 @@ class LLMController():
         self.current_task_description = str(task_description or "")
         print_t(f"[MODE] selected={selected_framework}")
         self.execution_mode = "Planning"
-        self.active_objective_set = self._resolve_active_objective_set(task_description)
+        objective_override = dict(self._active_objective_set_override or {})
+        self.active_objective_set = (
+            objective_override if objective_override else self._resolve_active_objective_set(task_description)
+        )
         self._reset_benchmark_progress_tracking()
         self._task_id_counter += 1
         task_id = f"task_{self._task_id_counter:05d}"
