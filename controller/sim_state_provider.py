@@ -91,7 +91,11 @@ class SimStateProvider(StateProvider):
         self._user_position_msg_type_name: str = os.getenv("SIM_USER_POSITION_MSG_TYPE", "PointStamped")
         # Support both versioned and unversioned PX4 ROS2 bridge topic names.
         self._local_position_topics = ("/fmu/out/vehicle_local_position_v1", "/fmu/out/vehicle_local_position")
-        self._vehicle_status_topics = ("/fmu/out/vehicle_status_v2", "/fmu/out/vehicle_status")
+        self._vehicle_status_topics = (
+            "/fmu/out/vehicle_status_v4",
+            "/fmu/out/vehicle_status_v2",
+            "/fmu/out/vehicle_status",
+        )
         self._anchor_provider = AnchorGeometryProvider()
         self._localization_error_model = LocalizationErrorModel()
         self._localization_estimator = IterativeLeastSquaresEstimator3D()
@@ -228,9 +232,20 @@ class SimStateProvider(StateProvider):
             self._callback((timestamp_now, position[0], position[1], position[2]))
 
     def _on_vehicle_status(self, msg):
+        nav_state = int(getattr(msg, "nav_state", 0))
+        arming_state = int(getattr(msg, "arming_state", 0))
+
         with self._lock:
-            self._cache.nav_state = int(getattr(msg, "nav_state", 0))
-            self._cache.arming_state = int(getattr(msg, "arming_state", 0))
+            prev_nav_state = self._cache.nav_state
+            prev_arming_state = self._cache.arming_state
+            self._cache.nav_state = nav_state
+            self._cache.arming_state = arming_state
+
+        if nav_state != prev_nav_state or arming_state != prev_arming_state:
+            print_debug(
+                f"[PX4_SIM][vehicle_status] nav_state={nav_state} arming_state={arming_state} "
+                f"(prev_nav_state={prev_nav_state} prev_arming_state={prev_arming_state})"
+            )
 
     def _resolve_user_position_msg_type(self, point_cls, point_stamped_cls) -> Optional[Type]:
         """Resolve a single ROS2 message type for /sim/user_position subscription."""
