@@ -121,6 +121,7 @@ def run(args: argparse.Namespace):
 
     logger = ExperimentResultLogger(csv_path=args.output_csv, xlsx_path=args.output_xlsx)
     done_keys = logger.load_completed_keys()
+    selected_model_count = len(list(args.models))
     print(
         f"[MODE] single-endpoint mode = {'ON' if args.single_endpoint_mode else 'OFF'}"
     )
@@ -135,10 +136,15 @@ def run(args: argparse.Namespace):
         for p, e in all_pairs
         if (not args.single_endpoint_mode) or (p == e)
     ]
-    print(
-        f"[PLAN] total_pairs={len(all_pairs)} allowed_pairs={len(allowed_pairs)} repeats={args.repeats} "
-        f"planned_runs={len(allowed_pairs) * int(args.repeats)}"
-    )
+    planned_runs = len(allowed_pairs) * int(args.repeats)
+    if args.single_endpoint_mode:
+        print(f"[PLAN] selected model count = {selected_model_count}")
+        print(f"[PLAN] planned diagonal runs = {planned_runs}")
+    else:
+        print(
+            f"[PLAN] total_pairs={len(all_pairs)} allowed_pairs={len(allowed_pairs)} repeats={args.repeats} "
+            f"planned_runs={planned_runs}"
+        )
 
     controller = LLMController(
         robot_type=RobotType.PX4_SIM,
@@ -189,9 +195,8 @@ def run(args: argparse.Namespace):
             print(f"[CHECK] LM Studio models visible: {visible_models}")
             if block_model not in visible_models:
                 raise RuntimeError(
-                    f"[STOP] Current block requires model `{block_model}`, "
-                    f"but it is not visible in LM Studio /v1/models. "
-                    "Please load it and re-run this block."
+                    f"[STOP] missing model id: {block_model} | "
+                    f"visible model ids: {visible_models}"
                 )
 
             for planner_model, evaluator_model in pair_list:
