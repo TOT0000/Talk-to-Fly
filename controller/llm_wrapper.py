@@ -142,4 +142,15 @@ class LLMWrapper:
         if stream:
             return response
 
-        return response.choices[0].message.content
+        message = response.choices[0].message
+        content = str(getattr(message, "content", "") or "")
+        reasoning_content = None
+        if hasattr(message, "reasoning_content"):
+            reasoning_content = getattr(message, "reasoning_content")
+        if (not reasoning_content) and hasattr(message, "model_extra"):
+            extras = getattr(message, "model_extra") or {}
+            if isinstance(extras, dict):
+                reasoning_content = extras.get("reasoning_content")
+        if (not content.strip()) and str(reasoning_content or "").strip():
+            raise RuntimeError("reasoning_only_empty_content")
+        return content
