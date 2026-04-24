@@ -14,6 +14,11 @@ This repository now includes a resumable batch experiment script for comparing p
 ### Default model list (centralized)
 
 The default model IDs are centralized in `controller/model_grid_config.py` (`DEFAULT_MODEL_GRID_IDS`).
+Current formal defaults:
+- `microsoft_phi-4-mini-instruct`
+- `meta-llama-3.1-8b-instruct`
+- `google/gemma-2-9b`
+- `openai/gpt-oss-20b`
 
 > Important: model IDs must exactly match what your LM Studio OpenAI-compatible endpoint exposes (e.g., `/v1/models`). If your local endpoint uses different IDs, update `DEFAULT_MODEL_GRID_IDS` in that file only.
 

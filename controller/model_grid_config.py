@@ -6,8 +6,8 @@ from __future__ import annotations
 # names in /v1/models, update this single list only.
 DEFAULT_MODEL_GRID_IDS: list[str] = [
     "microsoft_phi-4-mini-instruct",
-    "qwen/qwen3-14b",
-    "deepseek/deepseek-r1-0528-qwen3-8b",
+    "meta-llama-3.1-8b-instruct",
+    "google/gemma-2-9b",
     "openai/gpt-oss-20b",
 ]
 
