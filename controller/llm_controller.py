@@ -1027,13 +1027,15 @@ class LLMController():
             except Exception:
                 wrapper_snapshot = {}
         print_debug(
-            "[GC-SETPOINT] "
+            "[GC-HANDOFF] "
             f"begin checkpoint={checkpoint_key} checkpoint_pos=({checkpoint.x:.2f}, {checkpoint.y:.2f}) "
             f"old_command={wrapper_snapshot.get('command')} old_target={wrapper_snapshot.get('target')} "
+            f"old_source={wrapper_snapshot.get('target_source')} "
             f"current_drone_pos={current_pos}",
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
-        if isinstance(self.drone, Px4SimRobotWrapper):
+        supports_gc_handoff = hasattr(self.drone, "begin_go_checkpoint_context")
+        if supports_gc_handoff:
             try:
                 checkpoint_z = 0.0
                 if isinstance(current_pos, (tuple, list)) and len(current_pos) >= 3:
@@ -1044,9 +1046,15 @@ class LLMController():
                 )
             except Exception as exc:
                 print_debug(
-                    f"[GC-SETPOINT] begin_go_checkpoint_context_failed checkpoint={checkpoint_key} error={exc}",
+                    f"[GC-HANDOFF-FAIL] begin_go_checkpoint_context_failed checkpoint={checkpoint_key} error={exc}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
+        else:
+            print_debug(
+                f"[GC-HANDOFF-FAIL] begin_go_checkpoint_context_missing checkpoint={checkpoint_key} "
+                f"drone_type={type(self.drone).__name__}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
+            )
         # Ensure dwell/completion tracking follows the actual commanded checkpoint,
         # instead of falling back to lexical benchmark order.
         self.set_benchmark_progress_focus_checkpoint(checkpoint_key)
@@ -1058,7 +1066,7 @@ class LLMController():
         )
         # Keep an explicit robot-mode flag in scope for gc() diagnostics and to
         # avoid NameError regressions when instrumenting this block.
-        is_px4_sim = isinstance(self.drone, Px4SimRobotWrapper)
+        is_px4_sim = isinstance(self.drone, Px4SimRobotWrapper) or supports_gc_handoff
 
         max_step_m = 1.0
         # gc policy: align to checkpoint heading first, then move straight forward.
@@ -1245,9 +1253,12 @@ class LLMController():
             except Exception:
                 end_snapshot = {}
             print_debug(
-                "[GC-SETPOINT] "
+                "[GC-HANDOFF] "
                 f"end checkpoint={checkpoint.id} command={end_snapshot.get('command')} "
-                f"target={end_snapshot.get('target')} source={end_snapshot.get('target_source')}",
+                f"target={end_snapshot.get('target')} source={end_snapshot.get('target_source')} "
+                f"command_writer={end_snapshot.get('command_writer')} "
+                f"source_writer={end_snapshot.get('target_source_writer')} "
+                f"setpoint_writer={end_snapshot.get('setpoint_writer')}",
                 env_var="TYPEFLY_VERBOSE_DEBUG",
             )
         should_request_replan = bool(
