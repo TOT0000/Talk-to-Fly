@@ -39,6 +39,23 @@ def _provider_default_model(provider: str) -> str:
     return GEMINI_DEFAULT_MODEL
 
 
+def resolve_runtime_provider_config() -> dict:
+    provider = _resolve_default_provider()
+    openai_base_url = os.environ.get("OPENAI_BASE_URL", OPENAI_BASE_URL)
+    gemini_base_url = os.environ.get("GEMINI_BASE_URL", GEMINI_BASE_URL)
+    lmstudio_base_url = os.environ.get("LMSTUDIO_BASE_URL", LMSTUDIO_BASE_URL)
+    base_url = (
+        openai_base_url
+        if provider == "openai"
+        else (lmstudio_base_url if provider == "lmstudio" else gemini_base_url)
+    )
+    return {
+        "provider": provider,
+        "base_url": str(base_url or "").strip(),
+        "lmstudio_base_url": str(lmstudio_base_url or "").strip(),
+    }
+
+
 DEFAULT_PROVIDER = _resolve_default_provider()
 GEMINI_MODEL = _provider_default_model(DEFAULT_PROVIDER)
 MODEL_NAME = GEMINI_MODEL
@@ -62,12 +79,19 @@ def _mask_key(secret: str | None) -> str:
 class LLMWrapper:
     def __init__(self, temperature=0.0):
         self.temperature = temperature
-        self.provider = _resolve_default_provider()
-        self.base_url = (
-            OPENAI_BASE_URL
-            if self.provider == "openai"
-            else (LMSTUDIO_BASE_URL if self.provider == "lmstudio" else GEMINI_BASE_URL)
-        )
+        runtime = resolve_runtime_provider_config()
+        self.provider = runtime["provider"]
+        self.base_url = runtime["base_url"]
+        self._lmstudio_base_url = runtime["lmstudio_base_url"]
+        self._enforce_lmstudio = str(os.environ.get("TYPEFLY_ENFORCE_LMSTUDIO", "")).strip().lower() in {"1", "true", "yes"}
+        if self._enforce_lmstudio and self.provider != "lmstudio":
+            raise RuntimeError(f"provider_not_lmstudio: provider={self.provider}")
+        if self._enforce_lmstudio and (not self.base_url):
+            raise RuntimeError("provider_not_lmstudio: empty_base_url")
+        if self._enforce_lmstudio and (self.base_url != self._lmstudio_base_url):
+            raise RuntimeError(
+                f"provider_not_lmstudio: base_url_mismatch base_url={self.base_url} lmstudio_base_url={self._lmstudio_base_url}"
+            )
         if self.provider == "openai":
             self.api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
             self.key_source = ("OPENAI_API_KEY" if self.api_key else "(empty)")
@@ -127,12 +151,18 @@ class LLMWrapper:
             f.write(prompt + "\n---\n")
         print_debug(f"[LLM] Prompt written to {chat_log_path}")
         
-        response = self.client.chat.completions.create(
-            model=selected_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=self.temperature,
-            stream=stream,
-        )
+        try:
+            response = self.client.chat.completions.create(
+                model=selected_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+                stream=stream,
+            )
+        except Exception as exc:
+            message = str(exc or "")
+            if "Missing or invalid Authorization header." in message:
+                raise RuntimeError("invalid_authorization_header") from exc
+            raise
 
         # save the message in a txt
         with open(chat_log_path, "a") as f:
@@ -142,4 +172,15 @@ class LLMWrapper:
         if stream:
             return response
 
-        return response.choices[0].message.content
+        message = response.choices[0].message
+        content = str(getattr(message, "content", "") or "")
+        reasoning_content = None
+        if hasattr(message, "reasoning_content"):
+            reasoning_content = getattr(message, "reasoning_content")
+        if (not reasoning_content) and hasattr(message, "model_extra"):
+            extras = getattr(message, "model_extra") or {}
+            if isinstance(extras, dict):
+                reasoning_content = extras.get("reasoning_content")
+        if (not content.strip()) and str(reasoning_content or "").strip():
+            raise RuntimeError("reasoning_only_empty_content")
+        return content

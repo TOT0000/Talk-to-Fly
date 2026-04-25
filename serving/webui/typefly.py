@@ -34,6 +34,11 @@ from controller.llm_controller import (
 from controller.experiment_scenarios import SCENARIOS, normalize_scenario_name
 from controller.baseline_scenes import BASELINE_SCENES, normalize_baseline_scene_id
 from controller.pipeline_registry import PIPELINE_REGISTRY, normalize_pipeline_id
+from controller.manual_model_pair_config import (
+    list_manual_model_pair_options,
+    get_manual_model_pair,
+    normalize_manual_model_pair_id,
+)
 from controller.anchor_provider import AnchorGeometryProvider
 from controller.benchmark_layout import (
     WORKSPACE_SIZE_M,
@@ -105,6 +110,10 @@ class TypeFly:
         self.selected_framework_mode = MODE_TYPEFLY_ONESHOT
         self.selected_baseline_id = normalize_pipeline_id(os.getenv("TYPEFLY_BASELINE_ID", "baseline1"))
         self.archive_enabled = True
+        self.selected_model_pair_id = normalize_manual_model_pair_id(
+            os.getenv("TYPEFLY_MANUAL_MODEL_PAIR_ID", "")
+        )
+        self.llm_controller.set_manual_model_pair(self.selected_model_pair_id)
         self.selected_worker_move_step = 0.5
         self.selected_worker_turn_step = 15.0
 
@@ -187,6 +196,16 @@ class TypeFly:
                         value=self.selected_baseline_id,
                         label="Baseline Pipeline",
                     )
+                    self.model_pair_selector = gr.Dropdown(
+                        choices=list_manual_model_pair_options(),
+                        value=self.selected_model_pair_id,
+                        label="Model Pair",
+                    )
+                    self.model_pair_status = gr.Markdown(value=self.render_model_pair_status())
+                    self.archive_checkbox = gr.Checkbox(
+                        label="Record this run",
+                        value=True,
+                    )
                     self.postrun_summary = gr.Markdown(value="### Post-run archive\nNo finished run awaiting decision.")
                     with gr.Row():
                         self.save_run_btn = gr.Button("Save this run", variant="primary")
@@ -265,6 +284,16 @@ class TypeFly:
             self.baseline_selector.change(
                 fn=self.set_selected_baseline,
                 inputs=[self.baseline_selector],
+                outputs=[self.scenario_status, self.model_pair_status],
+            )
+            self.model_pair_selector.change(
+                fn=self.set_model_pair,
+                inputs=[self.model_pair_selector],
+                outputs=[self.scenario_status, self.model_pair_status],
+            )
+            self.archive_checkbox.change(
+                fn=self.set_archive_enabled,
+                inputs=[self.archive_checkbox],
                 outputs=[self.scenario_status],
             )
             self.save_run_btn.click(
@@ -642,12 +671,52 @@ class TypeFly:
         normalized = self.llm_controller.set_selected_pipeline(baseline_id)
         self.selected_baseline_id = normalized
         cfg = PIPELINE_REGISTRY[normalized]
-        return f"Baseline switched to `{cfg.id}` ({cfg.name})."
+        return (
+            f"Baseline switched to `{cfg.id}` ({cfg.name}).",
+            self.render_model_pair_status(),
+        )
+
+    def render_model_pair_status(self):
+        pair = get_manual_model_pair(self.selected_model_pair_id)
+        lm = self.llm_controller.get_lmstudio_connectivity_status()
+        current_pipeline = str(getattr(self, "selected_baseline_id", "") or "")
+        pipeline_note = (
+            "active for Agent-Feedback-Eval"
+            if current_pipeline == "agent"
+            else f"stored (current pipeline: `{current_pipeline or 'n/a'}`)"
+        )
+        model_preview = list(lm.get("model_ids") or [])[:6]
+        model_preview_text = ", ".join(model_preview) if model_preview else "(none)"
+        warning_lines = []
+        for warning in list(lm.get("warnings") or []):
+            warning_lines.append(f"- ⚠️ {warning}")
+        if lm.get("error"):
+            warning_lines.append(f"- ❌ lmstudio_error: `{lm.get('error')}`")
+        warning_block = "\n".join(warning_lines) if warning_lines else "- ✅ selected planner/evaluator models visible in `/v1/models`"
+        return (
+            "### Selected Model Pair\n"
+            f"- pair id: `{pair.pair_id}`\n"
+            f"- planner model id: `{pair.planner_model_id}`\n"
+            f"- evaluator model id: `{pair.evaluator_model_id}`\n"
+            f"- pipeline behavior: {pipeline_note}\n"
+            f"- LM Studio provider: `{lm.get('provider', 'n/a')}`\n"
+            f"- LM Studio base_url: `{lm.get('base_url', 'n/a')}`\n"
+            f"- LM Studio api key: `{lm.get('api_key_masked', '(n/a)')}`\n"
+            f"- LM Studio connected: `{bool(lm.get('connected'))}`\n"
+            f"- visible model ids: {model_preview_text}\n"
+            f"{warning_block}"
+        )
+
+    def set_model_pair(self, pair_id: str):
+        selected = self.llm_controller.set_manual_model_pair(pair_id)
+        self.selected_model_pair_id = selected.get("pair_id", normalize_manual_model_pair_id(pair_id))
+        pair_status = self.render_model_pair_status()
+        return f"Model pair switched to `{selected.get('label', self.selected_model_pair_id)}`.", pair_status
 
     def set_archive_enabled(self, enabled: bool):
         self.archive_enabled = bool(enabled)
         self.llm_controller.set_archive_enabled(self.archive_enabled)
-        return f"Archive logging {'enabled' if self.archive_enabled else 'disabled'} for next run."
+        return f"Run record {'enabled' if self.archive_enabled else 'disabled'} for next run."
 
     def save_last_run(self):
         logger = getattr(self.llm_controller, "task_run_logger", None)
@@ -783,7 +852,7 @@ class TypeFly:
             self.llm_controller.set_selected_pipeline(self.selected_baseline_id)
             task_thread = Thread(
                 target=self.llm_controller.execute_task_description,
-                args=(message, framework_mode),
+                args=(message, framework_mode, "manual_webui"),
             )
             task_thread.start()
             complete_response = ''
@@ -796,7 +865,9 @@ class TypeFly:
                         if self.mission_clock["is_running"]:
                             self.mission_clock["completed_at"] = time.time()
                             self.mission_clock["is_running"] = False
-                        return "Command Complete! Please click 'Save this run' or 'Discard this run'."
+                        if bool(self.archive_enabled):
+                            return "Command Complete! Result summary has been auto-saved."
+                        return "Command Complete! Recording is disabled for this run."
                     if msg.startswith('[LOG]'):
                         complete_response += '\n'
                     if msg.endswith('\\\\'):
@@ -950,6 +1021,9 @@ class TypeFly:
             "### Post-run archive (pending decision)",
             f"- run_id: {summary.get('run_id', 'n/a')}",
             f"- baseline: {summary.get('selected_baseline_id', 'n/a')} ({summary.get('selected_baseline_name', 'n/a')})",
+            f"- model_pair: {summary.get('model_pair_id', 'n/a')} ({summary.get('model_pair_label', 'n/a')})",
+            f"- planner_model: {summary.get('planner_model_id', 'n/a')}",
+            f"- evaluator_model: {summary.get('evaluator_model_id', 'n/a')}",
             f"- scene_id: {summary.get('scene_id', 'n/a')}",
             f"- status: {summary.get('run_status', 'n/a')}",
             f"- mission_success: {summary.get('mission_success', 'n/a')}",
@@ -1148,7 +1222,7 @@ class TypeFly:
             f"- current mode: {final_execution_mode}",
             f"- selected baseline: {snapshot.get('selected_baseline_id', 'n/a')} ({snapshot.get('selected_baseline_name', 'n/a')})",
             f"- current scene: {snapshot.get('baseline_scene_id', 'n/a')}",
-            f"- archive policy: post-run Save/Discard decision",
+            f"- record policy: {'auto-save summary at run end' if bool(self.archive_enabled) else 'do not save run'}",
             f"- active zones: {', '.join(sorted(z.replace('zone_', '') for z in self.objective_state.get('active_zone_ids', set())))}",
             f"- active checkpoints: {len(active_ids)}",
             f"- predicted_collision_probability: {self._fmt_prob(getattr(safety_context, 'predicted_collision_probability', 0.0))}",
