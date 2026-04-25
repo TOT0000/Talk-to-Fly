@@ -140,6 +140,9 @@ def _run_single_attempt(
     from controller.llm_controller import LLMController
 
     controller = None
+    run_payload: dict | None = None
+    cleanup_error = ""
+    cleanup_issues: list[str] = []
     try:
         controller = LLMController(
             robot_type=RobotType.PX4_SIM,
@@ -174,7 +177,7 @@ def _run_single_attempt(
         run_status = str(summary.get("run_status") or final_summary.get("final_run_status") or "")
         if (not failure_reason) and run_status.lower() == "failed":
             failure_reason = "runtime_exception"
-        return {
+        run_payload = {
             "run_status": run_status,
             "mission_success": _safe_bool(summary.get("mission_success", final_summary.get("mission_success"))),
             "termination_reason": summary.get("termination_reason") or final_summary.get("termination_reason") or "",
@@ -193,8 +196,9 @@ def _run_single_attempt(
             "block_model": block_model,
             "block_index": block_idx,
         }
+        return run_payload
     except Exception as exc:
-        return {
+        run_payload = {
             "run_status": "failed",
             "mission_success": False,
             "termination_reason": "",
@@ -213,6 +217,7 @@ def _run_single_attempt(
             "block_model": block_model,
             "block_index": block_idx,
         }
+        return run_payload
     finally:
         if controller is not None:
             try:
@@ -223,6 +228,44 @@ def _run_single_attempt(
                 controller.stop_robot()
             except Exception:
                 pass
+            try:
+                controller.shutdown_for_run_end()
+            except Exception as cleanup_exc:
+                cleanup_error = str(cleanup_exc or cleanup_error)
+            try:
+                clean_ok, clean_issues = controller.verify_no_active_run_artifacts()
+                if not clean_ok:
+                    cleanup_issues = list(clean_issues or [])
+            except Exception as verify_exc:
+                cleanup_error = str(verify_exc or cleanup_error or "cleanup_verification_failed")
+        if cleanup_error or cleanup_issues:
+            issue_text = cleanup_error or ",".join(cleanup_issues) or "unknown_cleanup_failure"
+            if run_payload is None:
+                run_payload = {
+                    "run_status": "failed",
+                    "mission_success": False,
+                    "termination_reason": "",
+                    "failure_reason": f"run_cleanup_failed:{issue_text}",
+                    "completion_time_mission_sec": None,
+                    "replan_count": 0,
+                    "collision_count": 0,
+                    "near_miss_count": 0,
+                    "min_uav_worker_distance_m": None,
+                    "completion_ratio": 0.0,
+                    "completed_checkpoints": "",
+                    "remaining_checkpoints": "",
+                    "run_id": "",
+                    "task_id": "",
+                    "block_by": args.block_by,
+                    "block_model": block_model,
+                    "block_index": block_idx,
+                }
+            else:
+                run_payload["run_status"] = "failed"
+                run_payload["mission_success"] = False
+                run_payload["failure_reason"] = f"run_cleanup_failed:{issue_text}"
+            run_payload["_abort_batch"] = True
+            run_payload["_cleanup_issues"] = issue_text
 
 
 def run(args: argparse.Namespace):
@@ -322,6 +365,11 @@ def run(args: argparse.Namespace):
                     block_idx=block_idx,
                     zone_objective=zone_objective,
                 )
+                abort_batch = bool(run_payload.get("_abort_batch"))
+                cleanup_issue_text = str(run_payload.get("_cleanup_issues") or "")
+                payload_for_log = {
+                    k: v for k, v in run_payload.items() if not str(k).startswith("_")
+                }
                 row = {
                     "experiment_tag": args.experiment_tag,
                     "pipeline_id": args.pipeline_id,
@@ -330,10 +378,16 @@ def run(args: argparse.Namespace):
                     "repeat_idx": repeat_idx,
                     "planner_model": planner_model,
                     "evaluator_model": evaluator_model,
-                    **run_payload,
+                    **payload_for_log,
                 }
                 logger.append_result(row)
                 done_keys.add(key)
+                if abort_batch:
+                    raise RuntimeError(
+                        f"[STOP] cleanup verification failed after run "
+                        f"(planner={planner_model}, evaluator={evaluator_model}, repeat={repeat_idx}): "
+                        f"{cleanup_issue_text}"
+                    )
 
 
 def parse_args() -> argparse.Namespace:
