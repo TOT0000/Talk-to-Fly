@@ -668,17 +668,28 @@ class SimStateProvider(StateProvider):
 
         if self._spin_thread and self._spin_thread.is_alive():
             self._spin_thread.join(timeout=1.0)
+        self._spin_thread = None
 
         if self._executor is not None:
-            self._executor.shutdown(timeout_sec=1.0)
+            try:
+                self._executor.shutdown(timeout_sec=1.0)
+            except Exception:
+                pass
             self._executor = None
 
         if self._node is not None:
-            self._node.destroy_node()
+            try:
+                self._node.destroy_node()
+            except Exception:
+                pass
             self._node = None
 
         if self._context is not None and self._context.ok():
-            self._context.shutdown()
+            try:
+                self._context.shutdown()
+            except Exception:
+                pass
         self._context = None
         self._executor = None
+        self._rclpy = None
         self._ros_ready = False

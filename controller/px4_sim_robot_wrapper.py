@@ -28,6 +28,8 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._arming_state_armed = 2
         self._state_provider = None
         self._rclpy = None
+        self._context = None
+        self._executor = None
         self._node = None
         self._pub_offboard_mode = None
         self._pub_traj_sp = None
@@ -63,16 +65,18 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         try:
             import rclpy
             from rclpy.node import Node
+            from rclpy.executors import SingleThreadedExecutor
             from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand
         except ImportError as exc:
             print(f"[WARN] Px4SimRobotWrapper ROS2/PX4 unavailable: {exc}")
             return False
 
         self._rclpy = rclpy
-        if not self._rclpy.ok():
-            self._rclpy.init(args=None)
-
-        self._node = Node("px4_sim_robot_wrapper")
+        self._context = self._rclpy.context.Context()
+        self._context.init(args=None)
+        self._node = Node("px4_sim_robot_wrapper", context=self._context)
+        self._executor = SingleThreadedExecutor(context=self._context)
+        self._executor.add_node(self._node)
         self._msg_OffboardControlMode = OffboardControlMode
         self._msg_TrajectorySetpoint = TrajectorySetpoint
         self._msg_VehicleCommand = VehicleCommand
@@ -104,6 +108,8 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
 
         def _loop():
             while self._setpoint_thread_running:
+                if self._node is None or self._context is None or (not self._context.ok()) or self._executor is None:
+                    break
                 self._spin_once()
                 with self._target_lock:
                     target = self._active_setpoint if self._setpoint_stream_active else None
@@ -111,6 +117,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
                     tx, ty, tz, tyaw = target
                     self._publish_offboard_setpoint(tx, ty, tz, yaw=tyaw)
                 time.sleep(0.05)  # 20 Hz offboard stream
+            self._setpoint_thread_running = False
 
         self._setpoint_thread = threading.Thread(target=_loop, daemon=True)
         self._setpoint_thread.start()
@@ -134,8 +141,53 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         return int(time.time() * 1_000_000)
 
     def _spin_once(self):
-        if self._rclpy is not None and self._node is not None and self._rclpy.ok():
-            self._rclpy.spin_once(self._node, timeout_sec=0.0)
+        if (
+            self._rclpy is not None
+            and self._node is not None
+            and self._context is not None
+            and self._context.ok()
+            and self._executor is not None
+            and self._setpoint_thread_running
+        ):
+            try:
+                self._executor.spin_once(timeout_sec=0.0)
+            except Exception:
+                self._setpoint_thread_running = False
+
+    def shutdown(self):
+        self._clear_active_target()
+        self._stop_setpoint_loop()
+        if self._executor is not None:
+            try:
+                self._executor.shutdown(timeout_sec=1.0)
+            except Exception:
+                pass
+            self._executor = None
+        if self._node is not None:
+            try:
+                self._node.destroy_node()
+            except Exception:
+                pass
+            self._node = None
+        self._pub_offboard_mode = None
+        self._pub_traj_sp = None
+        self._pub_vehicle_cmd = None
+        if self._context is not None:
+            try:
+                if self._context.ok():
+                    self._context.shutdown()
+            except Exception:
+                pass
+        self._context = None
+        self._rclpy = None
+
+    def has_active_runtime(self) -> bool:
+        return bool(
+            (self._setpoint_thread is not None and self._setpoint_thread.is_alive())
+            or self._executor is not None
+            or self._node is not None
+            or self._context is not None
+        )
 
     def _publish_vehicle_command(self, command: int, param1: float = 0.0, param2: float = 0.0, param7: float = 0.0):
         msg = self._msg_VehicleCommand()

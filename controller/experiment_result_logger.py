@@ -22,6 +22,9 @@ RESULT_COLUMNS = [
     "scenario_id",
     "zone_id",
     "repeat_idx",
+    "pair_index",
+    "pair_label",
+    "phase",
     "planner_model",
     "evaluator_model",
     "run_status",
@@ -38,9 +41,6 @@ RESULT_COLUMNS = [
     "remaining_checkpoints",
     "run_id",
     "task_id",
-    "block_by",
-    "block_model",
-    "block_index",
 ]
 
 
@@ -66,7 +66,14 @@ class ExperimentResultLogger:
 
     def _ensure_csv_header(self):
         if os.path.exists(self.csv_path) and os.path.getsize(self.csv_path) > 0:
-            return
+            try:
+                with open(self.csv_path, "r", newline="", encoding="utf-8") as f:
+                    reader = csv.reader(f)
+                    existing_headers = next(reader, [])
+                if existing_headers == RESULT_COLUMNS:
+                    return
+            except Exception:
+                pass
         with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=RESULT_COLUMNS)
             writer.writeheader()
