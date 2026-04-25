@@ -590,7 +590,8 @@ class MiniSpecInterpreter:
         self,
         message_queue: queue.Queue,
         should_abort: Optional[Callable[[], Tuple[bool, str]]] = None,
-        on_statement_executed: Optional[Callable[[], None]] = None,
+        on_statement_executed: Optional[Callable[..., None]] = None,
+        on_execution_blocked: Optional[Callable[..., None]] = None,
     ):
         self.env = {}
         self.ret = False
@@ -601,6 +602,7 @@ class MiniSpecInterpreter:
             raise Exception('Statement: Skillset is not initialized')
         self.should_abort = should_abort
         self.on_statement_executed = on_statement_executed
+        self.on_execution_blocked = on_execution_blocked
 
         self.timestamp_get_plan = None
         self.timestamp_start_execution = None
@@ -610,14 +612,15 @@ class MiniSpecInterpreter:
         self.message_queue = message_queue
         self.should_abort = should_abort
 
-        Statement.execution_queue = Queue()
+        self.execution_queue = Queue()
+        Statement.execution_queue = self.execution_queue
         self.execution_thread = Thread(target=self.executor)
         self.execution_thread.start()
 
     def _drain_execution_queue(self) -> int:
         drained = 0
-        while not Statement.execution_queue.empty():
-            Statement.execution_queue.get()
+        while not self.execution_queue.empty():
+            self.execution_queue.get()
             drained += 1
         return drained
 
@@ -631,11 +634,12 @@ class MiniSpecInterpreter:
         program.parse(code, False)
         self.program_count = len(program.statements)
         for statement in program.statements:
-            Statement.execution_queue.put(statement)
+            self.execution_queue.put(statement)
         t2 = time.time()
         print_t(">>> Program: ", program, "Time: ", t2 - self.timestamp_get_plan)
 
     def executor(self):
+        queue_empty_since = None
         while True:
             if callable(self.should_abort):
                 try:
@@ -654,11 +658,12 @@ class MiniSpecInterpreter:
                     print_t(f"[I] {msg}")
                     self.ret_queue.put(MiniSpecReturnValue(msg, True))
                     return
-            if not Statement.execution_queue.empty():
+            if not self.execution_queue.empty():
+                queue_empty_since = None
                 if self.timestamp_start_execution is None:
                     self.timestamp_start_execution = time.time()
                     print_t(">>> Start execution")
-                statement = Statement.execution_queue.get()
+                statement = self.execution_queue.get()
                 print_debug(f'Queue get statement: {statement}')
                 try:
                     ret_val = statement.eval()
@@ -692,6 +697,13 @@ class MiniSpecInterpreter:
                 self.execution_history.append(statement)
                 if callable(self.on_statement_executed):
                     try:
+                        meta = {
+                            "statement": str(statement),
+                            "queue_size": int(self.execution_queue.qsize()),
+                            "remaining_statements": int(max(0, self.program_count - 1)),
+                        }
+                        self.on_statement_executed(meta)
+                    except TypeError:
                         self.on_statement_executed()
                     except Exception:
                         pass
@@ -707,4 +719,28 @@ class MiniSpecInterpreter:
                     self.ret_queue.put(ret_val)
                     return
             else:
+                if self.program_count > 0:
+                    now = time.time()
+                    if queue_empty_since is None:
+                        queue_empty_since = now
+                    blocked_meta = {
+                        "reason": "queue_empty_before_program_complete",
+                        "queue_size": 0,
+                        "remaining_statements": int(self.program_count),
+                        "blocked_for_s": float(now - queue_empty_since),
+                    }
+                    if callable(self.on_execution_blocked):
+                        try:
+                            self.on_execution_blocked(blocked_meta)
+                        except Exception:
+                            pass
+                    if (now - queue_empty_since) >= 2.0:
+                        self.timestamp_end_execution = time.time()
+                        self.timestamp_start_execution = None
+                        msg = (
+                            "MiniSpec execution stalled: queue empty before all statements finished "
+                            f"(remaining={self.program_count})"
+                        )
+                        self.ret_queue.put(MiniSpecReturnValue(msg, False))
+                        return
                 time.sleep(0.005)
