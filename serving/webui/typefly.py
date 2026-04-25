@@ -783,7 +783,7 @@ class TypeFly:
             self.llm_controller.set_selected_pipeline(self.selected_baseline_id)
             task_thread = Thread(
                 target=self.llm_controller.execute_task_description,
-                args=(message, framework_mode),
+                args=(message, framework_mode, "manual_webui"),
             )
             task_thread.start()
             complete_response = ''

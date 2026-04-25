@@ -50,6 +50,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._active_command_name: Optional[str] = None
         self._active_command_value: Optional[float] = None
         self._active_command_start_time: Optional[float] = None
+        self._active_target_source: Optional[str] = None
         # Offboard warmup dominates per-command latency in px4_sim mode.
         # Keep it tunable and skip warmup entirely once already OFFBOARD+ARMED.
         self._offboard_warmup_s = max(0.0, float(os.getenv("TYPEFLY_PX4_OFFBOARD_WARMUP_S", "0.25")))
@@ -128,14 +129,34 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             self._setpoint_thread.join(timeout=1.0)
         self._setpoint_thread = None
 
-    def _set_active_target(self, x: float, y: float, z: float, yaw: Optional[float]):
+    def _set_active_target(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        yaw: Optional[float],
+        *,
+        source: Optional[str] = None,
+    ):
         with self._target_lock:
+            old_target = self._active_setpoint
+            old_command = self._active_command_name
             self._active_setpoint = (float(x), float(y), float(z), None if yaw is None else float(yaw))
             self._setpoint_stream_active = True
+            if source is not None:
+                self._active_target_source = str(source)
+            print_debug(
+                "[PX4-TARGET] "
+                f"source={self._active_target_source or 'unspecified'} "
+                f"old_command={old_command or 'None'} new_command={self._active_command_name or 'None'} "
+                f"old_target={old_target} new_target={self._active_setpoint}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
+            )
 
     def _clear_active_target(self):
         with self._target_lock:
             self._setpoint_stream_active = False
+            self._active_target_source = None
 
     def _now_us(self) -> int:
         return int(time.time() * 1_000_000)
@@ -323,7 +344,9 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             print_debug(
                 f"[PX4-SP] command={self._active_command_name or 'hold'} "
                 f"target=({x:.2f}, {y:.2f}, {z:.2f}) yaw="
-                f"{'None' if yaw is None else f'{yaw:.3f}'} publish_ts={publish_ts:.3f}",
+                f"{'None' if yaw is None else f'{yaw:.3f}'} "
+                f"source={self._active_target_source or 'unspecified'} "
+                f"publish_ts={publish_ts:.3f}",
                 env_var="TYPEFLY_VERBOSE_DEBUG",
             )
 
@@ -343,21 +366,61 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         return f"({position[0]:.2f}, {position[1]:.2f}, {position[2]:.2f})"
 
     def _begin_motion_debug(self, skill_name: str, command_value: float):
+        old_command = self._active_command_name
         self._active_command_name = skill_name
         self._active_command_value = float(command_value)
         self._active_command_start_time = time.time()
         print_debug(
             f"[PX4-MOVE] skill={skill_name} command_value={float(command_value):.2f}m "
-            f"start_time={self._active_command_start_time:.3f}"
+            f"start_time={self._active_command_start_time:.3f} "
+            f"old_command={old_command or 'None'} new_command={self._active_command_name}"
         )
 
     def _begin_rotation_debug(self, skill_name: str, command_value_deg: float):
+        old_command = self._active_command_name
         self._active_command_name = skill_name
         self._active_command_value = float(command_value_deg)
         self._active_command_start_time = time.time()
         print_debug(
             f"[PX4-MOVE] skill={skill_name} command_value={float(command_value_deg):.2f}deg "
-            f"start_time={self._active_command_start_time:.3f}"
+            f"start_time={self._active_command_start_time:.3f} "
+            f"old_command={old_command or 'None'} new_command={self._active_command_name}"
+        )
+
+    def get_active_setpoint_snapshot(self) -> dict:
+        with self._target_lock:
+            target = self._active_setpoint
+            return {
+                "command": self._active_command_name,
+                "target": target,
+                "target_source": self._active_target_source,
+            }
+
+    def begin_go_checkpoint_context(
+        self,
+        *,
+        checkpoint_id: str,
+        checkpoint_xyz: Tuple[float, float, float],
+    ):
+        old_snapshot = self.get_active_setpoint_snapshot()
+        (x, y, z), yaw = self._get_state()
+        self._active_command_name = "go_checkpoint"
+        self._active_command_value = None
+        self._active_command_start_time = time.time()
+        self._set_active_target(x, y, z, yaw, source="go_checkpoint_takeover")
+        new_snapshot = self.get_active_setpoint_snapshot()
+        print_debug(
+            "[GC-SETPOINT] "
+            f"begin checkpoint={checkpoint_id} checkpoint_target={checkpoint_xyz} "
+            f"old_command={old_snapshot.get('command')} old_target={old_snapshot.get('target')} "
+            f"new_command={new_snapshot.get('command')} new_target={new_snapshot.get('target')}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
+        )
+        print_debug(
+            "[GC-SETPOINT] "
+            f"handoff checkpoint={checkpoint_id} new_command={new_snapshot.get('command')} "
+            f"new_target={new_snapshot.get('target')} source={new_snapshot.get('target_source')}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
         )
 
     def _log_tracking_state(
@@ -391,7 +454,13 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
 
     def _move_to_local_target(self, target_x: float, target_y: float, target_z: float, yaw: float,
                               timeout_s: float = 5.0, pos_tol: float = 0.25) -> Tuple[bool, bool]:
-        self._set_active_target(target_x, target_y, target_z, yaw)
+        self._set_active_target(
+            target_x,
+            target_y,
+            target_z,
+            yaw,
+            source=self._active_command_name or "move_to_local_target",
+        )
         deadline = time.time() + timeout_s
         stable_since = None
         settle_s = 0.3
@@ -448,6 +517,11 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             return False, False
         if self._state_provider is not None and hasattr(self._state_provider, "wait_for_position"):
             if not self._state_provider.wait_for_position(timeout_s=2.0):
+                print_debug(
+                    f"[PX4-MOVE] command={skill_name} wait_for_position_failed; "
+                    f"active_command={self._active_command_name or 'None'} active_target={self._active_setpoint}",
+                    env_var="TYPEFLY_VERBOSE_DEBUG",
+                )
                 return False, False
         self._begin_motion_debug(skill_name, command_distance)
 
@@ -477,6 +551,11 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             return False, False
         if self._state_provider is not None and hasattr(self._state_provider, "wait_for_position"):
             if not self._state_provider.wait_for_position(timeout_s=2.0):
+                print_debug(
+                    f"[PX4-MOVE] command={skill_name} wait_for_position_failed; "
+                    f"active_command={self._active_command_name or 'None'} active_target={self._active_setpoint}",
+                    env_var="TYPEFLY_VERBOSE_DEBUG",
+                )
                 return False, False
         self._begin_rotation_debug(skill_name, command_degrees)
 
@@ -485,7 +564,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             print_debug(f"[PX4-MOVE] abort command={skill_name} reason=offboard_not_ready")
             return False, False
         target_yaw = self._normalize_angle(yaw + delta_yaw_rad)
-        self._set_active_target(x, y, z, target_yaw)
+        self._set_active_target(x, y, z, target_yaw, source=self._active_command_name or "rotate")
         print_debug(
             f"[PX4-MOVE] target_setpoint={self._format_position((x, y, z))} "
             f"yaw={target_yaw:.3f} completion=yaw_error<{yaw_tol:.2f}rad for 0.30s timeout={timeout_s:.2f}s"
@@ -593,7 +672,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         z_tolerance_m = 0.15
         settle_time_s = 1.0
         target_z = z - takeoff_height_m
-        self._set_active_target(x, y, target_z, yaw)
+        self._set_active_target(x, y, target_z, yaw, source="takeoff_hold")
         print(f"[PX4_SIM] takeoff start_z={z:.2f}, target_z={target_z:.2f} (NED)")
 
         stable_since = None
@@ -698,7 +777,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
                 f"[PX4-SCENARIO] reposition timeout target={self._format_position((tx, ty, tz))}"
             )
             return False
-        self._set_active_target(tx, ty, tz, target_yaw)
+        self._set_active_target(tx, ty, tz, target_yaw, source="scenario_reposition_hold")
         print_t(
             f"[PX4-SCENARIO] repositioned to target={self._format_position((tx, ty, tz))} yaw={target_yaw:.2f}"
         )
