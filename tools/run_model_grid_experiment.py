@@ -164,6 +164,10 @@ def _wait_for_pair_confirmation(pair: PairSpec, total_pairs: int, repeats: int):
 def _classify_failure(exc: Exception) -> str:
     text = str(exc or "").strip()
     lowered = text.lower()
+    if "provider_not_lmstudio" in lowered:
+        return "provider_not_lmstudio"
+    if "invalid_authorization_header" in lowered:
+        return "invalid_authorization_header"
     if "reasoning_only_empty_content" in lowered:
         return "reasoning_only_empty_content"
     if "context size has been exceeded" in lowered:
@@ -171,6 +175,42 @@ def _classify_failure(exc: Exception) -> str:
     if "context_length_exceeded" in lowered:
         return "context_size_exceeded"
     return "runtime_exception"
+
+
+def _is_fatal_failure_reason(reason: str) -> bool:
+    value = str(reason or "").strip().lower()
+    return value in {
+        "provider_not_lmstudio",
+        "invalid_authorization_header",
+        "robot_not_ready",
+        "offboard_takeoff_failed",
+        "ros_executor_lifecycle_failure",
+    } or value.startswith("run_cleanup_failed:")
+
+
+def _configure_lmstudio_runtime_or_raise(lmstudio_base_url: str):
+    normalized = str(lmstudio_base_url or "").strip().rstrip("/")
+    if not normalized:
+        raise RuntimeError("provider_not_lmstudio: empty_lmstudio_base_url")
+    if not normalized.endswith("/v1"):
+        normalized = f"{normalized}/v1"
+    os.environ["LLM_PROVIDER"] = "lmstudio"
+    os.environ["LMSTUDIO_BASE_URL"] = normalized
+    os.environ.setdefault("LMSTUDIO_API_KEY", "lmstudio")
+    os.environ["TYPEFLY_ENFORCE_LMSTUDIO"] = "1"
+
+    from controller.llm_wrapper import resolve_runtime_provider_config
+
+    runtime = resolve_runtime_provider_config()
+    provider = str(runtime.get("provider") or "")
+    base_url = str(runtime.get("base_url") or "")
+    if provider != "lmstudio":
+        raise RuntimeError(f"provider_not_lmstudio: provider={provider}")
+    if base_url != normalized:
+        raise RuntimeError(
+            f"provider_not_lmstudio: base_url_mismatch provider={provider} base_url={base_url} expected={normalized}"
+        )
+    print(f"[LLM-RUNTIME] provider={provider} base_url={base_url}")
 
 
 def _run_single_attempt(
@@ -201,6 +241,31 @@ def _run_single_attempt(
         controller.set_selected_pipeline(args.pipeline_id)
         controller.set_baseline_scene(args.scene_id)
         controller.apply_baseline_scene()
+        ready, ready_reason = controller.check_robot_ready_for_task()
+        if not ready:
+            mapped_reason = "offboard_takeoff_failed" if "offboard_not_ready" in str(ready_reason) else "robot_not_ready"
+            run_payload = {
+                "run_status": "failed",
+                "mission_success": False,
+                "termination_reason": "preflight_robot_not_ready",
+                "failure_reason": mapped_reason,
+                "completion_time_mission_sec": None,
+                "replan_count": 0,
+                "collision_count": 0,
+                "near_miss_count": 0,
+                "min_uav_worker_distance_m": None,
+                "completion_ratio": 0.0,
+                "completed_checkpoints": "",
+                "remaining_checkpoints": "",
+                "run_id": "",
+                "task_id": "",
+                "pair_index": pair.pair_index,
+                "pair_label": pair.pair_label,
+                "phase": pair.phase,
+            }
+            run_payload["_abort_batch"] = True
+            run_payload["_cleanup_issues"] = f"robot_not_ready:{ready_reason}"
+            return run_payload
         controller.planner.set_model(planner_model)
         controller.planner.set_agent_model_names(
             heartbeat_model_name=planner_model,
@@ -310,7 +375,7 @@ def _run_single_attempt(
                 run_payload["mission_success"] = False
                 run_payload["failure_reason"] = f"run_cleanup_failed:{issue_text}"
             run_payload["_abort_batch"] = True
-            run_payload["_cleanup_issues"] = issue_text
+            run_payload["_cleanup_issues"] = f"ros_executor_lifecycle_failure:{issue_text}"
 
 
 def _print_plan_summary(pair_specs: list[PairSpec], repeats: int):
@@ -326,6 +391,7 @@ def _print_plan_summary(pair_specs: list[PairSpec], repeats: int):
 
 
 def run(args: argparse.Namespace):
+    _configure_lmstudio_runtime_or_raise(args.lmstudio_base_url)
     logger = ExperimentResultLogger(csv_path=args.output_csv, xlsx_path=args.output_xlsx)
     done_keys = logger.load_completed_keys()
 
@@ -393,6 +459,7 @@ def run(args: argparse.Namespace):
 
             print(
                 f"[RUN] pair_index={pair.pair_index}/{total_pairs} repeat={repeat_idx}/{args.repeats} "
+                f"provider=lmstudio base_url={os.environ.get('LMSTUDIO_BASE_URL')} "
                 f"planner={planner_model_id} evaluator={evaluator_model_id} "
                 f"phase={pair.phase} pipeline={args.pipeline_id} scene={args.scene_id} zone={args.zone_id}"
             )
@@ -421,6 +488,12 @@ def run(args: argparse.Namespace):
             }
             logger.append_result(row)
             done_keys.add(key)
+            failure_reason = str(payload_for_log.get("failure_reason") or "")
+            if _is_fatal_failure_reason(failure_reason):
+                raise RuntimeError(
+                    f"[STOP] fatal run failure: pair_index={pair.pair_index} repeat={repeat_idx} "
+                    f"planner={planner_model_id} evaluator={evaluator_model_id} reason={failure_reason}"
+                )
             if abort_batch:
                 raise RuntimeError(
                     f"[STOP] cleanup verification failed after run "

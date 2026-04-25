@@ -3506,6 +3506,23 @@ class LLMController():
             self.stop_virtual_position_loop()
         self.controller_wait_takeoff = True
 
+    def check_robot_ready_for_task(self) -> tuple[bool, str]:
+        if bool(self.controller_wait_takeoff):
+            return False, "controller_wait_takeoff"
+        if self.robot_type == RobotType.PX4_SIM:
+            baseline_state = dict(self.baseline_scene_state or {})
+            if baseline_state and (not bool(baseline_state.get("repositioned"))):
+                return False, "reposition_failed"
+            nav_state = int(getattr(self.drone, "get_navigation_state", lambda: 0)() or 0)
+            arming_state = int(getattr(self.drone, "get_arming_state", lambda: 0)() or 0)
+            offboard_ready = (nav_state == 14 and arming_state == 2)
+            if not offboard_ready:
+                return False, f"offboard_not_ready(nav_state={nav_state},arming_state={arming_state})"
+            drone_pos = tuple(float(v) for v in (self.drone.get_drone_position() or (0.0, 0.0, 0.0)))
+            if drone_pos[2] > -0.2:
+                return False, f"uav_not_airborne(z={drone_pos[2]:.3f})"
+        return True, ""
+
     def shutdown_for_run_end(self):
         self.controller_wait_takeoff = True
         self._clear_runtime_replan_event()
