@@ -270,6 +270,8 @@ class LLMController():
         # PX4_SIM optional managed user-position publisher lifecycle
         self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
         self._owns_sim_user_publisher = False
+        self.virtual_position_active = False
+        self._virtual_position_thread: Optional[threading.Thread] = None
 
     def _default_active_objective_set(self) -> dict:
         return {
@@ -954,10 +956,14 @@ class LLMController():
                 if self.position_update_callback:
                     self.position_update_callback(x, y, z, "drone")
                 time.sleep(0.1)
-        threading.Thread(target=loop, daemon=True).start()
+        self._virtual_position_thread = threading.Thread(target=loop, daemon=True)
+        self._virtual_position_thread.start()
         
     def stop_virtual_position_loop(self):
         self.virtual_position_active = False
+        if self._virtual_position_thread is not None and self._virtual_position_thread.is_alive():
+            self._virtual_position_thread.join(timeout=1.0)
+        self._virtual_position_thread = None
 
 
     def skill_time(self) -> Tuple[float, bool]:
@@ -3469,9 +3475,6 @@ class LLMController():
         self.drone.connect()
         print_t("[C] Starting robot...")
 
-        # Start state provider before PX4_SIM takeoff so wrapper has live sim state.
-        self.start_uwb()
-
         if self.robot_type != RobotType.PX4_SIM:
             self.drone.takeoff()
             self.drone.move_up(0.25)
@@ -3487,15 +3490,93 @@ class LLMController():
 
     def stop_robot(self):
         print_t("[C] Drone is landing...")
-        self.drone.land()
+        try:
+            self.drone.land()
+        except Exception:
+            pass
         if self.enable_video:
-            self.drone.stop_stream()
+            try:
+                self.drone.stop_stream()
+            except Exception:
+                pass
         print_t("[C] Stopping UWB tracking...")
         self.stop_uwb()
         if self.robot_type != RobotType.PX4_SIM:
             print_t("[C] Stopping virtual position loop...")
             self.stop_virtual_position_loop()
         self.controller_wait_takeoff = True
+
+    def shutdown_for_run_end(self):
+        self.controller_wait_takeoff = True
+        self._clear_runtime_replan_event()
+        self._pending_heartbeat_replan_plan = None
+        self._pending_heartbeat_reason = ""
+        self._interrupt_pending_until_new_plan = False
+        self.interrupted_for_replan = False
+        self.entered_awaiting_replan_response = False
+        self.execution_resumed_from_new_plan = False
+        self.next_statement_executed_after_interrupt = False
+        self.execution_mode = "Waiting"
+        self.current_plan = None
+        self.execution_history = None
+
+        try:
+            self._stop_sim_user_position_publisher()
+        except Exception:
+            pass
+        try:
+            self.stop_virtual_position_loop()
+        except Exception:
+            pass
+        try:
+            self.stop_uwb()
+        except Exception:
+            pass
+        if self.enable_video:
+            try:
+                self.drone.stop_stream()
+            except Exception:
+                pass
+        if hasattr(self.drone, "shutdown"):
+            try:
+                self.drone.shutdown()
+            except Exception:
+                pass
+
+        with self._agent_eval_lock:
+            self._agent_eval_generation += 1
+            eval_thread = self._agent_eval_thread
+            self._agent_eval_inflight = False
+            self._agent_eval_thread = None
+            self._agent_ready_for_eval_records = []
+            self._agent_eval_results_pending_commit = []
+            self._agent_pending_replan_records = []
+        if eval_thread is not None and eval_thread.is_alive():
+            eval_thread.join(timeout=2.0)
+
+    def verify_no_active_run_artifacts(self) -> tuple[bool, list[str]]:
+        issues: list[str] = []
+        if self._virtual_position_thread is not None and self._virtual_position_thread.is_alive():
+            issues.append("virtual_position_thread_alive")
+        if self._agent_eval_thread is not None and self._agent_eval_thread.is_alive():
+            issues.append("agent_eval_thread_alive")
+        if getattr(self.state_provider, "_spin_thread", None) is not None:
+            spin_thread = getattr(self.state_provider, "_spin_thread")
+            if spin_thread is not None and spin_thread.is_alive():
+                issues.append("state_provider_spin_thread_alive")
+        if hasattr(self.drone, "has_active_runtime"):
+            try:
+                if self.drone.has_active_runtime():
+                    issues.append("px4_wrapper_runtime_active")
+            except Exception:
+                issues.append("px4_wrapper_runtime_check_failed")
+        if self._runtime_replan_event.is_set():
+            issues.append("runtime_replan_event_set")
+        if self._pending_heartbeat_replan_plan:
+            issues.append("pending_heartbeat_replan_plan_not_cleared")
+        if self._pending_heartbeat_reason:
+            issues.append("pending_heartbeat_reason_not_cleared")
+        return (len(issues) == 0), issues
 
     def capture_loop(self, asyncio_loop):
         print_t("[C] Start capture loop...")
