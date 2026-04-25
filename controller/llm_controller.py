@@ -1004,6 +1004,39 @@ class LLMController():
         checkpoint = BENCHMARK_CHECKPOINTS_BY_ID.get(checkpoint_key)
         if checkpoint is None:
             raise ValueError(f"Unknown checkpoint_id `{checkpoint_id}`")
+        wrapper_snapshot = {}
+        current_pos = None
+        if hasattr(self.drone, "get_drone_position"):
+            try:
+                current_pos = self.drone.get_drone_position()
+            except Exception:
+                current_pos = None
+        if hasattr(self.drone, "get_active_setpoint_snapshot"):
+            try:
+                wrapper_snapshot = dict(self.drone.get_active_setpoint_snapshot() or {})
+            except Exception:
+                wrapper_snapshot = {}
+        print_debug(
+            "[GC-SETPOINT] "
+            f"begin checkpoint={checkpoint_key} checkpoint_pos=({checkpoint.x:.2f}, {checkpoint.y:.2f}) "
+            f"old_command={wrapper_snapshot.get('command')} old_target={wrapper_snapshot.get('target')} "
+            f"current_drone_pos={current_pos}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
+        )
+        if isinstance(self.drone, Px4SimRobotWrapper):
+            try:
+                checkpoint_z = 0.0
+                if isinstance(current_pos, (tuple, list)) and len(current_pos) >= 3:
+                    checkpoint_z = float(current_pos[2])
+                self.drone.begin_go_checkpoint_context(
+                    checkpoint_id=checkpoint_key,
+                    checkpoint_xyz=(float(checkpoint.x), float(checkpoint.y), checkpoint_z),
+                )
+            except Exception as exc:
+                print_debug(
+                    f"[GC-SETPOINT] begin_go_checkpoint_context_failed checkpoint={checkpoint_key} error={exc}",
+                    env_var="TYPEFLY_VERBOSE_DEBUG",
+                )
         # Ensure dwell/completion tracking follows the actual commanded checkpoint,
         # instead of falling back to lexical benchmark order.
         self.set_benchmark_progress_focus_checkpoint(checkpoint_key)
@@ -1196,6 +1229,17 @@ class LLMController():
             f"event=gc_end checkpoint={checkpoint.id} reached={reached} stop_reason={stop_reason}",
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
+        if hasattr(self.drone, "get_active_setpoint_snapshot"):
+            try:
+                end_snapshot = dict(self.drone.get_active_setpoint_snapshot() or {})
+            except Exception:
+                end_snapshot = {}
+            print_debug(
+                "[GC-SETPOINT] "
+                f"end checkpoint={checkpoint.id} command={end_snapshot.get('command')} "
+                f"target={end_snapshot.get('target')} source={end_snapshot.get('target_source')}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
+            )
         should_request_replan = bool(
             preempted_for_replan
             or str(stop_reason).startswith("collision_probability_high")
@@ -1990,7 +2034,54 @@ class LLMController():
         self._sim_user_publisher_proc = None
         self._owns_sim_user_publisher = False
 
-    def execute_task_description(self, task_description: str, framework_mode: str = MODE_TYPEFLY_ONESHOT):
+    def _emit_gc_path_diagnostics(
+        self,
+        *,
+        execution_source: str,
+        selected_framework: str,
+        pipeline,
+        objective_override: dict,
+    ):
+        wrapper = getattr(self, "drone", None)
+        wrapper_name = type(wrapper).__name__ if wrapper is not None else "None"
+        state_provider = getattr(self, "state_provider", None)
+        state_provider_name = type(state_provider).__name__ if state_provider is not None else "None"
+        gc_skill = self.low_level_skillset.get_skill("go_checkpoint")
+        gc_callable = getattr(gc_skill, "skill_callable", None) if gc_skill is not None else None
+        gc_callable_name = getattr(gc_callable, "__qualname__", str(gc_callable))
+        gc_callable_module = getattr(gc_callable, "__module__", "")
+        impl_callable = self.skill_go_checkpoint
+        impl_name = getattr(impl_callable, "__qualname__", str(impl_callable))
+        impl_module = getattr(impl_callable, "__module__", "")
+        objective_summary = {
+            "has_override": bool(objective_override),
+            "override_source": str(objective_override.get("source") or ""),
+            "active_zone_ids": list((self.active_objective_set or {}).get("active_zone_ids") or []),
+            "active_checkpoint_count": len(list((self.active_objective_set or {}).get("active_checkpoint_ids") or [])),
+            "scene_id": str(getattr(self, "baseline_scene_id", "")),
+        }
+        print_t(
+            "[GC-PATH] "
+            f"mode={execution_source} robot_type={self.robot_type} "
+            f"robot_wrapper={wrapper_name} state_provider={state_provider_name}"
+        )
+        print_t(
+            "[GC-PATH] "
+            f"framework_mode={selected_framework} pipeline={pipeline.id}"
+        )
+        print_t(
+            "[GC-PATH] "
+            f"gc_callable={gc_callable_module}.{gc_callable_name} "
+            f"go_checkpoint_impl={impl_module}.{impl_name}"
+        )
+        print_t(f"[GC-PATH] objective={objective_summary}")
+
+    def execute_task_description(
+        self,
+        task_description: str,
+        framework_mode: str = MODE_TYPEFLY_ONESHOT,
+        execution_source: str = "manual_or_unknown",
+    ):
         if self.controller_wait_takeoff:
             self.append_message("[Warning] Controller is waiting for takeoff...")
             return
@@ -2016,6 +2107,12 @@ class LLMController():
         objective_override = dict(self._active_objective_set_override or {})
         self.active_objective_set = (
             objective_override if objective_override else self._resolve_active_objective_set(task_description)
+        )
+        self._emit_gc_path_diagnostics(
+            execution_source=str(execution_source or "manual_or_unknown"),
+            selected_framework=selected_framework,
+            pipeline=pipeline,
+            objective_override=objective_override,
         )
         self._reset_benchmark_progress_tracking()
         self._task_id_counter += 1

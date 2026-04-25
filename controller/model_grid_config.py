@@ -5,20 +5,18 @@ from __future__ import annotations
 # The runner performs a visibility check and can resolve simple
 # case-insensitive ID differences against currently visible models.
 DEFAULT_PLANNER_MODEL_IDS: list[str] = [
-    "openai/gpt-oss-20b",
     "meta-llama-3.1-8b-instruct",
     "google/gemma-2-9b",
 ]
 
 DEFAULT_EVALUATOR_MODEL_IDS: list[str] = [
-    "openai/gpt-oss-20b",
     "meta-llama-3.1-8b-instruct",
     "google/gemma-2-9b",
     "deepseek/deepseek-r1-0528-qwen3-8b",
 ]
 
-DEFAULT_FIXED_PLANNER_MODEL = "openai/gpt-oss-20b"
-DEFAULT_FIXED_EVALUATOR_MODEL = "openai/gpt-oss-20b"
+DEFAULT_FIXED_PLANNER_MODEL = "meta-llama-3.1-8b-instruct"
+DEFAULT_FIXED_EVALUATOR_MODEL = "meta-llama-3.1-8b-instruct"
 
 DEFAULT_PIPELINE_ID = "agent"
 DEFAULT_SCENE_ID = "SCENE3"
