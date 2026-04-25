@@ -36,6 +36,8 @@ RUN_COLUMNS = [
     "baseline_scene_id",
     "selected_baseline_id",
     "selected_baseline_name",
+    "framework_mode",
+    "mission_success",
     "trigger_type",
     "trigger_params",
     "prompt_variant",
@@ -54,6 +56,10 @@ RUN_COLUMNS = [
     "min_uav_worker_distance_m",
     "completed_checkpoints",
     "completion_ratio",
+    "planner_model_id",
+    "evaluator_model_id",
+    "model_pair_id",
+    "model_pair_label",
     "generated_plan",
     "final_plan_source",
 ]
@@ -109,6 +115,7 @@ class _RunRecord:
     planner_info: Dict = field(default_factory=dict)
     run_context: Dict = field(default_factory=dict)
     archive_enabled: bool = True
+    results_only: bool = False
     runtime_trace: List[Dict] = field(default_factory=list)
     planning_trace: List[Dict] = field(default_factory=list)
     llm_call_count: int = 0
@@ -279,6 +286,7 @@ class TaskRunLogger:
                 start_iso=self._to_iso(now),
                 initial_snapshot=initial_snapshot or {},
                 archive_enabled=bool(archive_enabled),
+                results_only=bool((run_context or {}).get("results_only", False)),
                 run_context=dict(run_context or {}),
             )
             self._consume_snapshot(initial_snapshot, now=now)
@@ -535,6 +543,7 @@ class TaskRunLogger:
             "task_id": active.task_id,
             "selected_baseline_id": active.run_context.get("selected_baseline_id", ""),
             "selected_baseline_name": active.run_context.get("selected_baseline_name", ""),
+            "framework_mode": active.run_context.get("framework_mode", ""),
             "scene_id": final.get("baseline_scene_id") or active.run_context.get("baseline_scene_id", ""),
             "run_status": active.run_status,
             "mission_success": active.mission_success,
@@ -569,6 +578,10 @@ class TaskRunLogger:
             "next_statement_executed_after_interrupt": bool(active.next_statement_executed_after_interrupt),
             "completed_checkpoints": list(true_completed),
             "completion_ratio": completion_ratio,
+            "planner_model_id": active.run_context.get("planner_model_id", ""),
+            "evaluator_model_id": active.run_context.get("evaluator_model_id", ""),
+            "model_pair_id": active.run_context.get("model_pair_id", ""),
+            "model_pair_label": active.run_context.get("model_pair_label", ""),
             "runtime_trace_count": len(active.runtime_trace),
             "planning_trace_count": len(active.planning_trace),
         }
@@ -606,10 +619,12 @@ class TaskRunLogger:
         if active_scope_ids:
             completion_ratio = float(len([cid for cid in true_completed if cid in set(active_scope_ids)])) / float(len(active_scope_ids))
 
-        for row in active.runtime_trace:
-            self._append_jsonl_line(self.runtime_trace_jsonl_path, row)
-        for row in active.planning_trace:
-            self._append_jsonl_line(self.planning_trace_jsonl_path, row)
+        persist_traces = not bool(active.results_only)
+        if persist_traces:
+            for row in active.runtime_trace:
+                self._append_jsonl_line(self.runtime_trace_jsonl_path, row)
+            for row in active.planning_trace:
+                self._append_jsonl_line(self.planning_trace_jsonl_path, row)
 
         planner_info = active.planner_info or {}
         final_mission_summary = dict(final.get("final_mission_summary") or {})
@@ -633,6 +648,8 @@ class TaskRunLogger:
             "baseline_scene_id": active.run_context.get("baseline_scene_id", ""),
             "selected_baseline_id": active.run_context.get("selected_baseline_id", ""),
             "selected_baseline_name": active.run_context.get("selected_baseline_name", ""),
+            "framework_mode": active.run_context.get("framework_mode", ""),
+            "mission_success": bool(active.mission_success),
             "trigger_type": active.run_context.get("trigger_type", ""),
             "trigger_params": self._json_text(active.run_context.get("trigger_params", {})),
             "prompt_variant": active.run_context.get("prompt_variant", ""),
@@ -651,7 +668,11 @@ class TaskRunLogger:
             "min_uav_worker_distance_m": active.min_uav_worker_distance_m,
             "completed_checkpoints": self._json_text(true_completed),
             "completion_ratio": completion_ratio,
-            "generated_plan": active.actual_plan_text,
+            "planner_model_id": active.run_context.get("planner_model_id", planner_info.get("planner_model_id", "")),
+            "evaluator_model_id": active.run_context.get("evaluator_model_id", planner_info.get("evaluator_model_id", "")),
+            "model_pair_id": active.run_context.get("model_pair_id", planner_info.get("model_pair_id", "")),
+            "model_pair_label": active.run_context.get("model_pair_label", planner_info.get("model_pair_label", "")),
+            "generated_plan": "" if bool(active.results_only) else active.actual_plan_text,
             "final_plan_source": planner_info.get("final_plan_source", ""),
         }
         run_summary = {
@@ -706,6 +727,11 @@ class TaskRunLogger:
             "next_statement_executed_after_interrupt": bool(active.next_statement_executed_after_interrupt),
             "runtime_trace_count": len(active.runtime_trace),
             "planning_trace_count": len(active.planning_trace),
+            "planner_model_id": row["planner_model_id"],
+            "evaluator_model_id": row["evaluator_model_id"],
+            "model_pair_id": row["model_pair_id"],
+            "model_pair_label": row["model_pair_label"],
+            "results_only": bool(active.results_only),
         }
         debug_payload = {
             "run_id": active.run_id,
@@ -719,28 +745,32 @@ class TaskRunLogger:
             },
             "runtime_trace_count": len(active.runtime_trace),
             "planning_trace_count": len(active.planning_trace),
+            "results_only": bool(active.results_only),
         }
 
-        runtime_per_run_path = self._run_file_path(active.run_id, "runtime_trace.jsonl")
-        planning_per_run_path = self._run_file_path(active.run_id, "planning_trace.jsonl")
         summary_per_run_path = self._run_file_path(active.run_id, "summary.json")
-        debug_per_run_path = self._run_file_path(active.run_id, "debug.json")
-
-        for trace_row in active.runtime_trace:
-            self._append_jsonl_line(runtime_per_run_path, trace_row)
-        for trace_row in active.planning_trace:
-            self._append_jsonl_line(planning_per_run_path, trace_row)
+        if persist_traces:
+            runtime_per_run_path = self._run_file_path(active.run_id, "runtime_trace.jsonl")
+            planning_per_run_path = self._run_file_path(active.run_id, "planning_trace.jsonl")
+            for trace_row in active.runtime_trace:
+                self._append_jsonl_line(runtime_per_run_path, trace_row)
+            for trace_row in active.planning_trace:
+                self._append_jsonl_line(planning_per_run_path, trace_row)
         self._write_json(summary_per_run_path, run_summary)
-        self._write_json(debug_per_run_path, debug_payload)
+        if not bool(active.results_only):
+            debug_per_run_path = self._run_file_path(active.run_id, "debug.json")
+            self._write_json(debug_per_run_path, debug_payload)
 
         wb = self._load_workbook_resilient()
         if wb is not None:
             ws = wb[RUNS_SHEET]
             ws.append([row[col] for col in RUN_COLUMNS])
-            ws_debug = wb[DEBUG_SHEET]
-            ws_debug.append([active.run_id, self._to_iso(end_ts), self._json_text(debug_payload)])
+            if not bool(active.results_only):
+                ws_debug = wb[DEBUG_SHEET]
+                ws_debug.append([active.run_id, self._to_iso(end_ts), self._json_text(debug_payload)])
             wb.save(self.excel_path)
-        self._append_jsonl_line(self.debug_jsonl_path, debug_payload)
+        if not bool(active.results_only):
+            self._append_jsonl_line(self.debug_jsonl_path, debug_payload)
 
     def _warn_once_disabled(self):
         if self._warned_disabled:

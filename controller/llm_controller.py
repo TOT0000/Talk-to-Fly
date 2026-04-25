@@ -29,6 +29,10 @@ from .scenario_manager import ScenarioManager
 from .safety_context import SafetyContext
 from .task_run_logger import TaskRunLogger
 from .pipeline_registry import get_pipeline_config, normalize_pipeline_id
+from .manual_model_pair_config import (
+    get_manual_model_pair,
+    normalize_manual_model_pair_id,
+)
 from .baseline_scenes import (
     BASELINE_SCENES,
     BaselineScene,
@@ -192,6 +196,11 @@ class LLMController():
         self.framework_mode = MODE_TYPEFLY_ONESHOT
         self.selected_pipeline_id = normalize_pipeline_id(os.getenv("TYPEFLY_BASELINE_ID", "baseline1"))
         self.archive_enabled = True
+        self.manual_model_pair_id = normalize_manual_model_pair_id(
+            os.getenv("TYPEFLY_MANUAL_MODEL_PAIR_ID", "")
+        )
+        self._run_model_lock_active = False
+        self._run_locked_model_pair: Optional[dict] = None
         self.near_miss_count = 0
         self.collision_count = 0
         self.min_uav_worker_distance_m: Optional[float] = None
@@ -266,6 +275,7 @@ class LLMController():
         self._interrupt_pending_until_new_plan = False
         self.langgraph_runner = LangGraphOrchestrationRunner(self)
         self.set_selected_pipeline(self.selected_pipeline_id)
+        self.set_manual_model_pair(self.manual_model_pair_id)
 
         # PX4_SIM optional managed user-position publisher lifecycle
         self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
@@ -2115,6 +2125,9 @@ class LLMController():
             objective_override=objective_override,
         )
         self._reset_benchmark_progress_tracking()
+        selected_pair = self.set_manual_model_pair(self.manual_model_pair_id)
+        self._run_model_lock_active = True
+        self._run_locked_model_pair = dict(selected_pair)
         self._task_id_counter += 1
         task_id = f"task_{self._task_id_counter:05d}"
         initial_snapshot = self.get_live_ui_snapshot()
@@ -2137,7 +2150,25 @@ class LLMController():
                 "scene_id": self.baseline_scene_id,
                 "baseline_scene_id": self.baseline_scene_id,
                 "framework_mode": selected_framework,
+                "execution_source": str(execution_source or "manual_or_unknown"),
+                "results_only": bool(
+                    str(execution_source or "").strip().lower() == "manual_webui"
+                    and bool(self.archive_enabled)
+                ),
+                "model_pair_id": selected_pair.get("pair_id", ""),
+                "model_pair_label": selected_pair.get("label", ""),
+                "planner_model_id": selected_pair.get("planner_model_id", ""),
+                "evaluator_model_id": selected_pair.get("evaluator_model_id", ""),
             },
+        )
+        self.task_run_logger.update_planner_info(
+            {
+                "planner_model_id": selected_pair.get("planner_model_id", ""),
+                "heartbeat_model_id": selected_pair.get("planner_model_id", ""),
+                "evaluator_model_id": selected_pair.get("evaluator_model_id", ""),
+                "model_pair_id": selected_pair.get("pair_id", ""),
+                "model_pair_label": selected_pair.get("label", ""),
+            }
         )
         self.append_message('[TASK]: ' + task_description)
         ret_val = None
@@ -2487,6 +2518,12 @@ class LLMController():
             next_statement_executed_after_interrupt=bool(final_summary.get("next_statement_executed_after_interrupt")),
         )
         self.task_run_logger.end_run(run_status=run_status)
+        should_auto_save = (
+            str(execution_source or "").strip().lower() == "manual_webui"
+            and bool(self.archive_enabled)
+        )
+        if should_auto_save:
+            self.task_run_logger.save_pending_run()
         monitor_stop.set()
         if monitor_thread is not None:
             monitor_thread.join(timeout=1.0)
@@ -2496,12 +2533,42 @@ class LLMController():
         self.execution_history = None
         self.execution_mode = "Waiting"
         self.framework_mode = MODE_TYPEFLY_ONESHOT
+        self._run_model_lock_active = False
+        self._run_locked_model_pair = None
 
     def get_active_scenario_name(self) -> str:
         return self.scenario_manager.selected_name()
 
     def set_archive_enabled(self, enabled: bool):
         self.archive_enabled = bool(enabled)
+
+    def get_selected_manual_model_pair(self) -> dict:
+        pair = get_manual_model_pair(self.manual_model_pair_id)
+        return {
+            "pair_id": pair.pair_id,
+            "label": pair.label,
+            "planner_model_id": pair.planner_model_id,
+            "evaluator_model_id": pair.evaluator_model_id,
+        }
+
+    def set_manual_model_pair(self, pair_id: str) -> dict:
+        if bool(self._run_model_lock_active) and self._run_locked_model_pair:
+            return dict(self._run_locked_model_pair)
+        normalized = normalize_manual_model_pair_id(pair_id)
+        pair = get_manual_model_pair(normalized)
+        self.manual_model_pair_id = normalized
+        self.planner.set_model(pair.planner_model_id)
+        self.planner.set_agent_model_names(
+            heartbeat_model_name=pair.planner_model_id,
+            evaluator_model_name=pair.evaluator_model_id,
+        )
+        selected = {
+            "pair_id": pair.pair_id,
+            "label": pair.label,
+            "planner_model_id": pair.planner_model_id,
+            "evaluator_model_id": pair.evaluator_model_id,
+        }
+        return selected
 
     def set_selected_pipeline(self, pipeline_id: str) -> str:
         self.selected_pipeline_id = normalize_pipeline_id(pipeline_id)
@@ -3124,6 +3191,7 @@ class LLMController():
             "framework_name": str(self.framework_mode),
             "selected_baseline_id": self.selected_pipeline_id,
             "selected_baseline_name": self.get_selected_pipeline_config().name,
+            "model_pair": self.get_selected_manual_model_pair(),
             "archive_enabled": bool(self.archive_enabled),
             "mode_name": self.get_active_scenario_name(),
             "execution_mode": self.execution_mode,
