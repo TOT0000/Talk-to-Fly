@@ -403,19 +403,23 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         checkpoint_xyz: Tuple[float, float, float],
     ):
         old_snapshot = self.get_active_setpoint_snapshot()
-        (x, y, z), yaw = self._get_state()
+        (x, y, z), _ = self._get_state()
+        cp_x = float(checkpoint_xyz[0])
+        cp_y = float(checkpoint_xyz[1])
+        cp_z = float(checkpoint_xyz[2]) if len(tuple(checkpoint_xyz)) >= 3 else float(z)
+        takeover_yaw = math.atan2(cp_y - float(y), cp_x - float(x))
+        print_debug(
+            "[GC-SETPOINT] "
+            f"begin checkpoint={checkpoint_id} checkpoint_xyz={checkpoint_xyz} "
+            f"current_position=({x:.3f}, {y:.3f}, {z:.3f}) "
+            f"old_command={old_snapshot.get('command')} old_target={old_snapshot.get('target')}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
+        )
         self._active_command_name = "go_checkpoint"
         self._active_command_value = None
         self._active_command_start_time = time.time()
-        self._set_active_target(x, y, z, yaw, source="go_checkpoint_takeover")
+        self._set_active_target(cp_x, cp_y, cp_z, takeover_yaw, source="go_checkpoint_takeover")
         new_snapshot = self.get_active_setpoint_snapshot()
-        print_debug(
-            "[GC-SETPOINT] "
-            f"begin checkpoint={checkpoint_id} checkpoint_target={checkpoint_xyz} "
-            f"old_command={old_snapshot.get('command')} old_target={old_snapshot.get('target')} "
-            f"new_command={new_snapshot.get('command')} new_target={new_snapshot.get('target')}",
-            env_var="TYPEFLY_VERBOSE_DEBUG",
-        )
         print_debug(
             "[GC-SETPOINT] "
             f"handoff checkpoint={checkpoint_id} new_command={new_snapshot.get('command')} "

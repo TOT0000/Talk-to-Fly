@@ -68,7 +68,7 @@ class _FakePx4Drone(_FakePx4Base, _DroneKinematics):
     def begin_go_checkpoint_context(self, *, checkpoint_id: str, checkpoint_xyz):
         self.takeover_calls.append((checkpoint_id, checkpoint_xyz))
         self._active_command_name = "go_checkpoint"
-        self._active_setpoint = (self.x, self.y, -1.5, self.yaw)
+        self._active_setpoint = (float(checkpoint_xyz[0]), float(checkpoint_xyz[1]), -1.5, self.yaw)
         self._active_target_source = "go_checkpoint_takeover"
 
 
@@ -129,7 +129,8 @@ def test_px4_takeover_overrides_scenario_reposition_hold(monkeypatch):
 
     assert snapshot["command"] == "go_checkpoint"
     assert snapshot["target_source"] == "go_checkpoint_takeover"
-    assert snapshot["target"] == (1.0, 1.0, -1.5, 0.1)
+    assert snapshot["target"][0:3] == (1.6, 4.5, 0.0)
+    assert snapshot["target"][0:2] != (1.0, 1.0)
 
 
 def test_px4_publish_uses_takeover_source_after_gc_handoff(monkeypatch):
@@ -181,3 +182,4 @@ def test_px4_publish_uses_takeover_source_after_gc_handoff(monkeypatch):
     assert "command=go_checkpoint" in px4_sp_logs[-1]
     assert "source=go_checkpoint_takeover" in px4_sp_logs[-1]
     assert "scenario_reposition_hold" not in px4_sp_logs[-1]
+    assert "target=(1.60, 4.50, 0.00)" in px4_sp_logs[-1]

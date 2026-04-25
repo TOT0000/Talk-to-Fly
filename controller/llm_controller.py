@@ -1025,9 +1025,12 @@ class LLMController():
         )
         if isinstance(self.drone, Px4SimRobotWrapper):
             try:
+                checkpoint_z = 0.0
+                if isinstance(current_pos, (tuple, list)) and len(current_pos) >= 3:
+                    checkpoint_z = float(current_pos[2])
                 self.drone.begin_go_checkpoint_context(
                     checkpoint_id=checkpoint_key,
-                    checkpoint_xyz=(float(checkpoint.x), float(checkpoint.y), 0.0),
+                    checkpoint_xyz=(float(checkpoint.x), float(checkpoint.y), checkpoint_z),
                 )
             except Exception as exc:
                 print_debug(
