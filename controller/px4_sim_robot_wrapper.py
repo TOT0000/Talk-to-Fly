@@ -189,6 +189,34 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             or self._context is not None
         )
 
+    def shutdown(self):
+        self._clear_active_target()
+        self._stop_setpoint_loop()
+        if self._node is not None:
+            try:
+                self._node.destroy_node()
+            except Exception:
+                pass
+            self._node = None
+        self._pub_offboard_mode = None
+        self._pub_traj_sp = None
+        self._pub_vehicle_cmd = None
+        if self._context is not None:
+            try:
+                if self._context.ok():
+                    self._context.shutdown()
+            except Exception:
+                pass
+        self._context = None
+        self._rclpy = None
+
+    def has_active_runtime(self) -> bool:
+        return bool(
+            (self._setpoint_thread is not None and self._setpoint_thread.is_alive())
+            or self._node is not None
+            or self._context is not None
+        )
+
     def _publish_vehicle_command(self, command: int, param1: float = 0.0, param2: float = 0.0, param7: float = 0.0):
         msg = self._msg_VehicleCommand()
         msg.timestamp = self._now_us()
