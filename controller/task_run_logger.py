@@ -60,6 +60,8 @@ RUN_COLUMNS = [
     "evaluator_model_id",
     "model_pair_id",
     "model_pair_label",
+    "lmstudio_base_url",
+    "lmstudio_connected",
     "generated_plan",
     "final_plan_source",
 ]
@@ -582,6 +584,8 @@ class TaskRunLogger:
             "evaluator_model_id": active.run_context.get("evaluator_model_id", ""),
             "model_pair_id": active.run_context.get("model_pair_id", ""),
             "model_pair_label": active.run_context.get("model_pair_label", ""),
+            "lmstudio_base_url": active.run_context.get("lmstudio_base_url", ""),
+            "lmstudio_connected": bool(active.run_context.get("lmstudio_connected", False)),
             "runtime_trace_count": len(active.runtime_trace),
             "planning_trace_count": len(active.planning_trace),
         }
@@ -672,6 +676,8 @@ class TaskRunLogger:
             "evaluator_model_id": active.run_context.get("evaluator_model_id", planner_info.get("evaluator_model_id", "")),
             "model_pair_id": active.run_context.get("model_pair_id", planner_info.get("model_pair_id", "")),
             "model_pair_label": active.run_context.get("model_pair_label", planner_info.get("model_pair_label", "")),
+            "lmstudio_base_url": active.run_context.get("lmstudio_base_url", ""),
+            "lmstudio_connected": bool(active.run_context.get("lmstudio_connected", False)),
             "generated_plan": "" if bool(active.results_only) else active.actual_plan_text,
             "final_plan_source": planner_info.get("final_plan_source", ""),
         }
@@ -731,6 +737,8 @@ class TaskRunLogger:
             "evaluator_model_id": row["evaluator_model_id"],
             "model_pair_id": row["model_pair_id"],
             "model_pair_label": row["model_pair_label"],
+            "lmstudio_base_url": row["lmstudio_base_url"],
+            "lmstudio_connected": bool(row["lmstudio_connected"]),
             "results_only": bool(active.results_only),
         }
         debug_payload = {

@@ -284,7 +284,7 @@ class TypeFly:
             self.baseline_selector.change(
                 fn=self.set_selected_baseline,
                 inputs=[self.baseline_selector],
-                outputs=[self.scenario_status],
+                outputs=[self.scenario_status, self.model_pair_status],
             )
             self.model_pair_selector.change(
                 fn=self.set_model_pair,
@@ -671,26 +671,46 @@ class TypeFly:
         normalized = self.llm_controller.set_selected_pipeline(baseline_id)
         self.selected_baseline_id = normalized
         cfg = PIPELINE_REGISTRY[normalized]
-        return f"Baseline switched to `{cfg.id}` ({cfg.name})."
+        return (
+            f"Baseline switched to `{cfg.id}` ({cfg.name}).",
+            self.render_model_pair_status(),
+        )
 
     def render_model_pair_status(self):
         pair = get_manual_model_pair(self.selected_model_pair_id)
+        lm = self.llm_controller.get_lmstudio_connectivity_status()
+        current_pipeline = str(getattr(self, "selected_baseline_id", "") or "")
+        pipeline_note = (
+            "active for Agent-Feedback-Eval"
+            if current_pipeline == "agent"
+            else f"stored (current pipeline: `{current_pipeline or 'n/a'}`)"
+        )
+        model_preview = list(lm.get("model_ids") or [])[:6]
+        model_preview_text = ", ".join(model_preview) if model_preview else "(none)"
+        warning_lines = []
+        for warning in list(lm.get("warnings") or []):
+            warning_lines.append(f"- ⚠️ {warning}")
+        if lm.get("error"):
+            warning_lines.append(f"- ❌ lmstudio_error: `{lm.get('error')}`")
+        warning_block = "\n".join(warning_lines) if warning_lines else "- ✅ selected planner/evaluator models visible in `/v1/models`"
         return (
             "### Selected Model Pair\n"
             f"- pair id: `{pair.pair_id}`\n"
             f"- planner model id: `{pair.planner_model_id}`\n"
-            f"- evaluator model id: `{pair.evaluator_model_id}`"
+            f"- evaluator model id: `{pair.evaluator_model_id}`\n"
+            f"- pipeline behavior: {pipeline_note}\n"
+            f"- LM Studio provider: `{lm.get('provider', 'n/a')}`\n"
+            f"- LM Studio base_url: `{lm.get('base_url', 'n/a')}`\n"
+            f"- LM Studio api key: `{lm.get('api_key_masked', '(n/a)')}`\n"
+            f"- LM Studio connected: `{bool(lm.get('connected'))}`\n"
+            f"- visible model ids: {model_preview_text}\n"
+            f"{warning_block}"
         )
 
     def set_model_pair(self, pair_id: str):
         selected = self.llm_controller.set_manual_model_pair(pair_id)
         self.selected_model_pair_id = selected.get("pair_id", normalize_manual_model_pair_id(pair_id))
-        pair_status = (
-            "### Selected Model Pair\n"
-            f"- pair id: `{selected.get('pair_id', '')}`\n"
-            f"- planner model id: `{selected.get('planner_model_id', '')}`\n"
-            f"- evaluator model id: `{selected.get('evaluator_model_id', '')}`"
-        )
+        pair_status = self.render_model_pair_status()
         return f"Model pair switched to `{selected.get('label', self.selected_model_pair_id)}`.", pair_status
 
     def set_archive_enabled(self, enabled: bool):

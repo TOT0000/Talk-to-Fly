@@ -3,12 +3,15 @@ from dataclasses import replace
 import math
 import queue, time, os, sys, subprocess
 import re
+import json
 from collections import deque
 from typing import Optional, Tuple
 import asyncio
 import uuid
 import threading
 import numpy as np
+from urllib import request as urllib_request
+from urllib import error as urllib_error
 
 from .shared_frame import SharedFrame, Frame
 from .gcs_safety_assessment import GcsSafetyAssessmentService
@@ -33,6 +36,7 @@ from .manual_model_pair_config import (
     get_manual_model_pair,
     normalize_manual_model_pair_id,
 )
+from .llm_wrapper import resolve_runtime_provider_config
 from .baseline_scenes import (
     BASELINE_SCENES,
     BaselineScene,
@@ -273,6 +277,8 @@ class LLMController():
         self.execution_resumed_from_new_plan = False
         self.next_statement_executed_after_interrupt = False
         self._interrupt_pending_until_new_plan = False
+        self._last_exec_flow_blocked_log_ts = 0.0
+        self._last_exec_flow_blocked_signature = ""
         self.langgraph_runner = LangGraphOrchestrationRunner(self)
         self.set_selected_pipeline(self.selected_pipeline_id)
         self.set_manual_model_pair(self.manual_model_pair_id)
@@ -653,6 +659,10 @@ class LLMController():
         required_dwell = float(CHECKPOINT_DWELL_SECONDS)
         dwell_bucket = int(dwell_seconds / 0.5)
         if self._benchmark_prev_target != current_target:
+            print_t(
+                "[BENCHMARK-TARGET] "
+                f"current_target_changed from={self._benchmark_prev_target} to={current_target}"
+            )
             self._benchmark_prev_in_radius = False
             self._benchmark_prev_dwell_satisfied = False
             self._benchmark_prev_dwell_bucket = 0
@@ -720,6 +730,10 @@ class LLMController():
             )
         newly_completed = sorted(current_completed_ids - self._benchmark_prev_completed_ids)
         for cid in newly_completed:
+            print_t(
+                "[BENCHMARK-COMPLETED] "
+                f"checkpoint={cid} completed_set={sorted(current_completed_ids)}"
+            )
             self._emit_progress_event(
                 event_type="checkpoint_completed",
                 checkpoint_id=cid,
@@ -1027,13 +1041,15 @@ class LLMController():
             except Exception:
                 wrapper_snapshot = {}
         print_debug(
-            "[GC-SETPOINT] "
+            "[GC-HANDOFF] "
             f"begin checkpoint={checkpoint_key} checkpoint_pos=({checkpoint.x:.2f}, {checkpoint.y:.2f}) "
             f"old_command={wrapper_snapshot.get('command')} old_target={wrapper_snapshot.get('target')} "
+            f"old_source={wrapper_snapshot.get('target_source')} "
             f"current_drone_pos={current_pos}",
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
-        if isinstance(self.drone, Px4SimRobotWrapper):
+        supports_gc_handoff = hasattr(self.drone, "begin_go_checkpoint_context")
+        if supports_gc_handoff:
             try:
                 checkpoint_z = 0.0
                 if isinstance(current_pos, (tuple, list)) and len(current_pos) >= 3:
@@ -1044,9 +1060,15 @@ class LLMController():
                 )
             except Exception as exc:
                 print_debug(
-                    f"[GC-SETPOINT] begin_go_checkpoint_context_failed checkpoint={checkpoint_key} error={exc}",
+                    f"[GC-HANDOFF-FAIL] begin_go_checkpoint_context_failed checkpoint={checkpoint_key} error={exc}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
+        else:
+            print_debug(
+                f"[GC-HANDOFF-FAIL] begin_go_checkpoint_context_missing checkpoint={checkpoint_key} "
+                f"drone_type={type(self.drone).__name__}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
+            )
         # Ensure dwell/completion tracking follows the actual commanded checkpoint,
         # instead of falling back to lexical benchmark order.
         self.set_benchmark_progress_focus_checkpoint(checkpoint_key)
@@ -1058,7 +1080,7 @@ class LLMController():
         )
         # Keep an explicit robot-mode flag in scope for gc() diagnostics and to
         # avoid NameError regressions when instrumenting this block.
-        is_px4_sim = isinstance(self.drone, Px4SimRobotWrapper)
+        is_px4_sim = isinstance(self.drone, Px4SimRobotWrapper) or supports_gc_handoff
 
         max_step_m = 1.0
         # gc policy: align to checkpoint heading first, then move straight forward.
@@ -1245,9 +1267,12 @@ class LLMController():
             except Exception:
                 end_snapshot = {}
             print_debug(
-                "[GC-SETPOINT] "
+                "[GC-HANDOFF] "
                 f"end checkpoint={checkpoint.id} command={end_snapshot.get('command')} "
-                f"target={end_snapshot.get('target')} source={end_snapshot.get('target_source')}",
+                f"target={end_snapshot.get('target')} source={end_snapshot.get('target_source')} "
+                f"command_writer={end_snapshot.get('command_writer')} "
+                f"source_writer={end_snapshot.get('target_source_writer')} "
+                f"setpoint_writer={end_snapshot.get('setpoint_writer')}",
                 env_var="TYPEFLY_VERBOSE_DEBUG",
             )
         should_request_replan = bool(
@@ -1339,9 +1364,27 @@ class LLMController():
         self._clear_runtime_replan_event()
         return True, reason
 
-    def _on_statement_executed_for_replan(self):
+    def _format_exec_flow_flags(self) -> str:
+        return (
+            f"interrupt_pending={bool(self._interrupt_pending_until_new_plan)} "
+            f"interrupted_for_replan={bool(self.interrupted_for_replan)} "
+            f"awaiting_replan={bool(self.entered_awaiting_replan_response)} "
+            f"execution_resumed={bool(self.execution_resumed_from_new_plan)} "
+            f"next_statement_after_interrupt={bool(self.next_statement_executed_after_interrupt)} "
+            f"protection_remaining={int(self.auto_replan_protection_remaining)} "
+            f"auto_replan_armed={bool(self.auto_replan_armed)}"
+        )
+
+    def _on_statement_executed_for_replan(self, flow_meta: Optional[dict] = None):
         if bool(getattr(self, "_interrupt_pending_until_new_plan", False)):
             self.next_statement_executed_after_interrupt = True
+        queue_size = None
+        remaining_statements = None
+        statement_name = None
+        if isinstance(flow_meta, dict):
+            queue_size = flow_meta.get("queue_size")
+            remaining_statements = flow_meta.get("remaining_statements")
+            statement_name = flow_meta.get("statement")
         if self.auto_replan_protection_remaining > 0:
             self.auto_replan_protection_remaining -= 1
             print_debug(
@@ -1349,6 +1392,36 @@ class LLMController():
                 f"protection_window_active remaining_statements={self.auto_replan_protection_remaining}",
                 env_var="TYPEFLY_VERBOSE_DEBUG",
             )
+        print_t(
+            "[EXEC-FLOW] "
+            f"after_statement_done next_step=fetch_next_statement "
+            f"statement={statement_name} queue_size={queue_size} "
+            f"remaining_statements={remaining_statements} "
+            f"{self._format_exec_flow_flags()}"
+        )
+
+    def _on_execution_flow_blocked(self, flow_meta: Optional[dict] = None):
+        flow_meta = dict(flow_meta or {})
+        reason = str(flow_meta.get("reason", "unknown"))
+        queue_size = flow_meta.get("queue_size", "n/a")
+        remaining_statements = flow_meta.get("remaining_statements", "n/a")
+        blocked_signature = f"{reason}|{queue_size}|{remaining_statements}"
+        now = time.time()
+        if (
+            blocked_signature == self._last_exec_flow_blocked_signature
+            and (now - float(self._last_exec_flow_blocked_log_ts)) < 0.75
+        ):
+            return
+        self._last_exec_flow_blocked_signature = blocked_signature
+        self._last_exec_flow_blocked_log_ts = now
+        print_t(
+            "[EXEC-FLOW-BLOCKED] "
+            f"reason={reason} "
+            f"queue_size={queue_size} "
+            f"remaining_statements={remaining_statements} "
+            f"blocked_for_s={flow_meta.get('blocked_for_s', 'n/a')} "
+            f"{self._format_exec_flow_flags()}"
+        )
 
     def _normalize_framework_mode(self, framework_mode: str) -> str:
         normalized = str(framework_mode or MODE_TYPEFLY_ONESHOT).strip().lower()
@@ -1857,11 +1930,15 @@ class LLMController():
             None if silent else self.message_queue,
             should_abort=(self._should_abort_current_execution_for_replan if allow_auto_interrupt else None),
             on_statement_executed=self._on_statement_executed_for_replan,
+            on_execution_blocked=self._on_execution_flow_blocked,
         )
         interpreter.execute(minispec)
         self.execution_history = interpreter.execution_history
         ret_val = interpreter.ret_queue.get()
-        if hasattr(ret_val, "value") and isinstance(ret_val.value, str) and ret_val.value.startswith("MiniSpec execution error"):
+        if hasattr(ret_val, "value") and isinstance(ret_val.value, str) and (
+            ret_val.value.startswith("MiniSpec execution error")
+            or ret_val.value.startswith("MiniSpec execution stalled")
+        ):
             raise RuntimeError(ret_val.value)
         return ret_val
 
@@ -1884,12 +1961,21 @@ class LLMController():
             self.interrupted_for_replan = True
             self.entered_awaiting_replan_response = True
             self._interrupt_pending_until_new_plan = True
+            print_t(
+                "[EXEC-FLOW-BLOCKED] "
+                f"reason=runtime_replan_event detail={event_reason} {self._format_exec_flow_flags()}"
+            )
             return True, event_reason
         if self._maybe_run_agent_heartbeat():
             print_t("[QUEUE] clearing remaining statements due to replan")
             self.interrupted_for_replan = True
             self.entered_awaiting_replan_response = True
             self._interrupt_pending_until_new_plan = True
+            print_t(
+                "[EXEC-FLOW-BLOCKED] "
+                f"reason=agent_heartbeat_replan detail={self._pending_heartbeat_reason or 'llm'} "
+                f"{self._format_exec_flow_flags()}"
+            )
             return True, f"agent_heartbeat_replan:{self._pending_heartbeat_reason or 'llm'}"
         if not self._is_threshold_replan_mode():
             return False, ""
@@ -1917,6 +2003,12 @@ class LLMController():
             self.interrupted_for_replan = True
             self.entered_awaiting_replan_response = True
             self._interrupt_pending_until_new_plan = True
+            print_t(
+                "[EXEC-FLOW-BLOCKED] "
+                f"reason=collision_threshold_interrupt decision_pc={current_p:.6f} "
+                f"threshold={self.predicted_collision_replan_threshold:.2f} "
+                f"{self._format_exec_flow_flags()}"
+            )
             print_t(
                 "[REPLAN_DEBUG] "
                 f"source=collision_threshold "
@@ -2126,6 +2218,7 @@ class LLMController():
         )
         self._reset_benchmark_progress_tracking()
         selected_pair = self.set_manual_model_pair(self.manual_model_pair_id)
+        lmstudio_status = self.get_lmstudio_connectivity_status()
         self._run_model_lock_active = True
         self._run_locked_model_pair = dict(selected_pair)
         self._task_id_counter += 1
@@ -2159,6 +2252,8 @@ class LLMController():
                 "model_pair_label": selected_pair.get("label", ""),
                 "planner_model_id": selected_pair.get("planner_model_id", ""),
                 "evaluator_model_id": selected_pair.get("evaluator_model_id", ""),
+                "lmstudio_base_url": str(lmstudio_status.get("base_url") or ""),
+                "lmstudio_connected": bool(lmstudio_status.get("connected")),
             },
         )
         self.task_run_logger.update_planner_info(
@@ -2205,6 +2300,8 @@ class LLMController():
         self.execution_resumed_from_new_plan = False
         self.next_statement_executed_after_interrupt = False
         self._interrupt_pending_until_new_plan = False
+        self._last_exec_flow_blocked_log_ts = 0.0
+        self._last_exec_flow_blocked_signature = ""
         def _run_monitor():
             while not monitor_stop.is_set():
                 try:
@@ -2541,6 +2638,80 @@ class LLMController():
 
     def set_archive_enabled(self, enabled: bool):
         self.archive_enabled = bool(enabled)
+
+    def get_lmstudio_connectivity_status(self) -> dict:
+        runtime = dict(resolve_runtime_provider_config() or {})
+        provider = str(runtime.get("provider") or "").strip().lower()
+        base_url = str(runtime.get("base_url") or "").strip()
+        lmstudio_base_url = str(runtime.get("lmstudio_base_url") or "").strip()
+        pair = self.get_selected_manual_model_pair()
+        planner_model = str(pair.get("planner_model_id") or "")
+        evaluator_model = str(pair.get("evaluator_model_id") or "")
+        status = {
+            "provider": provider,
+            "base_url": base_url,
+            "lmstudio_base_url": lmstudio_base_url,
+            "api_key_masked": "",
+            "connected": False,
+            "model_ids": [],
+            "error": "",
+            "selected_pair_id": str(pair.get("pair_id") or ""),
+            "planner_model_id": planner_model,
+            "evaluator_model_id": evaluator_model,
+            "planner_visible": None,
+            "evaluator_visible": None,
+            "warnings": [],
+        }
+        if provider != "lmstudio":
+            status["error"] = f"provider_not_lmstudio(provider={provider or 'unknown'})"
+            return status
+        if not base_url:
+            status["error"] = "empty_base_url"
+            return status
+        probe_url = base_url.rstrip("/")
+        if probe_url.endswith("/v1"):
+            probe_url = probe_url + "/models"
+        elif probe_url.endswith("/models"):
+            pass
+        else:
+            probe_url = probe_url + "/v1/models"
+        key = str(os.getenv("LMSTUDIO_API_KEY", "lmstudio") or "lmstudio").strip()
+        if len(key) <= 8:
+            status["api_key_masked"] = f"{key[:2]}***{key[-2:]}" if key else "(empty)"
+        else:
+            status["api_key_masked"] = f"{key[:4]}...{key[-2:]}"
+        req = urllib_request.Request(
+            probe_url,
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {key}",
+            },
+        )
+        try:
+            with urllib_request.urlopen(req, timeout=2.0) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            rows = list(payload.get("data") or [])
+            model_ids = []
+            for row in rows:
+                model_id = str((row or {}).get("id") or "").strip()
+                if model_id:
+                    model_ids.append(model_id)
+            status["model_ids"] = model_ids
+            status["connected"] = len(model_ids) > 0
+            if not status["connected"]:
+                status["error"] = "no_models_in_/v1/models"
+            visible = set(model_ids)
+            status["planner_visible"] = planner_model in visible
+            status["evaluator_visible"] = evaluator_model in visible
+            if planner_model and (planner_model not in visible):
+                status["warnings"].append(f"planner_model_not_visible({planner_model})")
+            if evaluator_model and (evaluator_model not in visible):
+                status["warnings"].append(f"evaluator_model_not_visible({evaluator_model})")
+        except urllib_error.URLError as exc:
+            status["error"] = f"url_error:{exc}"
+        except Exception as exc:
+            status["error"] = str(exc)
+        return status
 
     def get_selected_manual_model_pair(self) -> dict:
         pair = get_manual_model_pair(self.manual_model_pair_id)
