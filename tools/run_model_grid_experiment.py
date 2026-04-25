@@ -283,6 +283,7 @@ def _run_single_attempt(
         controller.execute_task_description(
             task_description=_task_text_for_zone(args.zone_id),
             framework_mode="agent-heartbeat-soft",
+            execution_source="batch_model_grid",
         )
         summary = controller.task_run_logger.get_pending_run_summary()
         controller.task_run_logger.discard_pending_run()
