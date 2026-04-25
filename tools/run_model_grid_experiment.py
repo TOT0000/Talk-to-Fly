@@ -124,9 +124,15 @@ def _build_pair_specs(
     if fixed_evaluator not in evaluator_candidates:
         raise ValueError(f"fixed evaluator model is not in evaluator candidates: {fixed_evaluator}")
 
-    raw_pairs: list[tuple[str, str, str]] = []
-    raw_pairs.extend((fixed_planner, evaluator, "phase1_fixed_planner_sweep_evaluator") for evaluator in evaluator_candidates)
-    raw_pairs.extend((planner, fixed_evaluator, "phase2_fixed_evaluator_sweep_planner") for planner in planner_candidates)
+    phase1_pairs = [
+        (fixed_planner, evaluator, "phase1_fixed_planner_sweep_evaluator")
+        for evaluator in evaluator_candidates
+    ]
+    phase2_pairs = [
+        (planner, fixed_evaluator, "phase2_fixed_evaluator_sweep_planner")
+        for planner in planner_candidates
+    ]
+    raw_pairs: list[tuple[str, str, str]] = [*phase1_pairs, *phase2_pairs]
 
     seen: set[tuple[str, str]] = set()
     pair_specs: list[PairSpec] = []
