@@ -1005,6 +1005,12 @@ class LLMController():
         if checkpoint is None:
             raise ValueError(f"Unknown checkpoint_id `{checkpoint_id}`")
         wrapper_snapshot = {}
+        current_pos = None
+        if hasattr(self.drone, "get_drone_position"):
+            try:
+                current_pos = self.drone.get_drone_position()
+            except Exception:
+                current_pos = None
         if hasattr(self.drone, "get_active_setpoint_snapshot"):
             try:
                 wrapper_snapshot = dict(self.drone.get_active_setpoint_snapshot() or {})
@@ -1013,7 +1019,8 @@ class LLMController():
         print_debug(
             "[GC-SETPOINT] "
             f"begin checkpoint={checkpoint_key} checkpoint_pos=({checkpoint.x:.2f}, {checkpoint.y:.2f}) "
-            f"old_command={wrapper_snapshot.get('command')} old_target={wrapper_snapshot.get('target')}",
+            f"old_command={wrapper_snapshot.get('command')} old_target={wrapper_snapshot.get('target')} "
+            f"current_drone_pos={current_pos}",
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
         if isinstance(self.drone, Px4SimRobotWrapper):

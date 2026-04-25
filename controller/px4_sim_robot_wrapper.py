@@ -407,13 +407,19 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._active_command_name = "go_checkpoint"
         self._active_command_value = None
         self._active_command_start_time = time.time()
-        self._set_active_target(x, y, z, yaw, source="go_checkpoint_hold_current_pose")
+        self._set_active_target(x, y, z, yaw, source="go_checkpoint_takeover")
         new_snapshot = self.get_active_setpoint_snapshot()
         print_debug(
             "[GC-SETPOINT] "
             f"begin checkpoint={checkpoint_id} checkpoint_target={checkpoint_xyz} "
             f"old_command={old_snapshot.get('command')} old_target={old_snapshot.get('target')} "
             f"new_command={new_snapshot.get('command')} new_target={new_snapshot.get('target')}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
+        )
+        print_debug(
+            "[GC-SETPOINT] "
+            f"handoff checkpoint={checkpoint_id} new_command={new_snapshot.get('command')} "
+            f"new_target={new_snapshot.get('target')} source={new_snapshot.get('target_source')}",
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
 
