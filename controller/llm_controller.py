@@ -1004,6 +1004,29 @@ class LLMController():
         checkpoint = BENCHMARK_CHECKPOINTS_BY_ID.get(checkpoint_key)
         if checkpoint is None:
             raise ValueError(f"Unknown checkpoint_id `{checkpoint_id}`")
+        wrapper_snapshot = {}
+        if hasattr(self.drone, "get_active_setpoint_snapshot"):
+            try:
+                wrapper_snapshot = dict(self.drone.get_active_setpoint_snapshot() or {})
+            except Exception:
+                wrapper_snapshot = {}
+        print_debug(
+            "[GC-SETPOINT] "
+            f"begin checkpoint={checkpoint_key} checkpoint_pos=({checkpoint.x:.2f}, {checkpoint.y:.2f}) "
+            f"old_command={wrapper_snapshot.get('command')} old_target={wrapper_snapshot.get('target')}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
+        )
+        if isinstance(self.drone, Px4SimRobotWrapper):
+            try:
+                self.drone.begin_go_checkpoint_context(
+                    checkpoint_id=checkpoint_key,
+                    checkpoint_xyz=(float(checkpoint.x), float(checkpoint.y), 0.0),
+                )
+            except Exception as exc:
+                print_debug(
+                    f"[GC-SETPOINT] begin_go_checkpoint_context_failed checkpoint={checkpoint_key} error={exc}",
+                    env_var="TYPEFLY_VERBOSE_DEBUG",
+                )
         # Ensure dwell/completion tracking follows the actual commanded checkpoint,
         # instead of falling back to lexical benchmark order.
         self.set_benchmark_progress_focus_checkpoint(checkpoint_key)
@@ -1196,6 +1219,17 @@ class LLMController():
             f"event=gc_end checkpoint={checkpoint.id} reached={reached} stop_reason={stop_reason}",
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
+        if hasattr(self.drone, "get_active_setpoint_snapshot"):
+            try:
+                end_snapshot = dict(self.drone.get_active_setpoint_snapshot() or {})
+            except Exception:
+                end_snapshot = {}
+            print_debug(
+                "[GC-SETPOINT] "
+                f"end checkpoint={checkpoint.id} command={end_snapshot.get('command')} "
+                f"target={end_snapshot.get('target')} source={end_snapshot.get('target_source')}",
+                env_var="TYPEFLY_VERBOSE_DEBUG",
+            )
         should_request_replan = bool(
             preempted_for_replan
             or str(stop_reason).startswith("collision_probability_high")
