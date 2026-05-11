@@ -1,4 +1,4 @@
-import os, ast, re, json, math
+import os, ast, re, json, math, time, uuid
 from typing import Optional
 
 from .safety_context import SafetyContext
@@ -825,10 +825,25 @@ class LLMPlanner():
         if replan_history_block:
             print_debug(f"[P-REPLAN-HISTORY]\n{replan_history_block}")
         print_debug(f"[P] Full prompt debug log: {chat_log_path}")
+        request_start_ts = float(time.time())
         raw_response = self.llm.request(prompt, self.model_name, stream=False)
+        response_end_ts = float(time.time())
+        latency_sec = max(0.0, response_end_ts - request_start_ts)
+        llm_call_role = "replan" if is_replan_call else "initial_plan"
         self._last_plan_trace = {
             "prompt": prompt,
             "raw_response": raw_response,
+            "llm_call_id": f"{llm_call_role}-{uuid.uuid4().hex[:12]}",
+            "llm_call_role": llm_call_role,
+            "model_id": str(self.model_name or ""),
+            "request_start_ts": request_start_ts,
+            "response_end_ts": response_end_ts,
+            "latency_sec": round(float(latency_sec), 6),
+            "success": True,
+            "response_type": "full_replan_plan" if is_replan_call else "continue",
+            "json_parse_success": None,
+            "timeout": False,
+            "skipped_due_to_inflight": False,
             "planning_stage": str(planning_stage or "initial"),
             "plan_source": ("llm_replan" if str(planning_stage or "initial").strip().lower() == "replan" else "llm_initial"),
             "prompt_variant": self.runtime_prompt_variant,

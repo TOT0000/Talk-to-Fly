@@ -25,7 +25,7 @@ from controller.llm_controller import LLMController
 from controller.utils import print_debug, print_t
 from controller.llm_wrapper import GPT4, LLAMA3
 from controller.abs.robot_wrapper import RobotType
-from controller.llm_controller import MODE_TYPEFLY_ONESHOT
+from controller.llm_controller import MODE_TYPEFLY_ONESHOT, MODE_TYPEFLY_THRESHOLD_REPLAN, MODE_AGENT_HEARTBEAT_SOFT, MODE_AGENT_HEARTBEAT_HARDGATE
 from controller.experiment_scenarios import SCENARIOS, normalize_scenario_name
 from controller.baseline_scenes import BASELINE_SCENES, normalize_baseline_scene_id
 from controller.pipeline_registry import PIPELINE_REGISTRY, normalize_pipeline_id
@@ -127,6 +127,14 @@ class TypeFly:
             "worker_2": False,
             "worker_3": False,
         }
+        self._workspace_render_interval_sec = 0.22
+        self._probability_render_interval_sec = 0.50
+        self._status_render_interval_sec = 0.35
+        self._postrun_render_interval_sec = 1.00
+        self._last_workspace_render_ts = 0.0
+        self._last_probability_render_ts = 0.0
+        self._last_status_render_ts = 0.0
+        self._last_postrun_render_ts = 0.0
         self.mission_collision_count = 0
         self.plot_style = {
             "drone": {"main": "#0B57D0", "light": "#8AB4F8"},
@@ -565,6 +573,10 @@ class TypeFly:
             "worker_2": deque(maxlen=100),
             "worker_3": deque(maxlen=100),
         }
+        self._last_workspace_render_ts = 0.0
+        self._last_probability_render_ts = 0.0
+        self._last_status_render_ts = 0.0
+        self._last_postrun_render_ts = 0.0
         self.worker_collision_active = {
             "worker_1": False,
             "worker_2": False,
@@ -966,11 +978,42 @@ class TypeFly:
         self._append_worker_collision_history(snapshot)
         self._update_mission_collision_count(snapshot)
         self._update_checkpoint_progress(snapshot)
-        anchor_plot = self.render_anchor_3d_plot()
-        global_xy, xy, x, y, z = self.update_position_plot(snapshot, show_error_ellipse=show_error_ellipse, show_raw_estimate=show_raw_estimate)
-        status_md = self.render_status_markdown(snapshot)
-        entity_md = self.render_entity_markdown(snapshot)
-        postrun_md = self.render_postrun_summary()
+        now_ts = time.time()
+        should_render_workspace = (now_ts - float(self._last_workspace_render_ts)) >= float(self._workspace_render_interval_sec)
+        should_render_probability = (now_ts - float(self._last_probability_render_ts)) >= float(self._probability_render_interval_sec)
+        should_render_status = (now_ts - float(self._last_status_render_ts)) >= float(self._status_render_interval_sec)
+        should_render_postrun = (now_ts - float(self._last_postrun_render_ts)) >= float(self._postrun_render_interval_sec)
+
+        if should_render_workspace:
+            anchor_plot = self.render_anchor_3d_plot()
+            global_xy, xy = self.update_workspace_plots(snapshot, show_error_ellipse=show_error_ellipse, show_raw_estimate=show_raw_estimate)
+            self._last_workspace_render_ts = now_ts
+        else:
+            anchor_plot = gr.update()
+            global_xy = gr.update()
+            xy = gr.update()
+
+        if should_render_probability:
+            x, y, z = self.update_probability_plots()
+            self._last_probability_render_ts = now_ts
+        else:
+            x = gr.update()
+            y = gr.update()
+            z = gr.update()
+
+        if should_render_status:
+            status_md = self.render_status_markdown(snapshot)
+            entity_md = self.render_entity_markdown(snapshot)
+            self._last_status_render_ts = now_ts
+        else:
+            status_md = gr.update()
+            entity_md = gr.update()
+
+        if should_render_postrun:
+            postrun_md = self.render_postrun_summary()
+            self._last_postrun_render_ts = now_ts
+        else:
+            postrun_md = gr.update()
         counter += 1
         print_debug(
             "[UI-CALLBACK] "
@@ -1006,6 +1049,14 @@ class TypeFly:
             f"- completion_ratio: {float(summary.get('completion_ratio', 0.0)):.2f}",
             f"- runtime_trace_count: {summary.get('runtime_trace_count', 0)}",
             f"- planning_trace_count: {summary.get('planning_trace_count', 0)}",
+            f"- planning_latency_mean_sec: {summary.get('planning_latency_mean_sec', 'n/a')}",
+            f"- evaluator_latency_mean_sec: {summary.get('evaluator_latency_mean_sec', 'n/a')}",
+            f"- all_llm_latency_p95_sec: {summary.get('all_llm_latency_p95_sec', 'n/a')}",
+            f"- actual_planning_call_count: {summary.get('actual_planning_call_count', 0)}",
+            f"- actual_evaluator_call_count: {summary.get('actual_evaluator_call_count', 0)}",
+            f"- planning_skipped_due_to_inflight_count: {summary.get('planning_skipped_due_to_inflight_count', 0)}",
+            f"- evaluator_skipped_due_to_inflight_count: {summary.get('evaluator_skipped_due_to_inflight_count', 0)}",
+            f"- json_parse_success_rate: {summary.get('json_parse_success_rate', 'n/a')}",
             "- action required: click **Save this run** or **Discard this run**.",
         ]
         return "\\n".join(lines)
@@ -1411,7 +1462,7 @@ class TypeFly:
         plt.close(fig_xy)
         return Image.open(buf_xy)
 
-    def update_position_plot(self, snapshot, show_error_ellipse=False, show_raw_estimate=False):
+    def update_workspace_plots(self, snapshot, show_error_ellipse=False, show_raw_estimate=False):
         positions = self._extract_ui_positions(snapshot)
         dynamic_xlim, dynamic_ylim = self._axis_limits_from_snapshot(snapshot)
         print_debug(
@@ -1441,7 +1492,9 @@ class TypeFly:
             show_error_ellipse=show_error_ellipse,
             show_raw_estimate=show_raw_estimate,
         )
+        return global_xy, local_xy
 
+    def update_probability_plots(self):
         imgs = []
         worker_specs = [
             ("worker_1", "#7B1FA2"),
@@ -1480,7 +1533,16 @@ class TypeFly:
             plt.close(fig)
             imgs.append(Image.open(buf))
 
-        return global_xy, local_xy, imgs[0], imgs[1], imgs[2]
+        return imgs[0], imgs[1], imgs[2]
+
+    def update_position_plot(self, snapshot, show_error_ellipse=False, show_raw_estimate=False):
+        global_xy, local_xy = self.update_workspace_plots(
+            snapshot,
+            show_error_ellipse=show_error_ellipse,
+            show_raw_estimate=show_raw_estimate,
+        )
+        x, y, z = self.update_probability_plots()
+        return global_xy, local_xy, x, y, z
 
 
 if __name__ == "__main__":
