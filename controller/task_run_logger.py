@@ -58,8 +58,6 @@ RUN_COLUMNS = [
     "completion_ratio",
     "planner_model_id",
     "evaluator_model_id",
-    "model_pair_id",
-    "model_pair_label",
     "lmstudio_base_url",
     "lmstudio_connected",
     "generated_plan",
@@ -292,8 +290,11 @@ class TaskRunLogger:
                 run_context=dict(run_context or {}),
             )
             self._consume_snapshot(initial_snapshot, now=now)
-        if previous_pending is not None and bool(previous_pending.archive_enabled):
-            self._persist_run(previous_pending)
+        if previous_pending is not None:
+            # Starting another WebUI run should not implicitly archive a previous
+            # pending result. The user must explicitly choose Save this run or
+            # Discard this run for completed manual runs.
+            pass
 
     def update_plan_info(self, plan_text: str, generation_success: bool):
         with self._lock:
@@ -582,8 +583,6 @@ class TaskRunLogger:
             "completion_ratio": completion_ratio,
             "planner_model_id": active.run_context.get("planner_model_id", ""),
             "evaluator_model_id": active.run_context.get("evaluator_model_id", ""),
-            "model_pair_id": active.run_context.get("model_pair_id", ""),
-            "model_pair_label": active.run_context.get("model_pair_label", ""),
             "lmstudio_base_url": active.run_context.get("lmstudio_base_url", ""),
             "lmstudio_connected": bool(active.run_context.get("lmstudio_connected", False)),
             "runtime_trace_count": len(active.runtime_trace),
@@ -674,8 +673,6 @@ class TaskRunLogger:
             "completion_ratio": completion_ratio,
             "planner_model_id": active.run_context.get("planner_model_id", planner_info.get("planner_model_id", "")),
             "evaluator_model_id": active.run_context.get("evaluator_model_id", planner_info.get("evaluator_model_id", "")),
-            "model_pair_id": active.run_context.get("model_pair_id", planner_info.get("model_pair_id", "")),
-            "model_pair_label": active.run_context.get("model_pair_label", planner_info.get("model_pair_label", "")),
             "lmstudio_base_url": active.run_context.get("lmstudio_base_url", ""),
             "lmstudio_connected": bool(active.run_context.get("lmstudio_connected", False)),
             "generated_plan": "" if bool(active.results_only) else active.actual_plan_text,
@@ -735,8 +732,6 @@ class TaskRunLogger:
             "planning_trace_count": len(active.planning_trace),
             "planner_model_id": row["planner_model_id"],
             "evaluator_model_id": row["evaluator_model_id"],
-            "model_pair_id": row["model_pair_id"],
-            "model_pair_label": row["model_pair_label"],
             "lmstudio_base_url": row["lmstudio_base_url"],
             "lmstudio_connected": bool(row["lmstudio_connected"]),
             "results_only": bool(active.results_only),
