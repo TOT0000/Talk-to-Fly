@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 import threading
@@ -155,6 +156,7 @@ class TaskRunLogger:
         archive_dir, resolved_excel_path = resolve_archive_root_and_excel_path(excel_path)
         self.excel_path = resolved_excel_path
         self.archive_dir = archive_dir
+        self.runs_sheet_csv_path = resolve_runs_sheet_csv_path(self.excel_path)
         self.debug_jsonl_path = os.path.join(
             self.archive_dir,
             "task_runs_debug.jsonl",
@@ -245,6 +247,19 @@ class TaskRunLogger:
         ws_debug = wb.create_sheet(DEBUG_SHEET)
         ws_debug.append(["run_id", "timestamp", "debug_json"])
         wb.save(self.excel_path)
+
+    def _export_runs_sheet_csv(self, wb):
+        csv_path = str(self.runs_sheet_csv_path or "").strip()
+        if not csv_path:
+            return
+        if wb is None or RUNS_SHEET not in wb.sheetnames:
+            return
+        os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+        ws = wb[RUNS_SHEET]
+        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            for row in ws.iter_rows(values_only=True):
+                writer.writerow(["" if value is None else value for value in row])
 
     def _load_workbook_resilient(self):
         if not self._enabled:
@@ -772,6 +787,7 @@ class TaskRunLogger:
                 ws_debug = wb[DEBUG_SHEET]
                 ws_debug.append([active.run_id, self._to_iso(end_ts), self._json_text(debug_payload)])
             wb.save(self.excel_path)
+            self._export_runs_sheet_csv(wb)
         if not bool(active.results_only):
             self._append_jsonl_line(self.debug_jsonl_path, debug_payload)
 
@@ -783,6 +799,13 @@ class TaskRunLogger:
             "[WARN] TaskRunLogger disabled because openpyxl is not installed. "
             "Install dependency with: pip install openpyxl"
         )
+
+
+def resolve_runs_sheet_csv_path(excel_path: str) -> str:
+    explicit_csv = str(os.getenv("TYPEFLY_TASK_LOG_CSV", "") or "").strip()
+    if explicit_csv:
+        return os.path.abspath(os.path.expanduser(explicit_csv))
+    return os.path.join(os.path.dirname(os.path.abspath(excel_path)) or ".", "task_runs_runs_sheet.csv")
 
 
 def resolve_archive_root_and_excel_path(explicit_excel_path: Optional[str] = None) -> tuple[str, str]:
