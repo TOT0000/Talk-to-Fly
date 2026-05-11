@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 import threading
@@ -58,8 +59,8 @@ RUN_COLUMNS = [
     "completion_ratio",
     "planner_model_id",
     "evaluator_model_id",
-    "model_pair_id",
-    "model_pair_label",
+    "lmstudio_base_url",
+    "lmstudio_connected",
     "generated_plan",
     "final_plan_source",
 ]
@@ -155,6 +156,7 @@ class TaskRunLogger:
         archive_dir, resolved_excel_path = resolve_archive_root_and_excel_path(excel_path)
         self.excel_path = resolved_excel_path
         self.archive_dir = archive_dir
+        self.runs_sheet_csv_path = resolve_runs_sheet_csv_path(self.excel_path)
         self.debug_jsonl_path = os.path.join(
             self.archive_dir,
             "task_runs_debug.jsonl",
@@ -246,6 +248,19 @@ class TaskRunLogger:
         ws_debug.append(["run_id", "timestamp", "debug_json"])
         wb.save(self.excel_path)
 
+    def _export_runs_sheet_csv(self, wb):
+        csv_path = str(self.runs_sheet_csv_path or "").strip()
+        if not csv_path:
+            return
+        if wb is None or RUNS_SHEET not in wb.sheetnames:
+            return
+        os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
+        ws = wb[RUNS_SHEET]
+        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            for row in ws.iter_rows(values_only=True):
+                writer.writerow(["" if value is None else value for value in row])
+
     def _load_workbook_resilient(self):
         if not self._enabled:
             return None
@@ -290,8 +305,11 @@ class TaskRunLogger:
                 run_context=dict(run_context or {}),
             )
             self._consume_snapshot(initial_snapshot, now=now)
-        if previous_pending is not None and bool(previous_pending.archive_enabled):
-            self._persist_run(previous_pending)
+        if previous_pending is not None:
+            # Starting another WebUI run should not implicitly archive a previous
+            # pending result. The user must explicitly choose Save this run or
+            # Discard this run for completed manual runs.
+            pass
 
     def update_plan_info(self, plan_text: str, generation_success: bool):
         with self._lock:
@@ -580,8 +598,8 @@ class TaskRunLogger:
             "completion_ratio": completion_ratio,
             "planner_model_id": active.run_context.get("planner_model_id", ""),
             "evaluator_model_id": active.run_context.get("evaluator_model_id", ""),
-            "model_pair_id": active.run_context.get("model_pair_id", ""),
-            "model_pair_label": active.run_context.get("model_pair_label", ""),
+            "lmstudio_base_url": active.run_context.get("lmstudio_base_url", ""),
+            "lmstudio_connected": bool(active.run_context.get("lmstudio_connected", False)),
             "runtime_trace_count": len(active.runtime_trace),
             "planning_trace_count": len(active.planning_trace),
         }
@@ -670,8 +688,8 @@ class TaskRunLogger:
             "completion_ratio": completion_ratio,
             "planner_model_id": active.run_context.get("planner_model_id", planner_info.get("planner_model_id", "")),
             "evaluator_model_id": active.run_context.get("evaluator_model_id", planner_info.get("evaluator_model_id", "")),
-            "model_pair_id": active.run_context.get("model_pair_id", planner_info.get("model_pair_id", "")),
-            "model_pair_label": active.run_context.get("model_pair_label", planner_info.get("model_pair_label", "")),
+            "lmstudio_base_url": active.run_context.get("lmstudio_base_url", ""),
+            "lmstudio_connected": bool(active.run_context.get("lmstudio_connected", False)),
             "generated_plan": "" if bool(active.results_only) else active.actual_plan_text,
             "final_plan_source": planner_info.get("final_plan_source", ""),
         }
@@ -729,8 +747,8 @@ class TaskRunLogger:
             "planning_trace_count": len(active.planning_trace),
             "planner_model_id": row["planner_model_id"],
             "evaluator_model_id": row["evaluator_model_id"],
-            "model_pair_id": row["model_pair_id"],
-            "model_pair_label": row["model_pair_label"],
+            "lmstudio_base_url": row["lmstudio_base_url"],
+            "lmstudio_connected": bool(row["lmstudio_connected"]),
             "results_only": bool(active.results_only),
         }
         debug_payload = {
@@ -769,6 +787,7 @@ class TaskRunLogger:
                 ws_debug = wb[DEBUG_SHEET]
                 ws_debug.append([active.run_id, self._to_iso(end_ts), self._json_text(debug_payload)])
             wb.save(self.excel_path)
+            self._export_runs_sheet_csv(wb)
         if not bool(active.results_only):
             self._append_jsonl_line(self.debug_jsonl_path, debug_payload)
 
@@ -780,6 +799,13 @@ class TaskRunLogger:
             "[WARN] TaskRunLogger disabled because openpyxl is not installed. "
             "Install dependency with: pip install openpyxl"
         )
+
+
+def resolve_runs_sheet_csv_path(excel_path: str) -> str:
+    explicit_csv = str(os.getenv("TYPEFLY_TASK_LOG_CSV", "") or "").strip()
+    if explicit_csv:
+        return os.path.abspath(os.path.expanduser(explicit_csv))
+    return os.path.join(os.path.dirname(os.path.abspath(excel_path)) or ".", "task_runs_runs_sheet.csv")
 
 
 def resolve_archive_root_and_excel_path(explicit_excel_path: Optional[str] = None) -> tuple[str, str]:

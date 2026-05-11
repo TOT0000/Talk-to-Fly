@@ -47,10 +47,15 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._last_setpoint_log_ts = 0.0
         self._last_control_log_ts = 0.0
         self._last_logged_setpoint: Optional[Tuple[float, float, float, Optional[float]]] = None
+        self._last_logged_command: Optional[str] = None
+        self._last_logged_source: Optional[str] = None
         self._active_command_name: Optional[str] = None
         self._active_command_value: Optional[float] = None
         self._active_command_start_time: Optional[float] = None
         self._active_target_source: Optional[str] = None
+        self._active_command_last_writer: Optional[str] = None
+        self._active_target_source_last_writer: Optional[str] = None
+        self._active_setpoint_last_writer: Optional[str] = None
         # Offboard warmup dominates per-command latency in px4_sim mode.
         # Keep it tunable and skip warmup entirely once already OFFBOARD+ARMED.
         self._offboard_warmup_s = max(0.0, float(os.getenv("TYPEFLY_PX4_OFFBOARD_WARMUP_S", "0.25")))
@@ -137,19 +142,26 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         yaw: Optional[float],
         *,
         source: Optional[str] = None,
+        writer: str = "unknown",
     ):
         with self._target_lock:
             old_target = self._active_setpoint
             old_command = self._active_command_name
+            old_source = self._active_target_source
             self._active_setpoint = (float(x), float(y), float(z), None if yaw is None else float(yaw))
+            self._active_setpoint_last_writer = str(writer)
             self._setpoint_stream_active = True
             if source is not None:
                 self._active_target_source = str(source)
+                self._active_target_source_last_writer = str(writer)
             print_debug(
                 "[PX4-TARGET] "
                 f"source={self._active_target_source or 'unspecified'} "
                 f"old_command={old_command or 'None'} new_command={self._active_command_name or 'None'} "
-                f"old_target={old_target} new_target={self._active_setpoint}",
+                f"old_source={old_source or 'None'} "
+                f"old_target={old_target} new_target={self._active_setpoint} "
+                f"setpoint_writer={self._active_setpoint_last_writer or 'unknown'} "
+                f"source_writer={self._active_target_source_last_writer or 'unknown'}",
                 env_var="TYPEFLY_VERBOSE_DEBUG",
             )
 
@@ -157,6 +169,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         with self._target_lock:
             self._setpoint_stream_active = False
             self._active_target_source = None
+            self._active_target_source_last_writer = "_clear_active_target"
 
     def _now_us(self) -> int:
         return int(time.time() * 1_000_000)
@@ -297,7 +310,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             max_attempts = self._offboard_max_attempts
 
         # Fast path: during normal px4_sim operation we are already OFFBOARD+ARMED.
-        self._set_active_target(x, y, z, yaw)
+        self._set_active_target(x, y, z, yaw, writer="_ensure_offboard_control")
         if self._is_offboard_ready():
             return True
 
@@ -335,20 +348,47 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._pub_traj_sp.publish(sp)
         publish_ts = time.time()
         current_setpoint = (float(x), float(y), float(z), None if yaw is None else float(yaw))
-        if (
-            self._last_logged_setpoint != current_setpoint
-            or (publish_ts - self._last_setpoint_log_ts) >= self._publish_log_interval_s
-        ):
+        current_command = self._active_command_name or "hold"
+        current_source = self._active_target_source or "unspecified"
+        previous_setpoint = self._last_logged_setpoint
+        target_delta = None
+        if previous_setpoint is not None:
+            target_delta = math.sqrt(
+                (current_setpoint[0] - previous_setpoint[0]) ** 2
+                + (current_setpoint[1] - previous_setpoint[1]) ** 2
+                + (current_setpoint[2] - previous_setpoint[2]) ** 2
+            )
+        target_changed = (
+            previous_setpoint is None
+            or (target_delta is not None and target_delta >= 0.05)
+            or previous_setpoint[3] != current_setpoint[3]
+        )
+        command_changed = self._last_logged_command != current_command
+        source_changed = self._last_logged_source != current_source
+        verbose_mode = bool(str(os.getenv("TYPEFLY_VERBOSE_DEBUG", "0")).strip() not in {"", "0", "false", "False", "FALSE"})
+        should_log = bool(command_changed or source_changed or target_changed)
+        if verbose_mode and (publish_ts - self._last_setpoint_log_ts) >= self._publish_log_interval_s:
+            should_log = True
+        if should_log:
             self._last_logged_setpoint = current_setpoint
+            self._last_logged_command = current_command
+            self._last_logged_source = current_source
             self._last_setpoint_log_ts = publish_ts
-            print_debug(
-                f"[PX4-SP] command={self._active_command_name or 'hold'} "
+            message = (
+                f"[PX4-SP] command={current_command} "
                 f"target=({x:.2f}, {y:.2f}, {z:.2f}) yaw="
                 f"{'None' if yaw is None else f'{yaw:.3f}'} "
-                f"source={self._active_target_source or 'unspecified'} "
-                f"publish_ts={publish_ts:.3f}",
-                env_var="TYPEFLY_VERBOSE_DEBUG",
+                f"source={current_source} "
+                f"command_writer={self._active_command_last_writer or 'unknown'} "
+                f"source_writer={self._active_target_source_last_writer or 'unknown'} "
+                f"setpoint_writer={self._active_setpoint_last_writer or 'unknown'} "
+                f"log_reason={'change' if (command_changed or source_changed or target_changed) else 'verbose_interval'} "
+                f"publish_ts={publish_ts:.3f}"
             )
+            if command_changed or source_changed or target_changed:
+                print_t(message)
+            else:
+                print_debug(message, env_var="TYPEFLY_VERBOSE_DEBUG")
 
     def _get_state(self) -> Tuple[Tuple[float, float, float], float]:
         pos = self.get_drone_position()
@@ -368,23 +408,27 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
     def _begin_motion_debug(self, skill_name: str, command_value: float):
         old_command = self._active_command_name
         self._active_command_name = skill_name
+        self._active_command_last_writer = "_begin_motion_debug"
         self._active_command_value = float(command_value)
         self._active_command_start_time = time.time()
         print_debug(
             f"[PX4-MOVE] skill={skill_name} command_value={float(command_value):.2f}m "
             f"start_time={self._active_command_start_time:.3f} "
-            f"old_command={old_command or 'None'} new_command={self._active_command_name}"
+            f"old_command={old_command or 'None'} new_command={self._active_command_name} "
+            f"command_writer={self._active_command_last_writer}"
         )
 
     def _begin_rotation_debug(self, skill_name: str, command_value_deg: float):
         old_command = self._active_command_name
         self._active_command_name = skill_name
+        self._active_command_last_writer = "_begin_rotation_debug"
         self._active_command_value = float(command_value_deg)
         self._active_command_start_time = time.time()
         print_debug(
             f"[PX4-MOVE] skill={skill_name} command_value={float(command_value_deg):.2f}deg "
             f"start_time={self._active_command_start_time:.3f} "
-            f"old_command={old_command or 'None'} new_command={self._active_command_name}"
+            f"old_command={old_command or 'None'} new_command={self._active_command_name} "
+            f"command_writer={self._active_command_last_writer}"
         )
 
     def get_active_setpoint_snapshot(self) -> dict:
@@ -394,6 +438,9 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
                 "command": self._active_command_name,
                 "target": target,
                 "target_source": self._active_target_source,
+                "command_writer": self._active_command_last_writer,
+                "target_source_writer": self._active_target_source_last_writer,
+                "setpoint_writer": self._active_setpoint_last_writer,
             }
 
     def begin_go_checkpoint_context(
@@ -409,21 +456,40 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         cp_z = float(checkpoint_xyz[2]) if len(tuple(checkpoint_xyz)) >= 3 else float(z)
         takeover_yaw = math.atan2(cp_y - float(y), cp_x - float(x))
         print_debug(
-            "[GC-SETPOINT] "
+            "[GC-HANDOFF] "
             f"begin checkpoint={checkpoint_id} checkpoint_xyz={checkpoint_xyz} "
             f"current_position=({x:.3f}, {y:.3f}, {z:.3f}) "
-            f"old_command={old_snapshot.get('command')} old_target={old_snapshot.get('target')}",
+            f"old_command={old_snapshot.get('command')} old_target={old_snapshot.get('target')} "
+            f"old_source={old_snapshot.get('target_source')} "
+            f"old_command_writer={old_snapshot.get('command_writer')} "
+            f"old_source_writer={old_snapshot.get('target_source_writer')} "
+            f"old_setpoint_writer={old_snapshot.get('setpoint_writer')}",
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
         self._active_command_name = "go_checkpoint"
+        self._active_command_last_writer = "begin_go_checkpoint_context"
         self._active_command_value = None
         self._active_command_start_time = time.time()
-        self._set_active_target(cp_x, cp_y, cp_z, takeover_yaw, source="go_checkpoint_takeover")
+        self._set_active_target(
+            cp_x,
+            cp_y,
+            cp_z,
+            takeover_yaw,
+            source="go_checkpoint_takeover",
+            writer="begin_go_checkpoint_context",
+        )
         new_snapshot = self.get_active_setpoint_snapshot()
+        handoff_ok = (
+            str(new_snapshot.get("command") or "") == "go_checkpoint"
+            and str(new_snapshot.get("target_source") or "") == "go_checkpoint_takeover"
+        )
         print_debug(
-            "[GC-SETPOINT] "
+            f"{'[GC-HANDOFF]' if handoff_ok else '[GC-HANDOFF-FAIL]'} "
             f"handoff checkpoint={checkpoint_id} new_command={new_snapshot.get('command')} "
-            f"new_target={new_snapshot.get('target')} source={new_snapshot.get('target_source')}",
+            f"new_target={new_snapshot.get('target')} source={new_snapshot.get('target_source')} "
+            f"command_writer={new_snapshot.get('command_writer')} "
+            f"source_writer={new_snapshot.get('target_source_writer')} "
+            f"setpoint_writer={new_snapshot.get('setpoint_writer')}",
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
 
@@ -464,6 +530,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             target_z,
             yaw,
             source=self._active_command_name or "move_to_local_target",
+            writer="_move_to_local_target",
         )
         deadline = time.time() + timeout_s
         stable_since = None
@@ -568,7 +635,14 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             print_debug(f"[PX4-MOVE] abort command={skill_name} reason=offboard_not_ready")
             return False, False
         target_yaw = self._normalize_angle(yaw + delta_yaw_rad)
-        self._set_active_target(x, y, z, target_yaw, source=self._active_command_name or "rotate")
+        self._set_active_target(
+            x,
+            y,
+            z,
+            target_yaw,
+            source=self._active_command_name or "rotate",
+            writer="_rotate_by",
+        )
         print_debug(
             f"[PX4-MOVE] target_setpoint={self._format_position((x, y, z))} "
             f"yaw={target_yaw:.3f} completion=yaw_error<{yaw_tol:.2f}rad for 0.30s timeout={timeout_s:.2f}s"
@@ -676,7 +750,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         z_tolerance_m = 0.15
         settle_time_s = 1.0
         target_z = z - takeoff_height_m
-        self._set_active_target(x, y, target_z, yaw, source="takeoff_hold")
+        self._set_active_target(x, y, target_z, yaw, source="takeoff_hold", writer="takeoff")
         print(f"[PX4_SIM] takeoff start_z={z:.2f}, target_z={target_z:.2f} (NED)")
 
         stable_since = None
@@ -781,7 +855,14 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
                 f"[PX4-SCENARIO] reposition timeout target={self._format_position((tx, ty, tz))}"
             )
             return False
-        self._set_active_target(tx, ty, tz, target_yaw, source="scenario_reposition_hold")
+        self._set_active_target(
+            tx,
+            ty,
+            tz,
+            target_yaw,
+            source="scenario_reposition_hold",
+            writer="reposition_for_scenario",
+        )
         print_t(
             f"[PX4-SCENARIO] repositioned to target={self._format_position((tx, ty, tz))} yaw={target_yaw:.2f}"
         )

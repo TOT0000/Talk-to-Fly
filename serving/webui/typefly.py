@@ -25,20 +25,10 @@ from controller.llm_controller import LLMController
 from controller.utils import print_debug, print_t
 from controller.llm_wrapper import GPT4, LLAMA3
 from controller.abs.robot_wrapper import RobotType
-from controller.llm_controller import (
-    MODE_TYPEFLY_ONESHOT,
-    MODE_TYPEFLY_THRESHOLD_REPLAN,
-    MODE_AGENT_HEARTBEAT_SOFT,
-    MODE_AGENT_HEARTBEAT_HARDGATE,
-)
+from controller.llm_controller import MODE_TYPEFLY_ONESHOT
 from controller.experiment_scenarios import SCENARIOS, normalize_scenario_name
 from controller.baseline_scenes import BASELINE_SCENES, normalize_baseline_scene_id
 from controller.pipeline_registry import PIPELINE_REGISTRY, normalize_pipeline_id
-from controller.manual_model_pair_config import (
-    list_manual_model_pair_options,
-    get_manual_model_pair,
-    normalize_manual_model_pair_id,
-)
 from controller.anchor_provider import AnchorGeometryProvider
 from controller.benchmark_layout import (
     WORKSPACE_SIZE_M,
@@ -68,7 +58,6 @@ class TypeFly:
         self.llm_controller = LLMController(controller_robot_type, self.virtual_queue, use_http, self.message_queue, enable_video=enable_video)
         self.llm_controller.register_position_callback(self.receive_position)
         self.llm_controller.set_selected_pipeline(normalize_pipeline_id(os.getenv("TYPEFLY_BASELINE_ID", "baseline1")))
-        self.llm_controller.set_archive_enabled(True)
         self.active_scenario = self.llm_controller.set_active_scenario(initial_scenario)
         self.active_baseline_scene = self.llm_controller.set_baseline_scene(
             normalize_baseline_scene_id(os.getenv("TYPEFLY_BASELINE_SCENE", "SCENE_BENCHMARK_DEMO"))
@@ -107,13 +96,17 @@ class TypeFly:
         self.asyncio_loop = asyncio.get_event_loop()
         self.use_llama3 = False
         self.robot_type = controller_robot_type
-        self.selected_framework_mode = MODE_TYPEFLY_ONESHOT
         self.selected_baseline_id = normalize_pipeline_id(os.getenv("TYPEFLY_BASELINE_ID", "baseline1"))
-        self.archive_enabled = True
-        self.selected_model_pair_id = normalize_manual_model_pair_id(
-            os.getenv("TYPEFLY_MANUAL_MODEL_PAIR_ID", "")
+        self.planning_agent_model_id = str(
+            os.getenv("TYPEFLY_MANUAL_PLANNER_MODEL", "") or self.llm_controller.planner.model_name
+        ).strip()
+        self.evaluator_model_id = str(
+            os.getenv("TYPEFLY_MANUAL_EVALUATOR_MODEL", "") or self.llm_controller.planner.evaluator_model_name
+        ).strip()
+        self.llm_controller.set_manual_agent_models(
+            self.planning_agent_model_id,
+            self.evaluator_model_id,
         )
-        self.llm_controller.set_manual_model_pair(self.selected_model_pair_id)
         self.selected_worker_move_step = 0.5
         self.selected_worker_turn_step = 15.0
 
@@ -181,31 +174,24 @@ class TypeFly:
 
             with gr.Row():
                 with gr.Column(scale=1, min_width=260, elem_classes="scenario-panel"):
-                    self.framework_mode_selector = gr.Dropdown(
-                        choices=[
-                            MODE_TYPEFLY_ONESHOT,
-                            MODE_TYPEFLY_THRESHOLD_REPLAN,
-                            MODE_AGENT_HEARTBEAT_SOFT,
-                            MODE_AGENT_HEARTBEAT_HARDGATE,
-                        ],
-                        value=MODE_TYPEFLY_ONESHOT,
-                        label="Execution Mode",
-                    )
                     self.baseline_selector = gr.Dropdown(
                         choices=[(cfg.name, cfg.id) for cfg in PIPELINE_REGISTRY.values()],
                         value=self.selected_baseline_id,
                         label="Baseline Pipeline",
                     )
-                    self.model_pair_selector = gr.Dropdown(
-                        choices=list_manual_model_pair_options(),
-                        value=self.selected_model_pair_id,
-                        label="Model Pair",
-                    )
-                    self.model_pair_status = gr.Markdown(value=self.render_model_pair_status())
-                    self.archive_checkbox = gr.Checkbox(
-                        label="Record this run",
-                        value=True,
-                    )
+                    with gr.Group(visible=(self.selected_baseline_id == "agent")) as self.agent_model_group:
+                        gr.Markdown("### Agent-Feedback-Eval Models")
+                        self.planning_agent_model_input = gr.Textbox(
+                            value=self.planning_agent_model_id,
+                            label="Planning agent model",
+                            placeholder="e.g. google/gemma-2-9b",
+                        )
+                        self.evaluator_model_input = gr.Textbox(
+                            value=self.evaluator_model_id,
+                            label="Evaluator model",
+                            placeholder="e.g. deepseek/deepseek-r1-0528-qwen3-8b",
+                        )
+                        self.agent_model_status = gr.Markdown(value=self.render_agent_model_status())
                     self.postrun_summary = gr.Markdown(value="### Post-run archive\nNo finished run awaiting decision.")
                     with gr.Row():
                         self.save_run_btn = gr.Button("Save this run", variant="primary")
@@ -276,25 +262,20 @@ class TypeFly:
                 inputs=[],
                 outputs=[self.scenario_status],
             )
-            self.framework_mode_selector.change(
-                fn=self.set_framework_mode,
-                inputs=[self.framework_mode_selector],
-                outputs=[self.scenario_status],
-            )
             self.baseline_selector.change(
                 fn=self.set_selected_baseline,
                 inputs=[self.baseline_selector],
-                outputs=[self.scenario_status],
+                outputs=[self.scenario_status, self.agent_model_group, self.agent_model_status],
             )
-            self.model_pair_selector.change(
-                fn=self.set_model_pair,
-                inputs=[self.model_pair_selector],
-                outputs=[self.scenario_status, self.model_pair_status],
+            self.planning_agent_model_input.change(
+                fn=self.set_agent_models,
+                inputs=[self.planning_agent_model_input, self.evaluator_model_input],
+                outputs=[self.scenario_status, self.agent_model_status],
             )
-            self.archive_checkbox.change(
-                fn=self.set_archive_enabled,
-                inputs=[self.archive_checkbox],
-                outputs=[self.scenario_status],
+            self.evaluator_model_input.change(
+                fn=self.set_agent_models,
+                inputs=[self.planning_agent_model_input, self.evaluator_model_input],
+                outputs=[self.scenario_status, self.agent_model_status],
             )
             self.save_run_btn.click(
                 fn=self.save_last_run,
@@ -661,42 +642,51 @@ class TypeFly:
         except Exception as e:
             return f"System reset failed: {e}"
 
-    def set_framework_mode(self, framework_mode: str):
-        normalized = self.llm_controller._normalize_framework_mode(framework_mode)
-        self.selected_framework_mode = normalized
-        print_t(f"[MODE] selected={normalized}")
-        return f"Execution mode switched to `{normalized}`."
-
     def set_selected_baseline(self, baseline_id: str):
         normalized = self.llm_controller.set_selected_pipeline(baseline_id)
         self.selected_baseline_id = normalized
         cfg = PIPELINE_REGISTRY[normalized]
-        return f"Baseline switched to `{cfg.id}` ({cfg.name})."
-
-    def render_model_pair_status(self):
-        pair = get_manual_model_pair(self.selected_model_pair_id)
         return (
-            "### Selected Model Pair\n"
-            f"- pair id: `{pair.pair_id}`\n"
-            f"- planner model id: `{pair.planner_model_id}`\n"
-            f"- evaluator model id: `{pair.evaluator_model_id}`"
+            f"Baseline switched to `{cfg.id}` ({cfg.name}).",
+            gr.update(visible=(normalized == "agent")),
+            self.render_agent_model_status(),
         )
 
-    def set_model_pair(self, pair_id: str):
-        selected = self.llm_controller.set_manual_model_pair(pair_id)
-        self.selected_model_pair_id = selected.get("pair_id", normalize_manual_model_pair_id(pair_id))
-        pair_status = (
-            "### Selected Model Pair\n"
-            f"- pair id: `{selected.get('pair_id', '')}`\n"
-            f"- planner model id: `{selected.get('planner_model_id', '')}`\n"
-            f"- evaluator model id: `{selected.get('evaluator_model_id', '')}`"
+    def render_agent_model_status(self):
+        selected = self.llm_controller.get_selected_manual_agent_models()
+        lm = self.llm_controller.get_lmstudio_connectivity_status()
+        current_pipeline = str(getattr(self, "selected_baseline_id", "") or "")
+        pipeline_note = (
+            "active for Agent-Feedback-Eval"
+            if current_pipeline == "agent"
+            else f"stored (current pipeline: `{current_pipeline or 'n/a'}`)"
         )
-        return f"Model pair switched to `{selected.get('label', self.selected_model_pair_id)}`.", pair_status
+        model_preview = list(lm.get("model_ids") or [])[:6]
+        model_preview_text = ", ".join(model_preview) if model_preview else "(none)"
+        warning_lines = []
+        for warning in list(lm.get("warnings") or []):
+            warning_lines.append(f"- ⚠️ {warning}")
+        if lm.get("error"):
+            warning_lines.append(f"- ❌ lmstudio_error: `{lm.get('error')}`")
+        warning_block = "\n".join(warning_lines) if warning_lines else "- ✅ selected planning/evaluator models visible in `/v1/models`"
+        return (
+            "### Agent Model Settings\n"
+            f"- planning agent model: `{selected.get('planner_model_id', '')}`\n"
+            f"- evaluator model: `{selected.get('evaluator_model_id', '')}`\n"
+            f"- pipeline behavior: {pipeline_note}\n"
+            f"- LM Studio provider: `{lm.get('provider', 'n/a')}`\n"
+            f"- LM Studio base_url: `{lm.get('base_url', 'n/a')}`\n"
+            f"- LM Studio api key: `{lm.get('api_key_masked', '(n/a)')}`\n"
+            f"- LM Studio connected: `{bool(lm.get('connected'))}`\n"
+            f"- visible model ids: {model_preview_text}\n"
+            f"{warning_block}"
+        )
 
-    def set_archive_enabled(self, enabled: bool):
-        self.archive_enabled = bool(enabled)
-        self.llm_controller.set_archive_enabled(self.archive_enabled)
-        return f"Run record {'enabled' if self.archive_enabled else 'disabled'} for next run."
+    def set_agent_models(self, planning_agent_model: str, evaluator_model: str):
+        selected = self.llm_controller.set_manual_agent_models(planning_agent_model, evaluator_model)
+        self.planning_agent_model_id = selected.get("planner_model_id", "")
+        self.evaluator_model_id = selected.get("evaluator_model_id", "")
+        return "Agent models updated for the next run.", self.render_agent_model_status()
 
     def save_last_run(self):
         logger = getattr(self.llm_controller, "task_run_logger", None)
@@ -828,8 +818,12 @@ class TypeFly:
             )
             self.worker_collision_active = {k: False for k in self.worker_collision_active.keys()}
             self.mission_collision_count = 0
-            framework_mode = str(getattr(self, "selected_framework_mode", MODE_TYPEFLY_ONESHOT))
+            framework_mode = MODE_TYPEFLY_ONESHOT
             self.llm_controller.set_selected_pipeline(self.selected_baseline_id)
+            self.llm_controller.set_manual_agent_models(
+                self.planning_agent_model_id,
+                self.evaluator_model_id,
+            )
             task_thread = Thread(
                 target=self.llm_controller.execute_task_description,
                 args=(message, framework_mode, "manual_webui"),
@@ -845,9 +839,7 @@ class TypeFly:
                         if self.mission_clock["is_running"]:
                             self.mission_clock["completed_at"] = time.time()
                             self.mission_clock["is_running"] = False
-                        if bool(self.archive_enabled):
-                            return "Command Complete! Result summary has been auto-saved."
-                        return "Command Complete! Recording is disabled for this run."
+                        return "Command Complete! Click Save this run to write the archive, or Discard this run to drop it."
                     if msg.startswith('[LOG]'):
                         complete_response += '\n'
                     if msg.endswith('\\\\'):
@@ -1001,7 +993,6 @@ class TypeFly:
             "### Post-run archive (pending decision)",
             f"- run_id: {summary.get('run_id', 'n/a')}",
             f"- baseline: {summary.get('selected_baseline_id', 'n/a')} ({summary.get('selected_baseline_name', 'n/a')})",
-            f"- model_pair: {summary.get('model_pair_id', 'n/a')} ({summary.get('model_pair_label', 'n/a')})",
             f"- planner_model: {summary.get('planner_model_id', 'n/a')}",
             f"- evaluator_model: {summary.get('evaluator_model_id', 'n/a')}",
             f"- scene_id: {summary.get('scene_id', 'n/a')}",
@@ -1202,7 +1193,6 @@ class TypeFly:
             f"- current mode: {final_execution_mode}",
             f"- selected baseline: {snapshot.get('selected_baseline_id', 'n/a')} ({snapshot.get('selected_baseline_name', 'n/a')})",
             f"- current scene: {snapshot.get('baseline_scene_id', 'n/a')}",
-            f"- record policy: {'auto-save summary at run end' if bool(self.archive_enabled) else 'do not save run'}",
             f"- active zones: {', '.join(sorted(z.replace('zone_', '') for z in self.objective_state.get('active_zone_ids', set())))}",
             f"- active checkpoints: {len(active_ids)}",
             f"- predicted_collision_probability: {self._fmt_prob(getattr(safety_context, 'predicted_collision_probability', 0.0))}",
