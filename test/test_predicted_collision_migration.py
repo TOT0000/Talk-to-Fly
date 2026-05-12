@@ -20,7 +20,8 @@ def test_prompts_use_predicted_and_no_historical_max():
     assert 'historical_max_collision_risk' not in planner_src
     assert 'agent_heartbeat_soft_prompt_path' in planner_src
     assert 'agent_heartbeat_hardgate_prompt_path' in planner_src
-    assert 'self.agent_decomposition_examples_path = None' in planner_src
+    removed_token = 'lang' + 'graph'
+    assert removed_token not in planner_src.lower()
 
 
 def test_ui_uses_predicted_collision_probability_for_status_and_charts():

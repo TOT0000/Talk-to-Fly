@@ -52,6 +52,23 @@ RUN_COLUMNS = [
     "completion_time_mission_sec",
     "total_replan_count",
     "total_llm_call_count",
+    "actual_planning_call_count",
+    "actual_evaluator_call_count",
+    "planning_skipped_due_to_inflight_count",
+    "evaluator_skipped_due_to_inflight_count",
+    "planning_latency_mean_sec",
+    "planning_latency_median_sec",
+    "planning_latency_p90_sec",
+    "planning_latency_p95_sec",
+    "evaluator_latency_mean_sec",
+    "evaluator_latency_median_sec",
+    "evaluator_latency_p90_sec",
+    "evaluator_latency_p95_sec",
+    "all_llm_latency_mean_sec",
+    "all_llm_latency_median_sec",
+    "all_llm_latency_p90_sec",
+    "all_llm_latency_p95_sec",
+    "json_parse_success_rate",
     "collision_count",
     "near_miss_count",
     "min_uav_worker_distance_m",
@@ -88,6 +105,19 @@ PLANNING_TRACE_ALLOWED_KEYS = {
     "true_remaining_checkpoints",
     "current_target_checkpoint",
     "completion_state_source",
+    "llm_call_id",
+    "llm_call_role",
+    "model_id",
+    "request_start_ts",
+    "response_end_ts",
+    "latency_sec",
+    "success",
+    "response_type",
+    "json_parse_success",
+    "timeout",
+    "skipped_due_to_inflight",
+    "response_discarded_reason",
+    "request_target_checkpoint",
 }
 
 
@@ -441,7 +471,8 @@ class TaskRunLogger:
             payload = {k: payload.get(k) for k in PLANNING_TRACE_ALLOWED_KEYS if k in payload}
             payload["run_id"] = self._active.run_id
             payload["timestamp"] = self._to_iso(time.time())
-            self._active.llm_call_count += 1
+            if not bool(payload.get("skipped_due_to_inflight")):
+                self._active.llm_call_count += 1
             self._active.planning_trace.append(payload)
 
     def _consume_snapshot(self, snapshot: Dict, now: float):
@@ -536,6 +567,91 @@ class TaskRunLogger:
         with self._lock:
             return self._pending_completed is not None
 
+    @staticmethod
+    def _percentile(sorted_values: List[float], percentile: float) -> Optional[float]:
+        if not sorted_values:
+            return None
+        if len(sorted_values) == 1:
+            return round(float(sorted_values[0]), 6)
+        rank = (len(sorted_values) - 1) * float(percentile)
+        low = int(rank)
+        high = min(low + 1, len(sorted_values) - 1)
+        weight = rank - low
+        value = (sorted_values[low] * (1.0 - weight)) + (sorted_values[high] * weight)
+        return round(float(value), 6)
+
+    @classmethod
+    def _latency_stats(cls, values: List[float], prefix: str) -> Dict:
+        clean = sorted(float(v) for v in values if v is not None)
+        if not clean:
+            return {
+                f"{prefix}_latency_mean_sec": None,
+                f"{prefix}_latency_median_sec": None,
+                f"{prefix}_latency_p90_sec": None,
+                f"{prefix}_latency_p95_sec": None,
+            }
+        return {
+            f"{prefix}_latency_mean_sec": round(float(sum(clean) / len(clean)), 6),
+            f"{prefix}_latency_median_sec": cls._percentile(clean, 0.50),
+            f"{prefix}_latency_p90_sec": cls._percentile(clean, 0.90),
+            f"{prefix}_latency_p95_sec": cls._percentile(clean, 0.95),
+        }
+
+    @classmethod
+    def _compute_llm_latency_summary(cls, active: _RunRecord) -> Dict:
+        planning_roles = {"planning", "heartbeat", "replan", "initial_plan"}
+        evaluator_roles = {"evaluator"}
+        planning_latencies: List[float] = []
+        evaluator_latencies: List[float] = []
+        json_attempts = 0
+        json_successes = 0
+        actual_planning_count = 0
+        actual_evaluator_count = 0
+        planning_skips = 0
+        evaluator_skips = 0
+        for trace in list(active.planning_trace or []):
+            role = str(trace.get("llm_call_role") or trace.get("planning_stage") or "").strip().lower()
+            skipped = bool(trace.get("skipped_due_to_inflight"))
+            if skipped:
+                if role in evaluator_roles:
+                    evaluator_skips += 1
+                else:
+                    planning_skips += 1
+                continue
+            is_actual = bool(trace.get("llm_call_id")) and trace.get("latency_sec") is not None
+            if not is_actual:
+                continue
+            try:
+                latency = float(trace.get("latency_sec"))
+            except Exception:
+                continue
+            if role in evaluator_roles:
+                evaluator_latencies.append(latency)
+                actual_evaluator_count += 1
+            elif role in planning_roles:
+                planning_latencies.append(latency)
+                actual_planning_count += 1
+            if trace.get("json_parse_success") is not None:
+                json_attempts += 1
+                if bool(trace.get("json_parse_success")):
+                    json_successes += 1
+        all_latencies = list(planning_latencies) + list(evaluator_latencies)
+        summary = {}
+        summary.update(cls._latency_stats(planning_latencies, "planning"))
+        summary.update(cls._latency_stats(evaluator_latencies, "evaluator"))
+        summary.update(cls._latency_stats(all_latencies, "all_llm"))
+        summary.update(
+            {
+                "actual_planning_call_count": int(actual_planning_count),
+                "actual_evaluator_call_count": int(actual_evaluator_count),
+                "planning_skipped_due_to_inflight_count": int(planning_skips),
+                "evaluator_skipped_due_to_inflight_count": int(evaluator_skips),
+                "actual_llm_request_count": int(actual_planning_count + actual_evaluator_count),
+                "json_parse_success_rate": (None if json_attempts == 0 else round(float(json_successes / json_attempts), 6)),
+            }
+        )
+        return summary
+
     def get_pending_run_summary(self) -> Dict:
         with self._lock:
             active = self._pending_completed
@@ -556,6 +672,7 @@ class TaskRunLogger:
         completion_ratio = 0.0
         if active_scope_ids:
             completion_ratio = float(len([cid for cid in true_completed if cid in set(active_scope_ids)])) / float(len(active_scope_ids))
+        llm_latency_summary = self._compute_llm_latency_summary(active)
         return {
             "run_id": active.run_id,
             "task_id": active.task_id,
@@ -600,6 +717,7 @@ class TaskRunLogger:
             "evaluator_model_id": active.run_context.get("evaluator_model_id", ""),
             "lmstudio_base_url": active.run_context.get("lmstudio_base_url", ""),
             "lmstudio_connected": bool(active.run_context.get("lmstudio_connected", False)),
+            **llm_latency_summary,
             "runtime_trace_count": len(active.runtime_trace),
             "planning_trace_count": len(active.planning_trace),
         }
@@ -645,6 +763,7 @@ class TaskRunLogger:
                 self._append_jsonl_line(self.planning_trace_jsonl_path, row)
 
         planner_info = active.planner_info or {}
+        llm_latency_summary = self._compute_llm_latency_summary(active)
         final_mission_summary = dict(final.get("final_mission_summary") or {})
         completion_time_mission_sec = (
             None if not bool(active.mission_success)
@@ -681,6 +800,23 @@ class TaskRunLogger:
             "completion_time_mission_sec": completion_time_mission_sec,
             "total_replan_count": int(final_mission_summary.get("replan_count", (final or {}).get("replan_count", 0)) or 0),
             "total_llm_call_count": int(active.llm_call_count),
+            "actual_planning_call_count": llm_latency_summary["actual_planning_call_count"],
+            "actual_evaluator_call_count": llm_latency_summary["actual_evaluator_call_count"],
+            "planning_skipped_due_to_inflight_count": llm_latency_summary["planning_skipped_due_to_inflight_count"],
+            "evaluator_skipped_due_to_inflight_count": llm_latency_summary["evaluator_skipped_due_to_inflight_count"],
+            "planning_latency_mean_sec": llm_latency_summary["planning_latency_mean_sec"],
+            "planning_latency_median_sec": llm_latency_summary["planning_latency_median_sec"],
+            "planning_latency_p90_sec": llm_latency_summary["planning_latency_p90_sec"],
+            "planning_latency_p95_sec": llm_latency_summary["planning_latency_p95_sec"],
+            "evaluator_latency_mean_sec": llm_latency_summary["evaluator_latency_mean_sec"],
+            "evaluator_latency_median_sec": llm_latency_summary["evaluator_latency_median_sec"],
+            "evaluator_latency_p90_sec": llm_latency_summary["evaluator_latency_p90_sec"],
+            "evaluator_latency_p95_sec": llm_latency_summary["evaluator_latency_p95_sec"],
+            "all_llm_latency_mean_sec": llm_latency_summary["all_llm_latency_mean_sec"],
+            "all_llm_latency_median_sec": llm_latency_summary["all_llm_latency_median_sec"],
+            "all_llm_latency_p90_sec": llm_latency_summary["all_llm_latency_p90_sec"],
+            "all_llm_latency_p95_sec": llm_latency_summary["all_llm_latency_p95_sec"],
+            "json_parse_success_rate": llm_latency_summary["json_parse_success_rate"],
             "collision_count": int(final_mission_summary.get("collision_count", (final or {}).get("collision_count", 0)) or 0),
             "near_miss_count": int(final_mission_summary.get("near_miss_count", (final or {}).get("near_miss_count", 0)) or 0),
             "min_uav_worker_distance_m": active.min_uav_worker_distance_m,
@@ -718,6 +854,7 @@ class TaskRunLogger:
             "completion_time_mission_sec": completion_time_mission_sec,
             "replan_count": int(final_mission_summary.get("replan_count", (final or {}).get("replan_count", 0)) or 0),
             "llm_call_count": int(active.llm_call_count),
+            **llm_latency_summary,
             "collision_count": int(final_mission_summary.get("collision_count", (final or {}).get("collision_count", 0)) or 0),
             "near_miss_count": int(final_mission_summary.get("near_miss_count", (final or {}).get("near_miss_count", 0)) or 0),
             "min_uav_worker_distance_m": active.min_uav_worker_distance_m,
