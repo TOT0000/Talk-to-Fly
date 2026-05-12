@@ -60,7 +60,6 @@ from .benchmark_layout import (
     UAV_RADIUS_M,
     WORKER_RADIUS_M,
 )
-from .langgraph_agent import LangGraphOrchestrationRunner
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PREDICTED_COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = TYPEFLY_REPLAN_THRESHOLD
@@ -284,7 +283,6 @@ class LLMController():
         self._interrupt_pending_until_new_plan = False
         self._last_exec_flow_blocked_log_ts = 0.0
         self._last_exec_flow_blocked_signature = ""
-        self.langgraph_runner = LangGraphOrchestrationRunner(self)
         self.set_selected_pipeline(self.selected_pipeline_id)
         self.set_manual_agent_models(self.manual_planner_model_id, self.manual_evaluator_model_id)
 

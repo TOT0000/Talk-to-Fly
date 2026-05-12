@@ -62,3 +62,19 @@ def test_llm_wrapper_provider_model_mapping_and_logs_exist():
     assert '[LLM] base_url=' in source
     assert '[LLM] model_name=' in source
     assert '[LLM] key_source=' in source
+
+
+def test_four_experiment_pipelines_do_not_depend_on_removed_graph_runner():
+    registry_source = Path('controller/pipeline_registry.py').read_text(encoding='utf-8')
+    controller_source = Path('controller/llm_controller.py').read_text(encoding='utf-8')
+    planner_source = Path('controller/llm_planner.py').read_text(encoding='utf-8')
+    graph_token = 'lang' + 'graph'
+
+    for pipeline_id in ['baseline1', 'baseline2', 'agent', 'baseline3']:
+        assert f'id="{pipeline_id}"' in registry_source
+    assert 'base_mode="agent-heartbeat-soft"' in registry_source
+    assert 'base_mode="typefly-threshold-replan"' in registry_source
+    assert 'plan_agent_heartbeat' in planner_source
+    assert 'evaluate_agent_replan_record' in planner_source
+    assert graph_token not in controller_source.lower()
+    assert graph_token not in planner_source.lower()
