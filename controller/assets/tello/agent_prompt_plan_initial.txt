@@ -1,3 +1,7 @@
+/no_think
+Do not output reasoning, analysis, chain-of-thought, hidden thoughts, or <think> tags.
+Return only the required final output in assistant content.
+
 {BASELINE2_OPENING_BLOCK}
 
 {BASELINE2_RUNTIME_CONTEXT_BLOCK}
@@ -34,4 +38,6 @@ Agent initial examples:
 Task description:
 {task_description}
 
+Return MiniSpec only.
+Do not output <think>, reasoning, analysis, Markdown, JSON, or explanations.
 response:
