@@ -3368,17 +3368,31 @@ class LLMController():
         mission_end_ts = time.time()
         self.mission_end_ts = mission_end_ts if bool(mission_success) else None
         completion_state = self._derive_completion_state_from_snapshot(snapshot)
+        completion_time_mission_sec = (
+            None
+            if (not bool(mission_success) or self.mission_start_ts is None or self.mission_end_ts is None)
+            else round(float(self.mission_end_ts) - float(self.mission_start_ts), 3)
+        )
+        total_llm_wait_hover_sec = round(float(getattr(self, "total_llm_wait_hover_sec", 0.0) or 0.0), 6)
+        completion_time_excluding_llm_wait_sec = (
+            None
+            if completion_time_mission_sec is None
+            else max(0.0, round(float(completion_time_mission_sec) - float(total_llm_wait_hover_sec), 6))
+        )
+        print_debug(
+            "[FINAL-SUMMARY-TIMING] "
+            f"completion_time_mission_sec={completion_time_mission_sec} "
+            f"total_llm_wait_hover_sec={total_llm_wait_hover_sec} "
+            f"completion_time_excluding_llm_wait_sec={completion_time_excluding_llm_wait_sec}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
+        )
         summary = {
             "run_status": str(run_status),
             "mission_success": bool(mission_success),
             "termination_reason": str(termination_reason or ""),
             "mission_start_ts": self.mission_start_ts,
             "mission_end_ts": self.mission_end_ts,
-            "completion_time_mission_sec": (
-                None
-                if (not bool(mission_success) or self.mission_start_ts is None or self.mission_end_ts is None)
-                else round(float(self.mission_end_ts) - float(self.mission_start_ts), 3)
-            ),
+            "completion_time_mission_sec": completion_time_mission_sec,
             "collision_count": int((snapshot or {}).get("collision_count", 0) or 0),
             "near_miss_count": int((snapshot or {}).get("near_miss_count", 0) or 0),
             "replan_count": int(getattr(self, "_replan_attempts", 0)),
@@ -3400,8 +3414,8 @@ class LLMController():
             "next_statement_executed_after_interrupt": bool(self.next_statement_executed_after_interrupt),
             "heartbeat_seconds": (float(self.heartbeat_interval_seconds) if self._is_agent_heartbeat_mode() else None),
             "predicted_collision_threshold": (float(self.predicted_collision_replan_threshold) if self._is_threshold_replan_mode() else None),
-            "total_llm_wait_hover_sec": round(float(self.total_llm_wait_hover_sec), 6),
-            "completion_time_excluding_llm_wait_sec": max(0.0, round(float((0.0 if (summary.get("completion_time_mission_sec") is None) else summary.get("completion_time_mission_sec"))) - float(self.total_llm_wait_hover_sec), 6)),
+            "total_llm_wait_hover_sec": total_llm_wait_hover_sec,
+            "completion_time_excluding_llm_wait_sec": completion_time_excluding_llm_wait_sec,
             "llm_wait_event_count": int(self.llm_wait_event_count),
             "llm_wait_intervals": list(self.llm_wait_intervals),
         }
