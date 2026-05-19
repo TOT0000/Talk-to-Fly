@@ -729,6 +729,11 @@ class TaskRunLogger:
             "lmstudio_connected": bool(active.run_context.get("lmstudio_connected", False)),
             **llm_latency_summary,
             "runtime_trace_count": len(active.runtime_trace),
+            "trajectory_sample_count": int(final_mission_summary.get("trajectory_sample_count", 0) or 0),
+            "trajectory_buffer_source": str(final_mission_summary.get("trajectory_buffer_source", "runtime_snapshot_fallback")),
+            "trajectory_max_sample_dt_sec": final_mission_summary.get("trajectory_max_sample_dt_sec"),
+            "trajectory_mean_sample_dt_sec": final_mission_summary.get("trajectory_mean_sample_dt_sec"),
+            "trajectory_max_segment_distance_m": final_mission_summary.get("trajectory_max_segment_distance_m"),
             "planning_trace_count": len(active.planning_trace),
         }
 

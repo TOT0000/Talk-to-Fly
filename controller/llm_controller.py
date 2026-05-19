@@ -297,7 +297,36 @@ class LLMController():
         self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
         self._owns_sim_user_publisher = False
         self.virtual_position_active = False
+        self._latest_uav_trajectory_points: list[dict] = []
+        self._latest_uav_trajectory_stats: dict = {}
         self._virtual_position_thread: Optional[threading.Thread] = None
+
+
+    def set_uav_trajectory_points(self, points):
+        data = list(points or [])
+        self._latest_uav_trajectory_points = data
+        if len(data) < 2:
+            self._latest_uav_trajectory_stats = {
+                "trajectory_sample_count": len(data),
+                "trajectory_max_sample_dt_sec": 0.0,
+                "trajectory_mean_sample_dt_sec": 0.0,
+                "trajectory_max_segment_distance_m": 0.0,
+                "trajectory_buffer_source": "position_callback",
+            }
+            return
+        dts=[]
+        dists=[]
+        for i in range(1,len(data)):
+            a,b=data[i-1],data[i]
+            dts.append(max(0.0,float(b.get("ts",0.0))-float(a.get("ts",0.0))))
+            dists.append(math.sqrt((float(b.get("x",0.0))-float(a.get("x",0.0)))**2 + (float(b.get("y",0.0))-float(a.get("y",0.0)))**2 + (float(b.get("z",0.0))-float(a.get("z",0.0)))**2))
+        self._latest_uav_trajectory_stats = {
+            "trajectory_sample_count": len(data),
+            "trajectory_max_sample_dt_sec": float(max(dts) if dts else 0.0),
+            "trajectory_mean_sample_dt_sec": float(sum(dts)/len(dts) if dts else 0.0),
+            "trajectory_max_segment_distance_m": float(max(dists) if dists else 0.0),
+            "trajectory_buffer_source": "position_callback",
+        }
 
     def _default_active_objective_set(self) -> dict:
         return {
@@ -995,6 +1024,8 @@ class LLMController():
         
     def stop_virtual_position_loop(self):
         self.virtual_position_active = False
+        self._latest_uav_trajectory_points: list[dict] = []
+        self._latest_uav_trajectory_stats: dict = {}
         if self._virtual_position_thread is not None and self._virtual_position_thread.is_alive():
             self._virtual_position_thread.join(timeout=1.0)
         self._virtual_position_thread = None
@@ -2446,6 +2477,16 @@ class LLMController():
         self._task_id_counter += 1
         task_id = f"task_{self._task_id_counter:05d}"
         initial_snapshot = self.get_live_ui_snapshot()
+        actual_trigger_params = dict(pipeline.trigger_params or {})
+        if self._is_agent_heartbeat_mode():
+            actual_trigger_params["heartbeat_seconds"] = float(self.heartbeat_interval_seconds)
+        if self._is_threshold_replan_mode():
+            actual_trigger_params["predicted_collision_threshold"] = float(self.predicted_collision_replan_threshold)
+        run_heartbeat_seconds = (float(self.heartbeat_interval_seconds) if self._is_agent_heartbeat_mode() else None)
+        run_predicted_collision_threshold = (
+            float(self.predicted_collision_replan_threshold) if self._is_threshold_replan_mode() else None
+        )
+
         self.task_run_logger.start_run(
             task_id=task_id,
             task_text=task_description,
@@ -2456,7 +2497,7 @@ class LLMController():
                 "selected_baseline_id": pipeline.id,
                 "selected_baseline_name": pipeline.name,
                 "trigger_type": pipeline.trigger_type,
-                "trigger_params": dict(pipeline.trigger_params),
+                "trigger_params": actual_trigger_params,
                 "prompt_variant": pipeline.prompt_variant,
                 "example_variant": pipeline.example_variant,
                 "state_fields": list(pipeline.state_fields),
@@ -2471,8 +2512,8 @@ class LLMController():
                 "evaluator_model_id": selected_models.get("evaluator_model_id", ""),
                 "lmstudio_base_url": str(lmstudio_status.get("base_url") or ""),
                 "lmstudio_connected": bool(lmstudio_status.get("connected")),
-                "heartbeat_seconds": (float(self.heartbeat_interval_seconds) if self._is_agent_heartbeat_mode() else None),
-                "predicted_collision_threshold": (float(self.predicted_collision_replan_threshold) if self._is_threshold_replan_mode() else None),
+                "heartbeat_seconds": run_heartbeat_seconds,
+                "predicted_collision_threshold": run_predicted_collision_threshold,
             },
         )
         self.task_run_logger.update_planner_info(
@@ -3386,6 +3427,7 @@ class LLMController():
             f"completion_time_excluding_llm_wait_sec={completion_time_excluding_llm_wait_sec}",
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
+        trajectory_stats = dict(getattr(self, "_latest_uav_trajectory_stats", {}) or {})
         summary = {
             "run_status": str(run_status),
             "mission_success": bool(mission_success),
@@ -3418,6 +3460,7 @@ class LLMController():
             "completion_time_excluding_llm_wait_sec": completion_time_excluding_llm_wait_sec,
             "llm_wait_event_count": int(self.llm_wait_event_count),
             "llm_wait_intervals": list(self.llm_wait_intervals),
+            **trajectory_stats,
         }
         self.final_mission_summary = dict(summary)
         return summary
