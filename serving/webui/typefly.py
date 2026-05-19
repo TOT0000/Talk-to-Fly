@@ -42,8 +42,9 @@ from controller.benchmark_layout import (
 from gradio import Timer
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-UI_TRAJECTORY_REFRESH_SECONDS = 0.25
-TRAJECTORY_HISTORY_MAX_POINTS = 5000
+UI_TRAJECTORY_REFRESH_SECONDS = 0.20
+TRAJECTORY_HISTORY_MAX_POINTS = 2000
+UI_POSITION_QUEUE_MAXSIZE = 2000
 
 
 class TypeFly:
@@ -53,8 +54,8 @@ class TypeFly:
             os.makedirs(self.cache_folder)
 
         self.message_queue = queue.Queue()
-        self.uwb_queue = queue.Queue(maxsize=500)
-        self.virtual_queue = queue.Queue(maxsize=500)
+        self.uwb_queue = queue.Queue(maxsize=UI_POSITION_QUEUE_MAXSIZE)
+        self.virtual_queue = queue.Queue(maxsize=UI_POSITION_QUEUE_MAXSIZE)
 
         controller_robot_type = RobotType.PX4_SIM if backend == "sim" else robot_type
         self.llm_controller = LLMController(controller_robot_type, self.virtual_queue, use_http, self.message_queue, enable_video=enable_video)
@@ -408,7 +409,8 @@ class TypeFly:
                 self.z_plot = gr.Image(value=self.create_sequence_plot("worker_3 3s Predicted Collision Probability", "Sample", "P(predicted collision)", xlim=(0, 1), ylim=(0, 1)), label="worker_3 P(predicted collision)", height=320)
 
             self.counter = gr.State(0)
-            self.timer = Timer(value=0.08)
+            # Keep tick cadence faster than render throttles so history/state ingestion stays near-real-time.
+            self.timer = Timer(value=0.05)
             self.timer.tick(
                 fn=self.update_and_step,
                 inputs=[self.counter, self.toggle_error_ellipse, self.toggle_raw_estimate],

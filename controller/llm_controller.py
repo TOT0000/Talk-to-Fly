@@ -3418,7 +3418,8 @@ class LLMController():
             if (not bool(mission_success) or self.mission_start_ts is None or self.mission_end_ts is None)
             else round(float(self.mission_end_ts) - float(self.mission_start_ts), 3)
         )
-        total_llm_wait_hover_sec = round(float(getattr(self, "total_llm_wait_hover_sec", 0.0) or 0.0), 6)
+        raw_total_llm_wait_hover_sec = getattr(self, "total_llm_wait_hover_sec", 0.0)
+        total_llm_wait_hover_sec = round(float(raw_total_llm_wait_hover_sec or 0.0), 6)
         completion_time_excluding_llm_wait_sec = (
             None
             if completion_time_mission_sec is None
