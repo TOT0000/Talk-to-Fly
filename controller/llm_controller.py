@@ -2477,6 +2477,16 @@ class LLMController():
         self._task_id_counter += 1
         task_id = f"task_{self._task_id_counter:05d}"
         initial_snapshot = self.get_live_ui_snapshot()
+        actual_trigger_params = dict(pipeline.trigger_params or {})
+        if self._is_agent_heartbeat_mode():
+            actual_trigger_params["heartbeat_seconds"] = float(self.heartbeat_interval_seconds)
+        if self._is_threshold_replan_mode():
+            actual_trigger_params["predicted_collision_threshold"] = float(self.predicted_collision_replan_threshold)
+        run_heartbeat_seconds = (float(self.heartbeat_interval_seconds) if self._is_agent_heartbeat_mode() else None)
+        run_predicted_collision_threshold = (
+            float(self.predicted_collision_replan_threshold) if self._is_threshold_replan_mode() else None
+        )
+
         self.task_run_logger.start_run(
             task_id=task_id,
             task_text=task_description,
@@ -2487,7 +2497,7 @@ class LLMController():
                 "selected_baseline_id": pipeline.id,
                 "selected_baseline_name": pipeline.name,
                 "trigger_type": pipeline.trigger_type,
-                "trigger_params": dict(pipeline.trigger_params),
+                "trigger_params": actual_trigger_params,
                 "prompt_variant": pipeline.prompt_variant,
                 "example_variant": pipeline.example_variant,
                 "state_fields": list(pipeline.state_fields),
@@ -2502,8 +2512,8 @@ class LLMController():
                 "evaluator_model_id": selected_models.get("evaluator_model_id", ""),
                 "lmstudio_base_url": str(lmstudio_status.get("base_url") or ""),
                 "lmstudio_connected": bool(lmstudio_status.get("connected")),
-                "heartbeat_seconds": (float(self.heartbeat_interval_seconds) if self._is_agent_heartbeat_mode() else None),
-                "predicted_collision_threshold": (float(self.predicted_collision_replan_threshold) if self._is_threshold_replan_mode() else None),
+                "heartbeat_seconds": run_heartbeat_seconds,
+                "predicted_collision_threshold": run_predicted_collision_threshold,
             },
         )
         self.task_run_logger.update_planner_info(
