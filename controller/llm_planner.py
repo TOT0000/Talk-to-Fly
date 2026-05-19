@@ -48,7 +48,8 @@ class LLMPlanner():
         self.runtime_use_output_example = True
         self._last_plan_trace = {}
         self._last_heartbeat_trace = {
-            "heartbeat_seconds": float(heartbeat_seconds),}
+            "heartbeat_seconds": None,
+        }
         with open(self.prompt_plan_path, "r") as f:
             self.prompt_plan = f.read()
 
