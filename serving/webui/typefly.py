@@ -282,7 +282,7 @@ class TypeFly:
             self.baseline_selector.change(
                 fn=self.set_selected_baseline,
                 inputs=[self.baseline_selector],
-                outputs=[self.scenario_status, self.agent_model_group, self.agent_model_status],
+                outputs=[self.scenario_status, self.agent_model_group, self.evaluator_model_input, self.heartbeat_interval_input, self.agent_model_status],
             )
             self.planning_agent_model_input.change(
                 fn=self.set_agent_models,
@@ -675,6 +675,8 @@ class TypeFly:
         return (
             f"Baseline switched to `{cfg.id}` ({cfg.name}).",
             gr.update(visible=(normalized in {"agent", "baseline2", "baseline3"})),
+            gr.update(visible=(normalized == "agent")),
+            gr.update(visible=(normalized in {"agent", "baseline2"})),
             self.render_agent_model_status(),
         )
 

@@ -237,6 +237,15 @@ class LLMPlanner():
     def get_last_heartbeat_trace(self) -> dict:
         return dict(self._last_heartbeat_trace or {})
 
+
+    @staticmethod
+    def _apply_heartbeat_seconds_text(text: str, heartbeat_seconds: float) -> str:
+        payload = str(text or "")
+        sec_text = f"{float(heartbeat_seconds):g}"
+        payload = payload.replace("once every 5 seconds", f"once every {sec_text} seconds")
+        payload = payload.replace("Heartbeat interval: 5 seconds", f"Heartbeat interval: {sec_text} seconds")
+        return payload
+
     def init(self, low_level_skillset: SkillSet, vision_skill: VisionSkillWrapper):
         self.low_level_skillset = low_level_skillset
         self.vision_skill = vision_skill
@@ -708,6 +717,7 @@ class LLMPlanner():
             if hard_gate
             else self._get_example_variant_payload().get("heartbeat_soft_examples", self.agent_heartbeat_soft_examples)
         )
+        agent_heartbeat_examples = self._apply_heartbeat_seconds_text(agent_heartbeat_examples, heartbeat_seconds)
         mission_original_plan_text = str(mission_original_plan or current_plan or "none")
         current_active_plan_text = str(current_active_plan or mission_original_plan_text)
         latest_full_replan_text = str(latest_full_replan_response or "none")
@@ -716,6 +726,7 @@ class LLMPlanner():
             if hard_gate
             else self._get_prompt_variant_payload().get("heartbeat_soft_prompt", self.agent_heartbeat_soft_prompt)
         )
+        heartbeat_prompt_template = self._apply_heartbeat_seconds_text(heartbeat_prompt_template, heartbeat_seconds)
         prompt = heartbeat_prompt_template.format(
             shared_opening_block=self._build_opening_block(),
             shared_runtime_context_block=self._build_runtime_context_block(
@@ -808,6 +819,7 @@ class LLMPlanner():
 
     def evaluate_agent_replan_record(self, replan_record: dict) -> dict:
         prompt_template = str(self.agent_evaluator_prompt or "").strip()
+        prompt_template = self._apply_heartbeat_seconds_text(prompt_template, self._last_heartbeat_trace.get("heartbeat_seconds") or 5.0)
         if not prompt_template:
             prompt_template = (
                 "You are an evaluator LLM. Return JSON with keys necessity_assessment, outcome_assessment, "
