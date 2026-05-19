@@ -43,7 +43,7 @@ from gradio import Timer
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 UI_TRAJECTORY_REFRESH_SECONDS = 0.25
-TRAJECTORY_HISTORY_MAX_POINTS = 2000
+TRAJECTORY_HISTORY_MAX_POINTS = 5000
 
 
 class TypeFly:
@@ -122,6 +122,7 @@ class TypeFly:
             "drone_gt": deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS),
             "drone_est": deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS),
         }
+        self.uav_trajectory_points = deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS)
         self.worker_collision_history = {
             "worker_1": deque(maxlen=100),
             "worker_2": deque(maxlen=100),
@@ -496,7 +497,19 @@ class TypeFly:
 
             # Preserve high-frequency trajectory points even when UI rendering is throttled.
             if source == "drone":
-                self.position_history["drone_gt"].append((float(x), float(y), float(z)))
+                point = {
+                    "ts": float(timestamp),
+                    "x": float(x),
+                    "y": float(y),
+                    "z": float(z),
+                    "source": "position_callback",
+                    "current_target_checkpoint": self.benchmark_progress.get("current_target"),
+                    "execution_mode": str(getattr(self.llm_controller, "execution_mode", self.execution_mode)),
+                }
+                self.position_history["drone_gt"].append((point["x"], point["y"], point["z"]))
+                self.uav_trajectory_points.append(point)
+                if hasattr(self.llm_controller, "set_uav_trajectory_points"):
+                    self.llm_controller.set_uav_trajectory_points(self.uav_trajectory_points)
 
 
 
@@ -596,6 +609,7 @@ class TypeFly:
             "drone_gt": deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS),
             "drone_est": deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS),
         }
+        self.uav_trajectory_points = deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS)
         self.worker_collision_history = {
             "worker_1": deque(maxlen=100),
             "worker_2": deque(maxlen=100),
@@ -1098,6 +1112,11 @@ class TypeFly:
             f"- near_miss_count: {summary.get('near_miss_count', 0)}",
             f"- completion_ratio: {float(summary.get('completion_ratio', 0.0)):.2f}",
             f"- runtime_trace_count: {summary.get('runtime_trace_count', 0)}",
+            f"- trajectory_sample_count: {summary.get('trajectory_sample_count', 0)}",
+            f"- trajectory_buffer_source: {summary.get('trajectory_buffer_source', 'n/a')}",
+            f"- trajectory_max_sample_dt_sec: {summary.get('trajectory_max_sample_dt_sec', 'n/a')}",
+            f"- trajectory_mean_sample_dt_sec: {summary.get('trajectory_mean_sample_dt_sec', 'n/a')}",
+            f"- trajectory_max_segment_distance_m: {summary.get('trajectory_max_segment_distance_m', 'n/a')}",
             f"- planning_trace_count: {summary.get('planning_trace_count', 0)}",
             f"- planning_latency_mean_sec: {summary.get('planning_latency_mean_sec', 'n/a')}",
             f"- evaluator_latency_mean_sec: {summary.get('evaluator_latency_mean_sec', 'n/a')}",
@@ -1213,12 +1232,21 @@ class TypeFly:
         if not snapshot:
             return
         for key, value in positions.items():
+            if key not in self.position_history:
+                self.position_history[key] = deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS)
             if value is not None:
                 self.position_history[key].append(tuple(float(v) for v in value))
-                print_debug(
-                    f"[UI-HISTORY] key={key} appended={self.position_history[key][-1]}",
-                    env_var="TYPEFLY_VERBOSE_DEBUG",
-                )
+                if self.position_history[key]:
+                    print_debug(
+                        f"[UI-HISTORY] key={key} appended={self.position_history[key][-1]}",
+                        env_var="TYPEFLY_VERBOSE_DEBUG",
+                    )
+
+
+    def _trajectory_xy_history(self):
+        if self.uav_trajectory_points:
+            return [(float(p["x"]), float(p["y"])) for p in self.uav_trajectory_points]
+        return list(self.position_history.get("drone_gt", []))
 
     def _append_worker_collision_history(self, snapshot):
         safety_context = snapshot.get("safety_context") if snapshot else None
@@ -1404,7 +1432,7 @@ class TypeFly:
 
         drone_gt = positions.get("drone_gt")
         drone_est = positions.get("drone_est")
-        gt_history = list(self.position_history.get("drone_gt", []))
+        gt_history = self._trajectory_xy_history()
         est_history = list(self.position_history.get("drone_est", []))
         if len(gt_history) >= 2:
             ax_xy.plot(
