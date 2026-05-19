@@ -108,6 +108,9 @@ class TypeFly:
             self.planning_agent_model_id,
             self.evaluator_model_id,
         )
+        self.default_planning_agent_model_id = self.planning_agent_model_id
+        self.default_evaluator_model_id = self.evaluator_model_id
+        self.default_heartbeat_interval_seconds = float(getattr(self.llm_controller, "heartbeat_interval_seconds", 5.0))
         self.selected_worker_move_step = 0.5
         self.selected_worker_turn_step = 15.0
 
@@ -277,7 +280,13 @@ class TypeFly:
             self.reset_system_btn.click(
                 fn=self.reset_system_state,
                 inputs=[],
-                outputs=[self.scenario_status],
+                outputs=[
+                    self.scenario_status,
+                    self.planning_agent_model_input,
+                    self.evaluator_model_input,
+                    self.heartbeat_interval_input,
+                    self.agent_model_status,
+                ],
             )
             self.baseline_selector.change(
                 fn=self.set_selected_baseline,
@@ -654,6 +663,13 @@ class TypeFly:
 
     def reset_system_state(self):
         try:
+            selected = self.llm_controller.set_manual_agent_models(
+                self.default_planning_agent_model_id,
+                self.default_evaluator_model_id,
+            )
+            self.llm_controller.set_manual_heartbeat_interval(self.default_heartbeat_interval_seconds)
+            self.planning_agent_model_id = selected.get("planner_model_id", self.default_planning_agent_model_id)
+            self.evaluator_model_id = selected.get("evaluator_model_id", self.default_evaluator_model_id)
             self.llm_controller.current_plan = None
             self.llm_controller.execution_history = None
             self.llm_controller.current_task_description = ""
@@ -664,9 +680,21 @@ class TypeFly:
             self.llm_controller._reset_benchmark_progress_tracking()
             self.llm_controller.apply_baseline_scene()
             self._reset_runtime_records()
-            return "System reset complete: drone/workers repositioned and runtime progress cleared (archive logs retained)."
+            return (
+                "System reset complete: drone/workers repositioned and runtime progress cleared; pipeline model/trigger settings restored to defaults.",
+                gr.update(value=self.planning_agent_model_id),
+                gr.update(value=self.evaluator_model_id),
+                gr.update(value=float(self.default_heartbeat_interval_seconds)),
+                self.render_agent_model_status(),
+            )
         except Exception as e:
-            return f"System reset failed: {e}"
+            return (
+                f"System reset failed: {e}",
+                gr.update(),
+                gr.update(),
+                gr.update(),
+                self.render_agent_model_status(),
+            )
 
     def set_selected_baseline(self, baseline_id: str):
         normalized = self.llm_controller.set_selected_pipeline(baseline_id)
