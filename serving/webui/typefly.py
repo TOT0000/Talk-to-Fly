@@ -43,6 +43,7 @@ from gradio import Timer
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 UI_TRAJECTORY_REFRESH_SECONDS = 0.20
+UI_MAIN_TIMER_TICK_SECONDS = 0.02
 TRAJECTORY_HISTORY_MAX_POINTS = 2000
 UI_POSITION_QUEUE_MAXSIZE = 2000
 
@@ -134,9 +135,10 @@ class TypeFly:
             "worker_2": False,
             "worker_3": False,
         }
+        self._position_queue_drop_count = {"user": 0, "drone": 0}
         # UI trajectory/workspace/status refresh intervals (higher frequency for smoother trajectory updates).
         self._workspace_render_interval_sec = UI_TRAJECTORY_REFRESH_SECONDS
-        self._probability_render_interval_sec = 0.50
+        self._probability_render_interval_sec = UI_TRAJECTORY_REFRESH_SECONDS
         self._status_render_interval_sec = UI_TRAJECTORY_REFRESH_SECONDS
         self._postrun_render_interval_sec = 1.00
         self._last_workspace_render_ts = 0.0
@@ -410,7 +412,7 @@ class TypeFly:
 
             self.counter = gr.State(0)
             # Keep tick cadence faster than render throttles so history/state ingestion stays near-real-time.
-            self.timer = Timer(value=0.05)
+            self.timer = Timer(value=UI_MAIN_TIMER_TICK_SECONDS)
             self.timer.tick(
                 fn=self.update_and_step,
                 inputs=[self.counter, self.toggle_error_ellipse, self.toggle_raw_estimate],
@@ -481,9 +483,17 @@ class TypeFly:
                 if source == "user":
                     self.uwb_queue.get()
                     self.uwb_queue.put_nowait((timestamp, x, y, z))
+                    self._position_queue_drop_count["user"] = int(self._position_queue_drop_count.get("user", 0)) + 1
                 elif source == "drone":
                     self.virtual_queue.get()
                     self.virtual_queue.put_nowait((timestamp, x, y, z))
+                    self._position_queue_drop_count["drone"] = int(self._position_queue_drop_count.get("drone", 0)) + 1
+                print_debug(
+                    "[UI-POSITION-QUEUE] "
+                    f"source={source} queue_full_drop_count={self._position_queue_drop_count.get(source, 0)} "
+                    f"queue_maxsize={UI_POSITION_QUEUE_MAXSIZE}",
+                    env_var="TYPEFLY_VERBOSE_DEBUG",
+                )
 
             # 每種來源各自印出，每 5 秒一次
             if not hasattr(self, '_last_print_position_map'):
@@ -625,6 +635,7 @@ class TypeFly:
             "worker_2": False,
             "worker_3": False,
         }
+        self._position_queue_drop_count = {"user": 0, "drone": 0}
         self.mission_collision_count = 0
         self.mission_clock = {
             "started_at": None,

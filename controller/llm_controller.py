@@ -3419,7 +3419,10 @@ class LLMController():
             else round(float(self.mission_end_ts) - float(self.mission_start_ts), 3)
         )
         raw_total_llm_wait_hover_sec = getattr(self, "total_llm_wait_hover_sec", 0.0)
-        total_llm_wait_hover_sec = round(float(raw_total_llm_wait_hover_sec or 0.0), 6)
+        try:
+            total_llm_wait_hover_sec = round(float(raw_total_llm_wait_hover_sec or 0.0), 6)
+        except (TypeError, ValueError):
+            total_llm_wait_hover_sec = 0.0
         completion_time_excluding_llm_wait_sec = (
             None
             if completion_time_mission_sec is None
