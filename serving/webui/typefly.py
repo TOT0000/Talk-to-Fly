@@ -42,6 +42,7 @@ from controller.benchmark_layout import (
 from gradio import Timer
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+UI_TRAJECTORY_REFRESH_SECONDS = 0.50
 
 
 class TypeFly:
@@ -127,7 +128,8 @@ class TypeFly:
             "worker_2": False,
             "worker_3": False,
         }
-        self._workspace_render_interval_sec = 0.22
+        # UI trajectory/workspace/status refresh intervals (higher frequency for smoother trajectory updates).
+        self._workspace_render_interval_sec = UI_TRAJECTORY_REFRESH_SECONDS
         self._probability_render_interval_sec = 0.50
         self._status_render_interval_sec = 0.35
         self._postrun_render_interval_sec = 1.00
@@ -187,17 +189,24 @@ class TypeFly:
                         value=self.selected_baseline_id,
                         label="Baseline Pipeline",
                     )
-                    with gr.Group(visible=(self.selected_baseline_id == "agent")) as self.agent_model_group:
-                        gr.Markdown("### Agent-Feedback-Eval Models")
+                    with gr.Group(visible=(self.selected_baseline_id in {"agent", "baseline2", "baseline3"})) as self.agent_model_group:
+                        gr.Markdown("### Pipeline Model / Trigger Settings")
                         self.planning_agent_model_input = gr.Textbox(
                             value=self.planning_agent_model_id,
-                            label="Planning agent model",
+                            label="Planning model",
                             placeholder="e.g. google/gemma-2-9b",
                         )
                         self.evaluator_model_input = gr.Textbox(
                             value=self.evaluator_model_id,
                             label="Evaluator model",
                             placeholder="e.g. deepseek/deepseek-r1-0528-qwen3-8b",
+                            visible=(self.selected_baseline_id == "agent"),
+                        )
+                        self.heartbeat_interval_input = gr.Number(
+                            value=float(getattr(self.llm_controller, "heartbeat_interval_seconds", 5.0)),
+                            label="Heartbeat / LLM call interval seconds",
+                            precision=2,
+                            visible=(self.selected_baseline_id in {"agent", "baseline2"}),
                         )
                         self.agent_model_status = gr.Markdown(value=self.render_agent_model_status())
                     self.postrun_summary = gr.Markdown(value="### Post-run archive\nNo finished run awaiting decision.")
@@ -277,12 +286,17 @@ class TypeFly:
             )
             self.planning_agent_model_input.change(
                 fn=self.set_agent_models,
-                inputs=[self.planning_agent_model_input, self.evaluator_model_input],
+                inputs=[self.planning_agent_model_input, self.evaluator_model_input, self.heartbeat_interval_input],
                 outputs=[self.scenario_status, self.agent_model_status],
             )
             self.evaluator_model_input.change(
                 fn=self.set_agent_models,
-                inputs=[self.planning_agent_model_input, self.evaluator_model_input],
+                inputs=[self.planning_agent_model_input, self.evaluator_model_input, self.heartbeat_interval_input],
+                outputs=[self.scenario_status, self.agent_model_status],
+            )
+            self.heartbeat_interval_input.change(
+                fn=self.set_agent_models,
+                inputs=[self.planning_agent_model_input, self.evaluator_model_input, self.heartbeat_interval_input],
                 outputs=[self.scenario_status, self.agent_model_status],
             )
             self.save_run_btn.click(
@@ -660,7 +674,7 @@ class TypeFly:
         cfg = PIPELINE_REGISTRY[normalized]
         return (
             f"Baseline switched to `{cfg.id}` ({cfg.name}).",
-            gr.update(visible=(normalized == "agent")),
+            gr.update(visible=(normalized in {"agent", "baseline2", "baseline3"})),
             self.render_agent_model_status(),
         )
 
@@ -694,8 +708,9 @@ class TypeFly:
             f"{warning_block}"
         )
 
-    def set_agent_models(self, planning_agent_model: str, evaluator_model: str):
+    def set_agent_models(self, planning_agent_model: str, evaluator_model: str, heartbeat_seconds=None):
         selected = self.llm_controller.set_manual_agent_models(planning_agent_model, evaluator_model)
+        self.llm_controller.set_manual_heartbeat_interval(heartbeat_seconds)
         self.planning_agent_model_id = selected.get("planner_model_id", "")
         self.evaluator_model_id = selected.get("evaluator_model_id", "")
         return "Agent models updated for the next run.", self.render_agent_model_status()

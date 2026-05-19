@@ -273,6 +273,13 @@ class LLMController():
         self._planning_generation = 0
         self._planning_response_queue: queue.Queue = queue.Queue()
         self._evaluator_response_queue: queue.Queue = queue.Queue()
+        self.awaiting_llm_response = False
+        self.llm_wait_hover_active = False
+        self.llm_wait_started_ts: Optional[float] = None
+        self.total_llm_wait_hover_sec = 0.0
+        self.llm_wait_event_count = 0
+        self.llm_wait_intervals: list[dict] = []
+        self.manual_heartbeat_interval_seconds: Optional[float] = None
         self.mission_start_ts: Optional[float] = None
         self.mission_end_ts: Optional[float] = None
         self.final_mission_summary: Optional[dict] = None
@@ -1956,6 +1963,7 @@ class LLMController():
             }
         )
         self._planning_response_queue.put({**request, "response": response, "llm_trace": trace, "request_start_ts": start_ts, "response_end_ts": end_ts})
+        self._finish_llm_wait(reason="planning_response")
         with self._planning_worker_lock:
             if int(request.get("generation", -1)) == int(self._planning_generation):
                 self._planning_inflight = False
@@ -2021,14 +2029,36 @@ class LLMController():
                     "full_replan_count": int(getattr(self, "_replan_attempts", 0)),
                     "hard_gate": (self.framework_mode == MODE_AGENT_HEARTBEAT_HARDGATE),
                     "feedback_memory_packets": feedback_memory_injected,
+                    "heartbeat_seconds": float(self.heartbeat_interval_seconds),
                 },
             }
             self._planning_inflight = True
+            self._start_llm_wait(reason="heartbeat")
             self._planning_worker_thread = threading.Thread(target=self._planning_worker_loop, args=(request_payload,), daemon=True)
             self._planning_worker_thread.start()
         self._agent_heartbeat_index = heartbeat_index
         self._start_agent_eval_worker_if_needed()
         return False
+
+    def _start_llm_wait(self, reason: str):
+        if self.awaiting_llm_response:
+            return
+        self.awaiting_llm_response = True
+        self.llm_wait_hover_active = True
+        self.llm_wait_started_ts = time.time()
+        self.llm_wait_event_count += 1
+
+    def _finish_llm_wait(self, reason: str):
+        if not self.awaiting_llm_response:
+            return
+        end_ts = time.time()
+        start_ts = float(self.llm_wait_started_ts or end_ts)
+        duration = max(0.0, end_ts - start_ts)
+        self.total_llm_wait_hover_sec += duration
+        self.llm_wait_intervals.append({"start_ts": start_ts, "end_ts": end_ts, "duration_sec": duration, "reason": reason, "mode": self.selected_pipeline_id})
+        self.awaiting_llm_response = False
+        self.llm_wait_hover_active = False
+        self.llm_wait_started_ts = None
 
     def _should_trigger_auto_replan(self, predicted_p: float, source: str) -> bool:
         if not self._is_threshold_replan_mode():
@@ -2143,6 +2173,8 @@ class LLMController():
         return None
 
     def _should_abort_current_execution_for_replan(self) -> Tuple[bool, str]:
+        if bool(self.awaiting_llm_response):
+            return True, "awaiting_llm_response_hover"
         if self._is_active_objective_completed():
             return False, ""
         event_triggered, event_reason = self._consume_runtime_replan_event()
@@ -2439,6 +2471,8 @@ class LLMController():
                 "evaluator_model_id": selected_models.get("evaluator_model_id", ""),
                 "lmstudio_base_url": str(lmstudio_status.get("base_url") or ""),
                 "lmstudio_connected": bool(lmstudio_status.get("connected")),
+                "heartbeat_seconds": (float(self.heartbeat_interval_seconds) if self._is_agent_heartbeat_mode() else None),
+                "predicted_collision_threshold": (float(self.predicted_collision_replan_threshold) if self._is_threshold_replan_mode() else None),
             },
         )
         self.task_run_logger.update_planner_info(
@@ -2484,6 +2518,12 @@ class LLMController():
         self.mission_start_ts = time.time()
         self.mission_end_ts = None
         self.final_mission_summary = None
+        self.awaiting_llm_response = False
+        self.llm_wait_hover_active = False
+        self.llm_wait_started_ts = None
+        self.total_llm_wait_hover_sec = 0.0
+        self.llm_wait_event_count = 0
+        self.llm_wait_intervals = []
         self.interrupted_for_replan = False
         self.entered_awaiting_replan_response = False
         self.execution_resumed_from_new_plan = False
@@ -2906,8 +2946,8 @@ class LLMController():
     def set_manual_agent_models(self, planner_model_id: str, evaluator_model_id: str) -> dict:
         if bool(self._run_model_lock_active) and self._run_locked_models:
             return dict(self._run_locked_models)
-        planner_model = str(planner_model_id or self.planner.model_name or "").strip()
-        evaluator_model = str(evaluator_model_id or planner_model or "").strip()
+        planner_model = str(planner_model_id or "gpt-4o").strip() or "gpt-4o"
+        evaluator_model = str(evaluator_model_id or "gpt-4o").strip() or "gpt-4o"
         self.manual_planner_model_id = planner_model
         self.manual_evaluator_model_id = evaluator_model
         self.planner.set_model(planner_model)
@@ -2919,6 +2959,19 @@ class LLMController():
             "planner_model_id": planner_model,
             "evaluator_model_id": evaluator_model,
         }
+
+
+    def set_manual_heartbeat_interval(self, heartbeat_seconds) -> float:
+        try:
+            if heartbeat_seconds is None or str(heartbeat_seconds).strip() == "":
+                self.manual_heartbeat_interval_seconds = None
+            else:
+                val = float(heartbeat_seconds)
+                self.manual_heartbeat_interval_seconds = val if val > 0 else None
+        except Exception:
+            self.manual_heartbeat_interval_seconds = None
+        self.set_selected_pipeline(self.selected_pipeline_id)
+        return float(self.heartbeat_interval_seconds)
 
     def set_selected_pipeline(self, pipeline_id: str) -> str:
         self.selected_pipeline_id = normalize_pipeline_id(pipeline_id)
@@ -2934,7 +2987,8 @@ class LLMController():
             self.predicted_collision_replan_threshold = float(PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD)
             self.predicted_collision_rearm_threshold = float(PREDICTED_COLLISION_PROBABILITY_REARM_THRESHOLD)
             self.predicted_collision_replan_strictly_greater = False
-            self.heartbeat_interval_seconds = float(config.trigger_params.get("heartbeat_seconds", AGENT_HEARTBEAT_INTERVAL_SECONDS))
+            configured = float(config.trigger_params.get("heartbeat_seconds", AGENT_HEARTBEAT_INTERVAL_SECONDS))
+            self.heartbeat_interval_seconds = float(self.manual_heartbeat_interval_seconds or configured)
         self.planner.set_runtime_prompt_example_variant(
             prompt_variant=config.prompt_variant,
             example_variant=config.example_variant,
@@ -3344,6 +3398,12 @@ class LLMController():
             "entered_awaiting_replan_response": bool(self.entered_awaiting_replan_response),
             "execution_resumed_from_new_plan": bool(self.execution_resumed_from_new_plan),
             "next_statement_executed_after_interrupt": bool(self.next_statement_executed_after_interrupt),
+            "heartbeat_seconds": (float(self.heartbeat_interval_seconds) if self._is_agent_heartbeat_mode() else None),
+            "predicted_collision_threshold": (float(self.predicted_collision_replan_threshold) if self._is_threshold_replan_mode() else None),
+            "total_llm_wait_hover_sec": round(float(self.total_llm_wait_hover_sec), 6),
+            "completion_time_excluding_llm_wait_sec": max(0.0, round(float((0.0 if (summary.get("completion_time_mission_sec") is None) else summary.get("completion_time_mission_sec"))) - float(self.total_llm_wait_hover_sec), 6)),
+            "llm_wait_event_count": int(self.llm_wait_event_count),
+            "llm_wait_intervals": list(self.llm_wait_intervals),
         }
         self.final_mission_summary = dict(summary)
         return summary

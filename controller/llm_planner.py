@@ -47,7 +47,8 @@ class LLMPlanner():
         self.runtime_example_variant = "default"
         self.runtime_use_output_example = True
         self._last_plan_trace = {}
-        self._last_heartbeat_trace = {}
+        self._last_heartbeat_trace = {
+            "heartbeat_seconds": float(heartbeat_seconds),}
         with open(self.prompt_plan_path, "r") as f:
             self.prompt_plan = f.read()
 
@@ -682,6 +683,7 @@ class LLMPlanner():
         full_replan_count: int = 0,
         hard_gate: bool = False,
         feedback_memory_packets: Optional[list] = None,
+        heartbeat_seconds: float = 5.0,
     ) -> dict:
         safety_context = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
         collision_probability = 0.0 if safety_context is None else float(getattr(safety_context, "predicted_collision_probability", 0.0))
@@ -764,6 +766,7 @@ class LLMPlanner():
             )
         prompt = (
             f"{prompt}\n\n"
+            f"Heartbeat interval for this run: {float(heartbeat_seconds):g} seconds.\n\n"
             f"{feedback_block}"
             f"Hard gate policy note: {hard_gate_rule}\n\n"
             f"{examples_block}"
@@ -790,6 +793,7 @@ class LLMPlanner():
             "parsed_ok": bool(parsed_ok),
         }
         self._last_heartbeat_trace = {
+            "heartbeat_seconds": float(heartbeat_seconds),
             "prompt": prompt,
             "raw_response": raw,
             "parsed_response": result,
