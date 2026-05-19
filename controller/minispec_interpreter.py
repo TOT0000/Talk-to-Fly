@@ -640,6 +640,7 @@ class MiniSpecInterpreter:
 
     def executor(self):
         queue_empty_since = None
+        llm_wait_pause_since = None
         while True:
             if callable(self.should_abort):
                 try:
@@ -647,6 +648,29 @@ class MiniSpecInterpreter:
                 except Exception:
                     should_abort, reason = (False, "")
                 if should_abort:
+                    reason_text = str(reason or "")
+                    if reason_text == "awaiting_llm_response_hover":
+                        now = time.time()
+                        if llm_wait_pause_since is None:
+                            llm_wait_pause_since = now
+                            print_t("[I] MiniSpec execution paused while awaiting LLM response; preserving current queue")
+                        if callable(self.on_execution_blocked):
+                            try:
+                                self.on_execution_blocked(
+                                    {
+                                        "reason": "awaiting_llm_response_hover",
+                                        "queue_size": int(self.execution_queue.qsize()),
+                                        "remaining_statements": int(self.program_count),
+                                        "blocked_for_s": float(now - llm_wait_pause_since),
+                                    }
+                                )
+                            except Exception:
+                                pass
+                        time.sleep(0.05)
+                        continue
+                    if llm_wait_pause_since is not None:
+                        print_t("[I] MiniSpec execution resumed after LLM wait")
+                        llm_wait_pause_since = None
                     dropped_count = self._drain_execution_queue()
                     print_t(
                         "[QUEUE] "
@@ -658,6 +682,9 @@ class MiniSpecInterpreter:
                     print_t(f"[I] {msg}")
                     self.ret_queue.put(MiniSpecReturnValue(msg, True))
                     return
+                if llm_wait_pause_since is not None:
+                    print_t("[I] MiniSpec execution resumed after LLM wait")
+                    llm_wait_pause_since = None
             if not self.execution_queue.empty():
                 queue_empty_since = None
                 if self.timestamp_start_execution is None:
