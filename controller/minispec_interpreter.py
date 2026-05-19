@@ -647,6 +647,20 @@ class MiniSpecInterpreter:
                 except Exception:
                     should_abort, reason = (False, "")
                 if should_abort:
+                    if str(reason or "").startswith("pause_for_llm_wait"):
+                        if callable(self.on_execution_blocked):
+                            try:
+                                self.on_execution_blocked(
+                                    {
+                                        "reason": str(reason),
+                                        "queue_size": int(self.execution_queue.qsize()),
+                                        "remaining_statements": int(self.program_count),
+                                    }
+                                )
+                            except Exception:
+                                pass
+                        time.sleep(0.01)
+                        continue
                     dropped_count = self._drain_execution_queue()
                     print_t(
                         "[QUEUE] "

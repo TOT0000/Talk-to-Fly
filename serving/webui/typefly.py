@@ -43,7 +43,7 @@ from gradio import Timer
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 UI_TRAJECTORY_REFRESH_SECONDS = 0.25
-TRAJECTORY_HISTORY_MAX_POINTS = 2000
+TRAJECTORY_HISTORY_MAX_POINTS = 5000
 
 
 class TypeFly:
@@ -122,6 +122,7 @@ class TypeFly:
             "drone_gt": deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS),
             "drone_est": deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS),
         }
+        self.uav_trajectory_points = deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS)
         self.worker_collision_history = {
             "worker_1": deque(maxlen=100),
             "worker_2": deque(maxlen=100),
@@ -497,6 +498,17 @@ class TypeFly:
             # Preserve high-frequency trajectory points even when UI rendering is throttled.
             if source == "drone":
                 self.position_history["drone_gt"].append((float(x), float(y), float(z)))
+                self.uav_trajectory_points.append(
+                    {
+                        "ts": float(timestamp),
+                        "x": float(x),
+                        "y": float(y),
+                        "z": float(z),
+                        "source": str(source),
+                        "execution_mode": str(getattr(self.llm_controller, "execution_mode", "")),
+                        "current_target": str((getattr(self.llm_controller, "latest_benchmark_progress", {}) or {}).get("current_target") or ""),
+                    }
+                )
 
 
 
@@ -596,6 +608,7 @@ class TypeFly:
             "drone_gt": deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS),
             "drone_est": deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS),
         }
+        self.uav_trajectory_points = deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS)
         self.worker_collision_history = {
             "worker_1": deque(maxlen=100),
             "worker_2": deque(maxlen=100),
@@ -1212,9 +1225,16 @@ class TypeFly:
         positions = self._extract_ui_positions(snapshot)
         if not snapshot:
             return
+        # keep rendered trajectory sourced from server-side callback buffer, not UI timer cadence.
+        if len(self.uav_trajectory_points) >= 2:
+            self.position_history["drone_gt"] = deque(
+                [(p["x"], p["y"], p["z"]) for p in self.uav_trajectory_points],
+                maxlen=TRAJECTORY_HISTORY_MAX_POINTS,
+            )
         for key, value in positions.items():
             if value is not None:
-                self.position_history[key].append(tuple(float(v) for v in value))
+                if key != "drone_gt":
+                    self.position_history[key].append(tuple(float(v) for v in value))
                 print_debug(
                     f"[UI-HISTORY] key={key} appended={self.position_history[key][-1]}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",

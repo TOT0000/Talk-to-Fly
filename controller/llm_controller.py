@@ -275,6 +275,8 @@ class LLMController():
         self._evaluator_response_queue: queue.Queue = queue.Queue()
         self.awaiting_llm_response = False
         self.llm_wait_hover_active = False
+        self.paused_for_llm_wait = False
+        self.llm_wait_pause_reason = ""
         self.llm_wait_started_ts: Optional[float] = None
         self.total_llm_wait_hover_sec = 0.0
         self.llm_wait_event_count = 0
@@ -1867,6 +1869,18 @@ class LLMController():
             self._agent_heartbeat_index = max(int(self._agent_heartbeat_index), heartbeat_index)
             response_type = str(response.get("response", "continue"))
             reason = str(response.get("reason", ""))
+            self.task_run_logger.append_planning_trace(
+                trace={
+                    "planning_stage": "heartbeat_response",
+                    "llm_call_purpose": "heartbeat_response_consume",
+                    "response_type": response_type,
+                    "whether_replan_committed": bool(response_type == "full_replan_plan"),
+                    "pause_reason": "llm_wait_hover",
+                    "resume_reason": "heartbeat_response_received",
+                    "selected_baseline_id": self.selected_pipeline_id,
+                    "scene_id": self.baseline_scene_id,
+                }
+            )
             if response_type == "full_replan_plan":
                 plan_text = self._sanitize_minispec_plan(response.get("plan", ""))
                 if plan_text:
@@ -2045,8 +2059,19 @@ class LLMController():
             return
         self.awaiting_llm_response = True
         self.llm_wait_hover_active = True
+        self.paused_for_llm_wait = True
+        self.llm_wait_pause_reason = str(reason or "llm_wait")
         self.llm_wait_started_ts = time.time()
         self.llm_wait_event_count += 1
+        self.task_run_logger.append_planning_trace(
+            trace={
+                "planning_stage": "llm_wait_started",
+                "llm_call_purpose": "llm_wait_started",
+                "pause_reason": self.llm_wait_pause_reason,
+                "selected_baseline_id": self.selected_pipeline_id,
+                "scene_id": self.baseline_scene_id,
+            }
+        )
 
     def _finish_llm_wait(self, reason: str):
         if not self.awaiting_llm_response:
@@ -2058,7 +2083,18 @@ class LLMController():
         self.llm_wait_intervals.append({"start_ts": start_ts, "end_ts": end_ts, "duration_sec": duration, "reason": reason, "mode": self.selected_pipeline_id})
         self.awaiting_llm_response = False
         self.llm_wait_hover_active = False
+        self.paused_for_llm_wait = False
+        self.llm_wait_pause_reason = ""
         self.llm_wait_started_ts = None
+        self.task_run_logger.append_planning_trace(
+            trace={
+                "planning_stage": "llm_wait_finished",
+                "llm_call_purpose": "llm_wait_finished",
+                "resume_reason": str(reason or "llm_response"),
+                "selected_baseline_id": self.selected_pipeline_id,
+                "scene_id": self.baseline_scene_id,
+            }
+        )
 
     def _should_trigger_auto_replan(self, predicted_p: float, source: str) -> bool:
         if not self._is_threshold_replan_mode():
@@ -2174,7 +2210,7 @@ class LLMController():
 
     def _should_abort_current_execution_for_replan(self) -> Tuple[bool, str]:
         if bool(self.awaiting_llm_response):
-            return True, "awaiting_llm_response_hover"
+            return True, f"pause_for_llm_wait:{self.llm_wait_pause_reason or 'awaiting_llm_response_hover'}"
         if self._is_active_objective_completed():
             return False, ""
         event_triggered, event_reason = self._consume_runtime_replan_event()
@@ -2520,6 +2556,8 @@ class LLMController():
         self.final_mission_summary = None
         self.awaiting_llm_response = False
         self.llm_wait_hover_active = False
+        self.paused_for_llm_wait = False
+        self.llm_wait_pause_reason = ""
         self.llm_wait_started_ts = None
         self.total_llm_wait_hover_sec = 0.0
         self.llm_wait_event_count = 0
@@ -2685,6 +2723,13 @@ class LLMController():
                     execution_success = bool(ret_val[0] is not False)
                 if hasattr(ret_val, "replan") and bool(ret_val.replan):
                     replan_value = str(getattr(ret_val, "value", "") or "")
+                    if replan_value.startswith("MiniSpec execution interrupted for replan: pause_for_llm_wait:"):
+                        self.execution_mode = "AwaitingLLMResponse"
+                        print_debug(
+                            f"[REPLAN_DEBUG] paused_for_llm_wait acknowledged value={replan_value}",
+                            env_var="TYPEFLY_VERBOSE_DEBUG",
+                        )
+                        continue
                     if selected_framework == MODE_TYPEFLY_ONESHOT:
                         print_debug(
                             f"[REPLAN_DEBUG] ret_val.replan ignored in oneshot mode value={replan_value}",
