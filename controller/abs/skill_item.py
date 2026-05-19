@@ -66,10 +66,16 @@ class SkillItem(ABC):
                 parsed_args.append(arg)
                 continue
             try:
-                if self.args[i].arg_type == bool:
-                    parsed_args.append(arg.strip().lower() == 'true')
+                expected_type = self.args[i].arg_type
+                stripped_arg = arg.strip()
+                if expected_type == bool:
+                    parsed_args.append(stripped_arg.lower() == 'true')
+                elif expected_type == int:
+                    # LLMs sometimes emit integer-valued arguments as decimal strings,
+                    # e.g. tu(90.00). Accept those instead of failing int("90.00").
+                    parsed_args.append(int(float(stripped_arg)))
                 else:
-                    parsed_args.append(self.args[i].arg_type(arg.strip()))
+                    parsed_args.append(expected_type(stripped_arg))
             except ValueError as e:
                 raise ValueError(f"Error parsing argument {i + 1}. Expected type {self.args[i].arg_type.__name__}, but got value '{arg.strip()}'. Original error: {e}")
         return parsed_args
