@@ -42,7 +42,8 @@ from controller.benchmark_layout import (
 from gradio import Timer
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-UI_TRAJECTORY_REFRESH_SECONDS = 0.50
+UI_TRAJECTORY_REFRESH_SECONDS = 0.25
+TRAJECTORY_HISTORY_MAX_POINTS = 5000
 
 
 class TypeFly:
@@ -118,9 +119,10 @@ class TypeFly:
         self.anchor_count = 0
         self.anchor_input_history = ""
         self.position_history = {
-            "drone_gt": deque(maxlen=100),
-            "drone_est": deque(maxlen=100),
+            "drone_gt": deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS),
+            "drone_est": deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS),
         }
+        self.uav_trajectory_points = deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS)
         self.worker_collision_history = {
             "worker_1": deque(maxlen=100),
             "worker_2": deque(maxlen=100),
@@ -134,7 +136,7 @@ class TypeFly:
         # UI trajectory/workspace/status refresh intervals (higher frequency for smoother trajectory updates).
         self._workspace_render_interval_sec = UI_TRAJECTORY_REFRESH_SECONDS
         self._probability_render_interval_sec = 0.50
-        self._status_render_interval_sec = 0.35
+        self._status_render_interval_sec = UI_TRAJECTORY_REFRESH_SECONDS
         self._postrun_render_interval_sec = 1.00
         self._last_workspace_render_ts = 0.0
         self._last_probability_render_ts = 0.0
@@ -493,6 +495,21 @@ class TypeFly:
             # 更新最後位置
             self._last_position_map[source] = current_pos
 
+            # Preserve high-frequency trajectory points even when UI rendering is throttled.
+            if source == "drone":
+                self.position_history["drone_gt"].append((float(x), float(y), float(z)))
+                self.uav_trajectory_points.append(
+                    {
+                        "ts": float(timestamp),
+                        "x": float(x),
+                        "y": float(y),
+                        "z": float(z),
+                        "source": str(source),
+                        "execution_mode": str(getattr(self.llm_controller, "execution_mode", "")),
+                        "current_target": str((getattr(self.llm_controller, "latest_benchmark_progress", {}) or {}).get("current_target") or ""),
+                    }
+                )
+
 
 
     def set_anchor_count(self, anchor_count_input):
@@ -588,9 +605,10 @@ class TypeFly:
 
     def _reset_runtime_records(self):
         self.position_history = {
-            "drone_gt": deque(maxlen=100),
-            "drone_est": deque(maxlen=100),
+            "drone_gt": deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS),
+            "drone_est": deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS),
         }
+        self.uav_trajectory_points = deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS)
         self.worker_collision_history = {
             "worker_1": deque(maxlen=100),
             "worker_2": deque(maxlen=100),
@@ -1207,9 +1225,16 @@ class TypeFly:
         positions = self._extract_ui_positions(snapshot)
         if not snapshot:
             return
+        # keep rendered trajectory sourced from server-side callback buffer, not UI timer cadence.
+        if len(self.uav_trajectory_points) >= 2:
+            self.position_history["drone_gt"] = deque(
+                [(p["x"], p["y"], p["z"]) for p in self.uav_trajectory_points],
+                maxlen=TRAJECTORY_HISTORY_MAX_POINTS,
+            )
         for key, value in positions.items():
             if value is not None:
-                self.position_history[key].append(tuple(float(v) for v in value))
+                if key != "drone_gt":
+                    self.position_history[key].append(tuple(float(v) for v in value))
                 print_debug(
                     f"[UI-HISTORY] key={key} appended={self.position_history[key][-1]}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
