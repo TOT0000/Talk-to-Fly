@@ -259,6 +259,9 @@ class LLMController():
         self._current_active_plan: Optional[str] = None
         self._latest_full_replan_response: Optional[str] = None
         self._agent_heartbeat_index = 0
+        self.last_planning_response_commit_ts = 0.0
+        self.next_planning_allowed_ts = 0.0
+        self.planning_response_commit_count = 0
         self._agent_pending_replan_records: list[dict] = []
         self._agent_feedback_memory_packets: list[dict] = []
         self._agent_ready_for_eval_records: list[dict] = []
@@ -1898,6 +1901,11 @@ class LLMController():
             self._agent_heartbeat_index = max(int(self._agent_heartbeat_index), heartbeat_index)
             response_type = str(response.get("response", "continue"))
             reason = str(response.get("reason", ""))
+            now_commit_ts = float(time.time())
+            if self._is_response_driven_heartbeat_pipeline():
+                self.last_planning_response_commit_ts = now_commit_ts
+                self.next_planning_allowed_ts = now_commit_ts + float(self.heartbeat_interval_seconds)
+            self.planning_response_commit_count = int(getattr(self, "planning_response_commit_count", 0)) + 1
             if response_type == "full_replan_plan":
                 plan_text = self._sanitize_minispec_plan(response.get("plan", ""))
                 if plan_text:
@@ -1932,6 +1940,12 @@ class LLMController():
                     triggered = True
                     self._start_agent_eval_worker_if_needed()
                     continue
+            if response_type not in {"continue", "full_replan_plan"}:
+                print_t(
+                    "[AGENT-HEARTBEAT] invalid_response_fallback "
+                    f"response_type={response_type} reason={reason} "
+                    f"next_planning_allowed_ts={getattr(self, 'next_planning_allowed_ts', 0.0):.3f}"
+                )
             print_t(f"[AGENT-HEARTBEAT] response=continue reason={reason}")
         return triggered
 
@@ -2016,7 +2030,11 @@ class LLMController():
             )
             return False
         now = time.time()
-        if (not force) and (now - float(self.last_heartbeat_ts) < float(self.heartbeat_interval_seconds)):
+        if self._is_response_driven_heartbeat_pipeline():
+            if (not force) and now < float(getattr(self, "next_planning_allowed_ts", 0.0)):
+                self._start_agent_eval_worker_if_needed()
+                return False
+        elif (not force) and (now - float(self.last_heartbeat_ts) < float(self.heartbeat_interval_seconds)):
             self._start_agent_eval_worker_if_needed()
             return False
         self.last_heartbeat_ts = now
@@ -2480,6 +2498,9 @@ class LLMController():
         actual_trigger_params = dict(pipeline.trigger_params or {})
         if self._is_agent_heartbeat_mode():
             actual_trigger_params["heartbeat_seconds"] = float(self.heartbeat_interval_seconds)
+            if self._is_response_driven_heartbeat_pipeline():
+                actual_trigger_params["execution_window_after_response_seconds"] = float(self.heartbeat_interval_seconds)
+                actual_trigger_params["response_driven"] = True
         if self._is_threshold_replan_mode():
             actual_trigger_params["predicted_collision_threshold"] = float(self.predicted_collision_replan_threshold)
         run_heartbeat_seconds = (float(self.heartbeat_interval_seconds) if self._is_agent_heartbeat_mode() else None)
@@ -2513,6 +2534,8 @@ class LLMController():
                 "lmstudio_base_url": str(lmstudio_status.get("base_url") or ""),
                 "lmstudio_connected": bool(lmstudio_status.get("connected")),
                 "heartbeat_seconds": run_heartbeat_seconds,
+                "execution_window_after_response_seconds": (run_heartbeat_seconds if self._is_response_driven_heartbeat_pipeline() else None),
+                "response_driven": bool(self._is_response_driven_heartbeat_pipeline()),
                 "predicted_collision_threshold": run_predicted_collision_threshold,
             },
         )
@@ -2542,6 +2565,9 @@ class LLMController():
         self._current_active_plan = None
         self._latest_full_replan_response = None
         self._agent_heartbeat_index = 0
+        self.last_planning_response_commit_ts = 0.0
+        self.next_planning_allowed_ts = 0.0
+        self.planning_response_commit_count = 0
         self._agent_pending_replan_records = []
         self._agent_feedback_memory_packets = []
         with self._agent_eval_lock:
@@ -2683,6 +2709,10 @@ class LLMController():
                     self._current_active_plan = str(self.current_plan)
                 if replan_attempts == 0:
                     print_t(f"[PLAN-INITIAL] llm_response={self.current_plan}")
+                    if self._is_response_driven_heartbeat_pipeline():
+                        now_ts = float(time.time())
+                        self.last_planning_response_commit_ts = now_ts
+                        self.next_planning_allowed_ts = now_ts + float(self.heartbeat_interval_seconds)
                 else:
                     print_t(f"[FULL-REPLAN] llm_response={self.current_plan}")
                 self.latest_safety_context = safety_context
@@ -3008,11 +3038,14 @@ class LLMController():
                 self.manual_heartbeat_interval_seconds = None
             else:
                 val = float(heartbeat_seconds)
-                self.manual_heartbeat_interval_seconds = val if val > 0 else None
+                self.manual_heartbeat_interval_seconds = max(0.5, val) if val > 0 else None
         except Exception:
             self.manual_heartbeat_interval_seconds = None
         self.set_selected_pipeline(self.selected_pipeline_id)
         return float(self.heartbeat_interval_seconds)
+
+    def _is_response_driven_heartbeat_pipeline(self) -> bool:
+        return str(getattr(self, "selected_pipeline_id", "") or "") in {"agent", "baseline2"}
 
     def set_selected_pipeline(self, pipeline_id: str) -> str:
         self.selected_pipeline_id = normalize_pipeline_id(pipeline_id)
@@ -3028,8 +3061,10 @@ class LLMController():
             self.predicted_collision_replan_threshold = float(PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD)
             self.predicted_collision_rearm_threshold = float(PREDICTED_COLLISION_PROBABILITY_REARM_THRESHOLD)
             self.predicted_collision_replan_strictly_greater = False
-            configured = float(config.trigger_params.get("heartbeat_seconds", AGENT_HEARTBEAT_INTERVAL_SECONDS))
-            self.heartbeat_interval_seconds = float(self.manual_heartbeat_interval_seconds or configured)
+            default_interval = 3.0 if self.selected_pipeline_id in {"agent", "baseline2"} else float(AGENT_HEARTBEAT_INTERVAL_SECONDS)
+            configured = float(config.trigger_params.get("heartbeat_seconds", default_interval))
+            selected_interval = float(self.manual_heartbeat_interval_seconds or configured)
+            self.heartbeat_interval_seconds = max(0.5, selected_interval)
         self.planner.set_runtime_prompt_example_variant(
             prompt_variant=config.prompt_variant,
             example_variant=config.example_variant,
@@ -3455,6 +3490,14 @@ class LLMController():
             "execution_resumed_from_new_plan": bool(self.execution_resumed_from_new_plan),
             "next_statement_executed_after_interrupt": bool(self.next_statement_executed_after_interrupt),
             "heartbeat_seconds": (float(self.heartbeat_interval_seconds) if self._is_agent_heartbeat_mode() else None),
+            "execution_window_after_response_seconds": (
+                float(self.heartbeat_interval_seconds) if self._is_response_driven_heartbeat_pipeline() else None
+            ),
+            "response_driven_call_loop": bool(self._is_response_driven_heartbeat_pipeline()),
+            "planning_response_commit_count": int(getattr(self, "planning_response_commit_count", 0)),
+            "planning_call_loop_mode": (
+                "response_driven_execution_window" if self._is_response_driven_heartbeat_pipeline() else "fixed_heartbeat_period"
+            ),
             "predicted_collision_threshold": (float(self.predicted_collision_replan_threshold) if self._is_threshold_replan_mode() else None),
             "total_llm_wait_hover_sec": total_llm_wait_hover_sec,
             "completion_time_excluding_llm_wait_sec": completion_time_excluding_llm_wait_sec,
