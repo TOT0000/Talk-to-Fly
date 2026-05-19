@@ -111,7 +111,7 @@ class TypeFly:
         )
         self.default_planning_agent_model_id = self.planning_agent_model_id
         self.default_evaluator_model_id = self.evaluator_model_id
-        self.default_heartbeat_interval_seconds = float(getattr(self.llm_controller, "heartbeat_interval_seconds", 5.0))
+        self.default_heartbeat_interval_seconds = float(getattr(self.llm_controller, "heartbeat_interval_seconds", 3.0))
         self.selected_worker_move_step = 0.5
         self.selected_worker_turn_step = 15.0
 
@@ -208,8 +208,8 @@ class TypeFly:
                             visible=(self.selected_baseline_id == "agent"),
                         )
                         self.heartbeat_interval_input = gr.Number(
-                            value=float(getattr(self.llm_controller, "heartbeat_interval_seconds", 5.0)),
-                            label="Heartbeat / LLM call interval seconds",
+                            value=float(getattr(self.llm_controller, "heartbeat_interval_seconds", 3.0)),
+                            label=self.get_heartbeat_interval_label(self.selected_baseline_id),
                             precision=2,
                             visible=(self.selected_baseline_id in {"agent", "baseline2"}),
                         )
@@ -723,9 +723,15 @@ class TypeFly:
             f"Baseline switched to `{cfg.id}` ({cfg.name}).",
             gr.update(visible=(normalized in {"agent", "baseline2", "baseline3"})),
             gr.update(visible=(normalized == "agent")),
-            gr.update(visible=(normalized in {"agent", "baseline2"})),
+            gr.update(visible=(normalized in {"agent", "baseline2"}), label=self.get_heartbeat_interval_label(normalized)),
             self.render_agent_model_status(),
         )
+
+    def get_heartbeat_interval_label(self, baseline_id: str) -> str:
+        normalized = normalize_pipeline_id(baseline_id)
+        if normalized in {"agent", "baseline2"}:
+            return "Execution window after LLM response (seconds)"
+        return "Heartbeat / LLM call interval seconds"
 
     def render_agent_model_status(self):
         selected = self.llm_controller.get_selected_manual_agent_models()
