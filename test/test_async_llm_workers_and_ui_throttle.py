@@ -207,3 +207,50 @@ def test_logger_latency_summary_excludes_skips_and_computes_parse_rate(tmp_path)
     assert logger.save_pending_run() is True
     saved = json.loads((tmp_path / "runs" / summary["run_id"] / f"{summary['run_id']}_summary.json").read_text())
     assert saved["all_llm_latency_mean_sec"] == 2.0
+
+
+def test_reset_runtime_records_clears_ui_and_controller_trajectory_buffers():
+    pytest.importorskip("gradio")
+    from serving.webui.typefly import TypeFly
+    from collections import deque
+
+    tf = TypeFly.__new__(TypeFly)
+    class DummyController:
+        def __init__(self):
+            self._latest_uav_trajectory_points = [{"x": 1.0, "y": 1.0, "z": 1.0}]
+            self._latest_uav_trajectory_stats = {"trajectory_sample_count": 3}
+            self.cleared = False
+        def clear_uav_trajectory(self):
+            self._latest_uav_trajectory_points = []
+            self._latest_uav_trajectory_stats = {
+                "trajectory_sample_count": 0,
+                "trajectory_buffer_source": "reset_empty",
+            }
+            self.cleared = True
+        def get_uav_trajectory_points(self):
+            return list(self._latest_uav_trajectory_points)
+
+    tf.llm_controller = DummyController()
+    tf.position_history = {"drone_gt": deque([(1.0,2.0,3.0)], maxlen=100), "drone_est": deque([(1.1,2.1,3.1)], maxlen=100)}
+    tf.uav_trajectory_points = deque([{"x": 1.0, "y": 2.0, "z": 3.0}], maxlen=100)
+    tf.worker_collision_history = {"worker_1": deque([0.1], maxlen=100), "worker_2": deque([0.2], maxlen=100), "worker_3": deque([0.3], maxlen=100)}
+    tf.worker_collision_active = {"worker_1": True, "worker_2": True, "worker_3": True}
+    tf.objective_state = {"active_checkpoint_ids": set()}
+    tf.benchmark_progress = {"order": [], "completed": set(), "active_enter_ts": None, "active_progress": 0.0, "current_target": None, "executed_gc_sequence": []}
+    tf.mission_clock = {"started_at": 1.0, "completed_at": 2.0, "is_running": True, "objective_completed": True}
+    tf.mission_collision_count = 10
+    tf._last_position_map = {"drone": (1,2,3)}
+    tf._last_print_position_map = {"drone": (1,2,3)}
+    tf.uwb_queue = queue.Queue()
+    tf.virtual_queue = queue.Queue()
+    tf.message_queue = queue.Queue()
+
+    tf._reset_runtime_records()
+
+    assert len(tf.uav_trajectory_points) == 0
+    assert len(tf.position_history["drone_gt"]) == 0
+    assert len(tf.position_history["drone_est"]) == 0
+    assert tf.llm_controller._latest_uav_trajectory_points == []
+    assert tf.llm_controller._latest_uav_trajectory_stats["trajectory_sample_count"] == 0
+    assert tf.llm_controller.cleared is True
+    assert tf._trajectory_xy_history() == []

@@ -301,43 +301,70 @@ class LLMController():
         self._sim_user_publisher_proc: Optional[subprocess.Popen] = None
         self._owns_sim_user_publisher = False
         self.virtual_position_active = False
-        self._latest_uav_trajectory_points: list[dict] = []
-        self._latest_uav_trajectory_stats: dict = {}
         self._virtual_position_thread: Optional[threading.Thread] = None
         self._uav_trajectory_sampler_stop_event: Optional[threading.Event] = None
         self._uav_trajectory_sampler_thread: Optional[threading.Thread] = None
         self._uav_trajectory_sampler_interval_sec: float = 0.1
         self._uav_trajectory_sampler_active_during_run: bool = False
+        self._uav_trajectory_lock = threading.Lock()
+        self._uav_trajectory_epoch: int = 0
+        self._latest_uav_trajectory_points: list[dict] = []
+        self._latest_uav_trajectory_stats: dict = {}
+        self.clear_uav_trajectory(stop_sampler=False)
 
 
     def set_uav_trajectory_points(self, points):
         data = list(points or [])
-        self._latest_uav_trajectory_points = data
+        with self._uav_trajectory_lock:
+            self._latest_uav_trajectory_points = data
         if len(data) < 2:
+            with self._uav_trajectory_lock:
+                self._latest_uav_trajectory_stats = {
+                    "trajectory_sample_count": len(data),
+                    "trajectory_max_sample_dt_sec": 0.0,
+                    "trajectory_mean_sample_dt_sec": 0.0,
+                    "trajectory_max_segment_distance_m": 0.0,
+                    "trajectory_buffer_source": "position_callback",
+                }
+            return
+        dts = []
+        dists = []
+        for i in range(1, len(data)):
+            a, b = data[i - 1], data[i]
+            dts.append(max(0.0, float(b.get("ts", 0.0)) - float(a.get("ts", 0.0))))
+            dists.append(math.sqrt((float(b.get("x", 0.0)) - float(a.get("x", 0.0))) ** 2 + (float(b.get("y", 0.0)) - float(a.get("y", 0.0))) ** 2 + (float(b.get("z", 0.0)) - float(a.get("z", 0.0))) ** 2))
+        with self._uav_trajectory_lock:
             self._latest_uav_trajectory_stats = {
                 "trajectory_sample_count": len(data),
-                "trajectory_max_sample_dt_sec": 0.0,
-                "trajectory_mean_sample_dt_sec": 0.0,
-                "trajectory_max_segment_distance_m": 0.0,
+                "trajectory_max_sample_dt_sec": float(max(dts) if dts else 0.0),
+                "trajectory_mean_sample_dt_sec": float(sum(dts) / len(dts) if dts else 0.0),
+                "trajectory_max_segment_distance_m": float(max(dists) if dists else 0.0),
                 "trajectory_buffer_source": "position_callback",
             }
-            return
-        dts=[]
-        dists=[]
-        for i in range(1,len(data)):
-            a,b=data[i-1],data[i]
-            dts.append(max(0.0,float(b.get("ts",0.0))-float(a.get("ts",0.0))))
-            dists.append(math.sqrt((float(b.get("x",0.0))-float(a.get("x",0.0)))**2 + (float(b.get("y",0.0))-float(a.get("y",0.0)))**2 + (float(b.get("z",0.0))-float(a.get("z",0.0)))**2))
-        self._latest_uav_trajectory_stats = {
-            "trajectory_sample_count": len(data),
-            "trajectory_max_sample_dt_sec": float(max(dts) if dts else 0.0),
-            "trajectory_mean_sample_dt_sec": float(sum(dts)/len(dts) if dts else 0.0),
-            "trajectory_max_segment_distance_m": float(max(dists) if dists else 0.0),
-            "trajectory_buffer_source": "position_callback",
-        }
 
     def get_uav_trajectory_points(self):
-        return list(getattr(self, "_latest_uav_trajectory_points", []) or [])
+        with self._uav_trajectory_lock:
+            return list(getattr(self, "_latest_uav_trajectory_points", []) or [])
+
+
+    def clear_uav_trajectory(self, stop_sampler: bool = True):
+        if stop_sampler:
+            self.stop_uav_trajectory_sampler()
+        with self._uav_trajectory_lock:
+            self._uav_trajectory_epoch += 1
+            self._latest_uav_trajectory_points = []
+            self._latest_uav_trajectory_stats = {
+                "trajectory_sample_count": 0,
+                "trajectory_buffer_source": "reset_empty",
+                "trajectory_max_sample_dt_sec": None,
+                "trajectory_mean_sample_dt_sec": None,
+                "trajectory_max_segment_distance_m": None,
+                "trajectory_sampler_interval_sec": float(getattr(self, "_uav_trajectory_sampler_interval_sec", 0.1)),
+                "trajectory_sampler_active_during_run": False,
+                "trajectory_epoch": int(self._uav_trajectory_epoch),
+                "trajectory_reset_ts": float(time.time()),
+            }
+        self._uav_trajectory_sampler_active_during_run = False
 
     def _read_uav_position_for_sampler(self):
         snapshot = (self.get_live_ui_snapshot() or {})
@@ -351,8 +378,11 @@ class LLMController():
         self._uav_trajectory_sampler_interval_sec = max(0.02, float(sample_interval_sec or 0.1))
         self._uav_trajectory_sampler_stop_event = threading.Event()
         self._uav_trajectory_sampler_active_during_run = True
-        self._latest_uav_trajectory_points = []
-        self._latest_uav_trajectory_stats = {}
+        with self._uav_trajectory_lock:
+            self._uav_trajectory_epoch += 1
+            sampler_epoch = int(self._uav_trajectory_epoch)
+            self._latest_uav_trajectory_points = []
+            self._latest_uav_trajectory_stats = {}
 
         def _loop():
             stop_event = self._uav_trajectory_sampler_stop_event
@@ -369,11 +399,20 @@ class LLMController():
                         "execution_mode": self.execution_mode,
                         "current_target_checkpoint": (self.latest_benchmark_progress or {}).get("current_target"),
                     }
-                    self._latest_uav_trajectory_points.append(point)
-                    if len(self._latest_uav_trajectory_points) > 5000:
-                        self._latest_uav_trajectory_points = self._latest_uav_trajectory_points[-5000:]
-                    self.set_uav_trajectory_points(self._latest_uav_trajectory_points)
-                    self._latest_uav_trajectory_stats["trajectory_buffer_source"] = "backend_trajectory_sampler"
+                    with self._uav_trajectory_lock:
+                        if sampler_epoch != self._uav_trajectory_epoch:
+                            break
+                        point["trajectory_epoch"] = sampler_epoch
+                        self._latest_uav_trajectory_points.append(point)
+                        if len(self._latest_uav_trajectory_points) > 5000:
+                            self._latest_uav_trajectory_points = self._latest_uav_trajectory_points[-5000:]
+                        points_copy = list(self._latest_uav_trajectory_points)
+                    self.set_uav_trajectory_points(points_copy)
+                    with self._uav_trajectory_lock:
+                        self._latest_uav_trajectory_stats["trajectory_buffer_source"] = "backend_trajectory_sampler"
+                        self._latest_uav_trajectory_stats["trajectory_sampler_interval_sec"] = float(self._uav_trajectory_sampler_interval_sec)
+                        self._latest_uav_trajectory_stats["trajectory_sampler_active_during_run"] = bool(self._uav_trajectory_sampler_active_during_run)
+                        self._latest_uav_trajectory_stats["trajectory_epoch"] = sampler_epoch
                 stop_event.wait(self._uav_trajectory_sampler_interval_sec)
 
         self._uav_trajectory_sampler_thread = threading.Thread(target=_loop, daemon=True)
@@ -1085,8 +1124,7 @@ class LLMController():
         
     def stop_virtual_position_loop(self):
         self.virtual_position_active = False
-        self._latest_uav_trajectory_points: list[dict] = []
-        self._latest_uav_trajectory_stats: dict = {}
+        self.clear_uav_trajectory(stop_sampler=False)
         if self._virtual_position_thread is not None and self._virtual_position_thread.is_alive():
             self._virtual_position_thread.join(timeout=1.0)
         self._virtual_position_thread = None

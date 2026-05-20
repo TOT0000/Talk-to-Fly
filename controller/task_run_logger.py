@@ -85,6 +85,13 @@ RUN_COLUMNS = [
     "trajectory_buffer_source",
     "trajectory_sampler_interval_sec",
     "trajectory_sampler_active_during_run",
+    "trajectory_max_sample_dt_sec",
+    "trajectory_mean_sample_dt_sec",
+    "trajectory_max_segment_distance_m",
+    "execution_window_after_response_seconds",
+    "response_driven_call_loop",
+    "planning_call_loop_mode",
+    "planning_response_commit_count",
     "lmstudio_base_url",
     "lmstudio_connected",
     "generated_plan",
@@ -740,16 +747,22 @@ class TaskRunLogger:
             "trajectory_max_segment_distance_m": final_mission_summary.get("trajectory_max_segment_distance_m"),
             "trajectory_sampler_interval_sec": final_mission_summary.get("trajectory_sampler_interval_sec"),
             "trajectory_sampler_active_during_run": bool(final_mission_summary.get("trajectory_sampler_active_during_run", False)),
+            "execution_window_after_response_seconds": final_mission_summary.get("execution_window_after_response_seconds"),
+            "response_driven_call_loop": final_mission_summary.get("response_driven_call_loop"),
+            "planning_call_loop_mode": final_mission_summary.get("planning_call_loop_mode"),
+            "planning_response_commit_count": final_mission_summary.get("planning_response_commit_count"),
             "planning_trace_count": len(active.planning_trace),
         }
 
     def save_pending_run(self) -> bool:
         with self._lock:
             active = self._pending_completed
-            self._pending_completed = None
         if active is None:
             return False
         self._persist_run(active)
+        with self._lock:
+            if self._pending_completed is active:
+                self._pending_completed = None
         return True
 
     def discard_pending_run(self) -> bool:
@@ -786,6 +799,17 @@ class TaskRunLogger:
         planner_info = active.planner_info or {}
         llm_latency_summary = self._compute_llm_latency_summary(active)
         final_mission_summary = dict(final.get("final_mission_summary") or {})
+        trajectory_sample_count = int(final_mission_summary.get("trajectory_sample_count", 0) or 0)
+        trajectory_buffer_source = str(final_mission_summary.get("trajectory_buffer_source", "runtime_snapshot_fallback"))
+        trajectory_sampler_interval_sec = final_mission_summary.get("trajectory_sampler_interval_sec")
+        trajectory_sampler_active_during_run = bool(final_mission_summary.get("trajectory_sampler_active_during_run", False))
+        trajectory_max_sample_dt_sec = final_mission_summary.get("trajectory_max_sample_dt_sec")
+        trajectory_mean_sample_dt_sec = final_mission_summary.get("trajectory_mean_sample_dt_sec")
+        trajectory_max_segment_distance_m = final_mission_summary.get("trajectory_max_segment_distance_m")
+        execution_window_after_response_seconds = final_mission_summary.get("execution_window_after_response_seconds")
+        response_driven_call_loop = final_mission_summary.get("response_driven_call_loop")
+        planning_call_loop_mode = final_mission_summary.get("planning_call_loop_mode")
+        planning_response_commit_count = final_mission_summary.get("planning_response_commit_count")
         completion_time_mission_sec = (
             None if not bool(active.mission_success)
             else (
@@ -850,6 +874,17 @@ class TaskRunLogger:
             "total_llm_wait_hover_sec": float(final_mission_summary.get("total_llm_wait_hover_sec", 0.0) or 0.0),
             "completion_time_excluding_llm_wait_sec": float(final_mission_summary.get("completion_time_excluding_llm_wait_sec", completion_time_mission_sec or 0.0) or 0.0),
             "llm_wait_event_count": int(final_mission_summary.get("llm_wait_event_count", 0) or 0),
+            "trajectory_sample_count": trajectory_sample_count,
+            "trajectory_buffer_source": trajectory_buffer_source,
+            "trajectory_sampler_interval_sec": trajectory_sampler_interval_sec,
+            "trajectory_sampler_active_during_run": trajectory_sampler_active_during_run,
+            "trajectory_max_sample_dt_sec": trajectory_max_sample_dt_sec,
+            "trajectory_mean_sample_dt_sec": trajectory_mean_sample_dt_sec,
+            "trajectory_max_segment_distance_m": trajectory_max_segment_distance_m,
+            "execution_window_after_response_seconds": execution_window_after_response_seconds,
+            "response_driven_call_loop": response_driven_call_loop,
+            "planning_call_loop_mode": planning_call_loop_mode,
+            "planning_response_commit_count": planning_response_commit_count,
             "lmstudio_base_url": active.run_context.get("lmstudio_base_url", ""),
             "lmstudio_connected": bool(active.run_context.get("lmstudio_connected", False)),
             "generated_plan": "" if bool(active.results_only) else active.actual_plan_text,
@@ -917,6 +952,17 @@ class TaskRunLogger:
             "total_llm_wait_hover_sec": row["total_llm_wait_hover_sec"],
             "completion_time_excluding_llm_wait_sec": row["completion_time_excluding_llm_wait_sec"],
             "llm_wait_event_count": row["llm_wait_event_count"],
+            "trajectory_sample_count": trajectory_sample_count,
+            "trajectory_buffer_source": trajectory_buffer_source,
+            "trajectory_sampler_interval_sec": trajectory_sampler_interval_sec,
+            "trajectory_sampler_active_during_run": trajectory_sampler_active_during_run,
+            "trajectory_max_sample_dt_sec": trajectory_max_sample_dt_sec,
+            "trajectory_mean_sample_dt_sec": trajectory_mean_sample_dt_sec,
+            "trajectory_max_segment_distance_m": trajectory_max_segment_distance_m,
+            "execution_window_after_response_seconds": execution_window_after_response_seconds,
+            "response_driven_call_loop": response_driven_call_loop,
+            "planning_call_loop_mode": planning_call_loop_mode,
+            "planning_response_commit_count": planning_response_commit_count,
             "results_only": bool(active.results_only),
         }
         debug_payload = {
@@ -950,7 +996,7 @@ class TaskRunLogger:
         wb = self._load_workbook_resilient()
         if wb is not None:
             ws = wb[RUNS_SHEET]
-            ws.append([row[col] for col in RUN_COLUMNS])
+            ws.append([row.get(col, "") for col in RUN_COLUMNS])
             if not bool(active.results_only):
                 ws_debug = wb[DEBUG_SHEET]
                 ws_debug.append([active.run_id, self._to_iso(end_ts), self._json_text(debug_payload)])
