@@ -78,3 +78,15 @@ def test_four_experiment_pipelines_do_not_depend_on_removed_graph_runner():
     assert 'evaluate_agent_replan_record' in planner_source
     assert graph_token not in controller_source.lower()
     assert graph_token not in planner_source.lower()
+
+
+def test_should_trigger_auto_replan_is_bool_only_without_heartbeat_status_reference():
+    source = Path('controller/llm_controller.py').read_text(encoding='utf-8')
+    start = source.index('def _should_trigger_auto_replan')
+    end = source.index('def stop_controller')
+    fn_source = source[start:end]
+    assert 'hb_status' not in fn_source
+    assert 'return "none"' not in fn_source
+    assert 'return "request_started"' not in fn_source
+    assert 'return True,' not in fn_source
+    assert 'return False,' not in fn_source
