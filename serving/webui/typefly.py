@@ -1266,6 +1266,7 @@ class TypeFly:
         if getattr(self, "llm_controller", None) is not None and hasattr(self.llm_controller, "get_uav_trajectory_points"):
             points = self.llm_controller.get_uav_trajectory_points() or []
             if points:
+                # Prefer backend sampler buffer when available to keep UI trajectory continuous.
                 return [(float(p["x"]), float(p["y"])) for p in points]
         if self.uav_trajectory_points:
             return [(float(p["x"]), float(p["y"])) for p in self.uav_trajectory_points]
