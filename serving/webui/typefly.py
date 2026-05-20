@@ -123,6 +123,11 @@ class TypeFly:
             "drone_est": deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS),
         }
         self.uav_trajectory_points = deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS)
+        if getattr(self, "llm_controller", None) is not None:
+            if hasattr(self.llm_controller, "clear_uav_trajectory"):
+                self.llm_controller.clear_uav_trajectory()
+            elif hasattr(self.llm_controller, "set_uav_trajectory_points"):
+                self.llm_controller.set_uav_trajectory_points([])
         self.worker_collision_history = {
             "worker_1": deque(maxlen=100),
             "worker_2": deque(maxlen=100),
@@ -610,6 +615,11 @@ class TypeFly:
             "drone_est": deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS),
         }
         self.uav_trajectory_points = deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS)
+        if getattr(self, "llm_controller", None) is not None:
+            if hasattr(self.llm_controller, "clear_uav_trajectory"):
+                self.llm_controller.clear_uav_trajectory()
+            elif hasattr(self.llm_controller, "set_uav_trajectory_points"):
+                self.llm_controller.set_uav_trajectory_points([])
         self.worker_collision_history = {
             "worker_1": deque(maxlen=100),
             "worker_2": deque(maxlen=100),
