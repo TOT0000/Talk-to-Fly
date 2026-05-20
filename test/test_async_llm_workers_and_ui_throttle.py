@@ -82,9 +82,9 @@ def test_planning_inflight_skips_second_heartbeat_and_logs_skip():
     planner = _Planner(block_event=block)
     c = _controller(planner)
 
-    assert c._maybe_run_agent_heartbeat(force=True) is False
+    assert c._maybe_run_agent_heartbeat(force=True) == "request_started"
     assert c._planning_inflight is True
-    assert c._maybe_run_agent_heartbeat(force=True) is False
+    assert c._maybe_run_agent_heartbeat(force=True) == "none"
     block.set()
     c._planning_worker_thread.join(timeout=1.0)
     c._consume_planning_response_queue()
@@ -140,8 +140,24 @@ def test_evaluator_worker_has_independent_inflight_and_latency_trace():
     assert any(t.get("llm_call_role") == "evaluator" and t.get("latency_sec") is not None for t in c.task_run_logger.traces)
 
     c._agent_eval_inflight = True
-    assert c._maybe_run_agent_heartbeat(force=True) is False
+    assert c._maybe_run_agent_heartbeat(force=True) == "request_started"
     assert c._planning_inflight is True
+
+
+def test_response_driven_window_starts_heartbeat_after_initial_response():
+    planner = _Planner()
+    c = _controller(planner)
+    c.heartbeat_interval_seconds = 3.0
+    t0 = time.time()
+    c.last_planning_response_received_ts = t0
+    c.next_planning_allowed_ts = t0 + 3.0
+    assert c._maybe_run_agent_heartbeat(force=False) == "none"
+    c.next_planning_allowed_ts = time.time() - 0.01
+    status = c._maybe_run_agent_heartbeat(force=False)
+    assert status == "request_started"
+    c._planning_worker_thread.join(timeout=1.0)
+    assert len(planner.calls) == 1
+    assert c.llm_wait_event_count >= 1
 
 
 def test_ui_render_throttle_uses_gr_update_without_skipping_history():
