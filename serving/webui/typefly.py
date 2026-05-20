@@ -774,7 +774,10 @@ class TypeFly:
         logger = getattr(self.llm_controller, "task_run_logger", None)
         if logger is None:
             return "Save failed: logger unavailable.", self.render_postrun_summary()
-        saved = bool(getattr(logger, "save_pending_run", lambda: False)())
+        try:
+            saved = bool(getattr(logger, "save_pending_run", lambda: False)())
+        except Exception as exc:
+            return f"Save failed: {exc}", self.render_postrun_summary()
         if not saved:
             return "No finished run to save.", self.render_postrun_summary()
         return "Run saved to formal archive.", self.render_postrun_summary()
