@@ -26,6 +26,7 @@ def test_end_run_recovers_if_workbook_deleted(tmp_path):
     assert excel_path.exists()
 
 
+@pytest.mark.skipif(not _OPENPYXL_AVAILABLE, reason="openpyxl not installed")
 def test_start_run_autopersists_previous_pending_run(tmp_path):
     excel_path = tmp_path / "logs" / "task_runs.xlsx"
     logger = TaskRunLogger(excel_path=str(excel_path))
@@ -161,3 +162,72 @@ def test_summary_completed_fields_follow_true_completion_state(tmp_path):
     assert pending["completed_checkpoints"] == ["A1", "A2"]
     assert pending["true_completed_checkpoints"] == ["A1", "A2"]
     assert pending["completion_ratio"] == 2.0 / 3.0
+
+@pytest.mark.skipif(not _OPENPYXL_AVAILABLE, reason="openpyxl not installed")
+def test_save_pending_run_persists_trajectory_fields_without_keyerror(tmp_path):
+    from openpyxl import load_workbook
+
+    excel_path = tmp_path / "logs" / "task_runs.xlsx"
+    logger = TaskRunLogger(excel_path=str(excel_path))
+    logger.start_run(
+        task_id="task-trajectory",
+        task_text="trajectory fields",
+        scenario_name="scene-trajectory",
+        initial_snapshot={"benchmark_progress": {"completed": []}, "checkpoint_order": ["A1"]},
+    )
+    logger.end_run(
+        run_status="completed",
+        final_snapshot={
+            "benchmark_progress": {"completed": []},
+            "checkpoint_order": ["A1"],
+            "final_mission_summary": {
+                "trajectory_sample_count": 12,
+                "trajectory_buffer_source": "sampler",
+                "trajectory_sampler_interval_sec": 0.25,
+                "trajectory_sampler_active_during_run": True,
+            },
+        },
+    )
+
+    pending = logger.get_pending_run_summary()
+    run_id = pending["run_id"]
+    assert logger.save_pending_run() is True
+
+    summary = json.loads((tmp_path / "logs" / "runs" / run_id / f"{run_id}_summary.json").read_text(encoding="utf-8"))
+    assert summary["trajectory_sample_count"] == 12
+    assert summary["trajectory_buffer_source"] == "sampler"
+    assert summary["trajectory_sampler_interval_sec"] == 0.25
+    assert summary["trajectory_sampler_active_during_run"] is True
+
+    wb = load_workbook(excel_path)
+    ws = wb["runs"]
+    headers = [cell.value for cell in ws[1]]
+    values = [cell.value for cell in ws[2]]
+    row = dict(zip(headers, values))
+    assert row["trajectory_sample_count"] == 12
+    assert row["trajectory_buffer_source"] == "sampler"
+    assert row["trajectory_sampler_interval_sec"] == 0.25
+    assert row["trajectory_sampler_active_during_run"] is True
+
+
+def test_save_pending_run_keeps_pending_if_persist_fails(tmp_path, monkeypatch):
+    excel_path = tmp_path / "logs" / "task_runs.xlsx"
+    logger = TaskRunLogger(excel_path=str(excel_path))
+    logger.start_run(
+        task_id="task-fail",
+        task_text="persist fail",
+        scenario_name="scene-fail",
+        initial_snapshot={"benchmark_progress": {"completed": []}, "checkpoint_order": ["A1"]},
+    )
+    logger.end_run(run_status="completed")
+
+    def _boom(_active):
+        raise RuntimeError("persist boom")
+
+    monkeypatch.setattr(logger, "_persist_run", _boom)
+
+    with pytest.raises(RuntimeError, match="persist boom"):
+        logger.save_pending_run()
+
+    pending = logger.get_pending_run_summary()
+    assert pending.get("run_id")
