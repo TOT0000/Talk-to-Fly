@@ -262,6 +262,12 @@ class LLMController():
         self.last_planning_response_received_ts = 0.0
         self.last_planning_response_commit_ts = 0.0
         self.next_planning_allowed_ts = 0.0
+        self.heartbeat_check_count = 0
+        self.heartbeat_request_started_count = 0
+        self.heartbeat_skip_reason_counts: dict[str, int] = {}
+        self.last_heartbeat_skip_reason = ""
+        self.last_heartbeat_check_ts = 0.0
+        self.last_heartbeat_check_target = ""
         self.planning_response_commit_count = 0
         self._agent_pending_replan_records: list[dict] = []
         self._agent_feedback_memory_packets: list[dict] = []
@@ -2148,6 +2154,12 @@ class LLMController():
         self.gc_llm_wait_pause_count += 1
         print_debug(f"[GC-LLM-WAIT] pause reason=heartbeat_request_started checkpoint={checkpoint_id}", env_var="TYPEFLY_VERBOSE_DEBUG")
         while self.awaiting_llm_response or self.llm_wait_hover_active or self._planning_inflight:
+            if self._consume_planning_response_queue():
+                self.gc_llm_wait_total_sec += max(0.0, time.time() - start_ts)
+                self.gc_llm_wait_replan_preempt_count += 1
+                print_debug("[GC-LLM-WAIT] response_received response=full_replan_plan", env_var="TYPEFLY_VERBOSE_DEBUG")
+                print_debug("[GC-LLM-WAIT] preempt_for_replan", env_var="TYPEFLY_VERBOSE_DEBUG")
+                return True
             try:
                 if hasattr(self.drone, "hold_position"):
                     held = self.drone.hold_position()
@@ -2158,27 +2170,47 @@ class LLMController():
                 print_debug(f"[GC-LLM-WAIT] holding position={held}", env_var="TYPEFLY_VERBOSE_DEBUG")
             except Exception:
                 pass
-            if self._consume_planning_response_queue():
-                self.gc_llm_wait_total_sec += max(0.0, time.time() - start_ts)
-                self.gc_llm_wait_replan_preempt_count += 1
-                print_debug("[GC-LLM-WAIT] response_received response=full_replan_plan", env_var="TYPEFLY_VERBOSE_DEBUG")
-                print_debug("[GC-LLM-WAIT] preempt_for_replan", env_var="TYPEFLY_VERBOSE_DEBUG")
-                return True
             time.sleep(0.05)
+        if self._consume_planning_response_queue():
+            self.gc_llm_wait_total_sec += max(0.0, time.time() - start_ts)
+            self.gc_llm_wait_replan_preempt_count += 1
+            print_debug("[GC-LLM-WAIT] response_received response=full_replan_plan", env_var="TYPEFLY_VERBOSE_DEBUG")
+            print_debug("[GC-LLM-WAIT] preempt_for_replan", env_var="TYPEFLY_VERBOSE_DEBUG")
+            return True
         self.gc_llm_wait_total_sec += max(0.0, time.time() - start_ts)
         if self._pending_heartbeat_replan_plan:
             self.gc_llm_wait_replan_preempt_count += 1
             print_debug("[GC-LLM-WAIT] preempt_for_replan", env_var="TYPEFLY_VERBOSE_DEBUG")
             return True
         self.gc_llm_wait_resume_count += 1
-        print_debug("[GC-LLM-WAIT] response_received response=continue", env_var="TYPEFLY_VERBOSE_DEBUG")
+        print_debug("[GC-LLM-WAIT] response_received response=continue_or_discarded", env_var="TYPEFLY_VERBOSE_DEBUG")
         print_debug("[GC-LLM-WAIT] resume_original_plan", env_var="TYPEFLY_VERBOSE_DEBUG")
         return False
 
+    def _record_heartbeat_skip(self, reason: str) -> str:
+        key = str(reason or "none")
+        counts = dict(getattr(self, "heartbeat_skip_reason_counts", {}) or {})
+        counts[key] = int(counts.get(key, 0)) + 1
+        self.heartbeat_skip_reason_counts = counts
+        self.last_heartbeat_skip_reason = key
+        print_debug(f"[HEARTBEAT-SKIP] reason={key}", env_var="TYPEFLY_VERBOSE_DEBUG")
+        return "none"
+
     def _maybe_run_agent_heartbeat(self, force: bool = False) -> str:
         self._ensure_llm_worker_state()
+        now = time.time()
+        self.heartbeat_check_count = int(getattr(self, "heartbeat_check_count", 0)) + 1
+        self.last_heartbeat_check_ts = now
+        self.last_heartbeat_check_target = str((self.latest_benchmark_progress or {}).get("current_target") or "")
+        print_debug(
+            "[HEARTBEAT-CHECK] "
+            f"mode={self.framework_mode} response_driven={self._is_response_driven_heartbeat_pipeline()} "
+            f"now={now:.3f} next_allowed={float(getattr(self, 'next_planning_allowed_ts', 0.0) or 0.0):.3f} "
+            f"target={self.last_heartbeat_check_target}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
+        )
         if not self._is_agent_heartbeat_mode():
-            return False
+            return self._record_heartbeat_skip("not_agent_heartbeat_mode")
         if self._consume_planning_response_queue():
             return "replan_ready"
         if self._pending_heartbeat_replan_plan:
@@ -2189,22 +2221,21 @@ class LLMController():
                 f"pending_statements={self._pending_execution_statement_count()}",
                 env_var="TYPEFLY_VERBOSE_DEBUG",
             )
-            return "none"
-        now = time.time()
+            return self._record_heartbeat_skip("active_objective_completed")
         if self._is_response_driven_heartbeat_pipeline():
             if self._planning_inflight or self.awaiting_llm_response:
                 self._start_agent_eval_worker_if_needed()
-                return "none"
+                return self._record_heartbeat_skip("planning_inflight" if self._planning_inflight else "awaiting_llm_response")
             if (not force) and now < float(getattr(self, "next_planning_allowed_ts", 0.0)):
                 self._start_agent_eval_worker_if_needed()
-                return "none"
+                return self._record_heartbeat_skip("not_due_yet")
         elif (not force) and (now - float(self.last_heartbeat_ts) < float(self.heartbeat_interval_seconds)):
             self._start_agent_eval_worker_if_needed()
-            return "none"
+            return self._record_heartbeat_skip("not_response_driven_pipeline")
         self.last_heartbeat_ts = now
         if getattr(self, "_replan_attempts", 0) >= int(self.replan_limit):
             print_t(f"[REPLAN-COUNT] current={self._replan_attempts} limit={self.replan_limit}")
-            return "none"
+            return self._record_heartbeat_skip("replan_limit_reached")
         snapshot = self.get_live_ui_snapshot() or {}
         heartbeat_index = int(self._agent_heartbeat_index) + 1
         now_ts = time.time()
@@ -2220,7 +2251,7 @@ class LLMController():
                 if not self._is_response_driven_heartbeat_pipeline():
                     self._log_llm_inflight_skip("planning", heartbeat_index=heartbeat_index, target_checkpoint=benchmark_progress.get("current_target"))
                 self._start_agent_eval_worker_if_needed()
-                return "none"
+                return self._record_heartbeat_skip("planning_inflight")
             generation = int(self._planning_generation)
             request_payload = {
                 "generation": generation,
@@ -2246,11 +2277,17 @@ class LLMController():
                     "heartbeat_seconds": float(self.heartbeat_interval_seconds),
                 },
             }
-            self._planning_inflight = True
-            self._start_llm_wait(reason="heartbeat")
+        self._planning_inflight = True
+        self._start_llm_wait(reason="heartbeat")
             self._planning_worker_thread = threading.Thread(target=self._planning_worker_loop, args=(request_payload,), daemon=True)
             self._planning_worker_thread.start()
         self._agent_heartbeat_index = heartbeat_index
+        self.heartbeat_request_started_count = int(getattr(self, "heartbeat_request_started_count", 0)) + 1
+        self.last_heartbeat_skip_reason = "request_started"
+        print_debug(
+            f"[HEARTBEAT-REQUEST-STARTED] heartbeat_index={heartbeat_index} target={benchmark_progress.get('current_target')}",
+            env_var="TYPEFLY_VERBOSE_DEBUG",
+        )
         self._start_agent_eval_worker_if_needed()
         return "request_started"
 
@@ -2882,6 +2919,7 @@ class LLMController():
                     print_t(f"[PLAN-INITIAL] llm_response={self.current_plan}")
                     if self._is_response_driven_heartbeat_pipeline():
                         now_ts = float(time.time())
+                        self.last_planning_response_received_ts = now_ts
                         self.last_planning_response_commit_ts = now_ts
                         self.next_planning_allowed_ts = now_ts + float(self.heartbeat_interval_seconds)
                 else:
@@ -3692,6 +3730,17 @@ class LLMController():
             "gc_llm_wait_total_sec": round(float(getattr(self, "gc_llm_wait_total_sec", 0.0) or 0.0), 6),
             "gc_llm_wait_resume_count": int(getattr(self, "gc_llm_wait_resume_count", 0)),
             "gc_llm_wait_replan_preempt_count": int(getattr(self, "gc_llm_wait_replan_preempt_count", 0)),
+            "heartbeat_check_count": int(getattr(self, "heartbeat_check_count", 0)),
+            "heartbeat_request_started_count": int(getattr(self, "heartbeat_request_started_count", 0)),
+            "heartbeat_skip_reason_counts": dict(getattr(self, "heartbeat_skip_reason_counts", {}) or {}),
+            "last_heartbeat_skip_reason": str(getattr(self, "last_heartbeat_skip_reason", "") or ""),
+            "last_heartbeat_check_ts": float(getattr(self, "last_heartbeat_check_ts", 0.0) or 0.0),
+            "last_heartbeat_check_target": str(getattr(self, "last_heartbeat_check_target", "") or ""),
+            "response_driven_now_minus_next_allowed_sec": (
+                None
+                if float(getattr(self, "next_planning_allowed_ts", 0.0) or 0.0) <= 0.0
+                else round(float(time.time()) - float(getattr(self, "next_planning_allowed_ts", 0.0) or 0.0), 6)
+            ),
             **trajectory_stats,
         }
         self.final_mission_summary = dict(summary)
