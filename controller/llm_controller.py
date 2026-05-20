@@ -1300,7 +1300,7 @@ class LLMController():
                 stop_reason = f"collision_probability_high({current_p:.3f})"
                 preempted_for_replan = True
                 return True
-            return "none"
+            return False
 
         for idx in range(max_iterations):
             snapshot = self.get_live_ui_snapshot()
@@ -1973,7 +1973,7 @@ class LLMController():
     def _is_active_objective_completed(self) -> bool:
         active_ids = set(str(v).upper() for v in self.active_objective_set.get("active_checkpoint_ids", []))
         if not active_ids:
-            return "none"
+            return False
         completed = set(str(v).upper() for v in (self.latest_benchmark_progress.get("completed") or []))
         return all(cid in completed for cid in active_ids)
 
@@ -2173,12 +2173,12 @@ class LLMController():
         self.gc_llm_wait_resume_count += 1
         print_debug("[GC-LLM-WAIT] response_received response=continue", env_var="TYPEFLY_VERBOSE_DEBUG")
         print_debug("[GC-LLM-WAIT] resume_original_plan", env_var="TYPEFLY_VERBOSE_DEBUG")
-        return "request_started"
+        return False
 
     def _maybe_run_agent_heartbeat(self, force: bool = False) -> str:
         self._ensure_llm_worker_state()
         if not self._is_agent_heartbeat_mode():
-            return "none"
+            return False
         if self._consume_planning_response_queue():
             return "replan_ready"
         if self._pending_heartbeat_replan_plan:
@@ -2275,10 +2275,8 @@ class LLMController():
         self.llm_wait_started_ts = None
 
     def _should_trigger_auto_replan(self, predicted_p: float, source: str) -> bool:
-        if hb_status == "request_started" or bool(self.awaiting_llm_response):
-            return True, "awaiting_llm_response_hover"
         if not self._is_threshold_replan_mode():
-            return "none"
+            return False
         if int(getattr(self, "_replan_attempts", 0)) >= int(self.replan_limit):
             print_debug(
                 "[REPLAN_DEBUG] "
@@ -2286,7 +2284,7 @@ class LLMController():
                 f"current={int(getattr(self, '_replan_attempts', 0))} limit={int(self.replan_limit)} source={source}",
                 env_var="TYPEFLY_VERBOSE_DEBUG",
             )
-            return "none"
+            return False
         predicted_p = float(predicted_p)
         threshold = float(self.predicted_collision_replan_threshold)
         rearm_threshold = float(self.predicted_collision_rearm_threshold)
@@ -2305,7 +2303,7 @@ class LLMController():
                     f"remaining_statements={self.auto_replan_protection_remaining} source={source}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
-                return "none"
+                return False
 
         if not self.auto_replan_armed:
             if predicted_p <= rearm_threshold:
@@ -2322,7 +2320,7 @@ class LLMController():
                     f"auto_replan_suppressed p={predicted_p:.6f} reason=disarmed source={source}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
-            return "none"
+            return False
 
         trigger_replan = (predicted_p > threshold) if bool(self.predicted_collision_replan_strictly_greater) else (predicted_p >= threshold)
         if trigger_replan:
@@ -2335,7 +2333,7 @@ class LLMController():
             )
             print_debug("[REPLAN_DEBUG] auto_replan_armed=False", env_var="TYPEFLY_VERBOSE_DEBUG")
             return True
-        return "request_started"
+        return False
 
     def stop_controller(self):
         self.controller_active = False

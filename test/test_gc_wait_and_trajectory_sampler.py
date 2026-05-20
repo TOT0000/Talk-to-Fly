@@ -1,10 +1,7 @@
 import pytest
 pytest.importorskip("PIL")
-import queue
 import time
 from types import SimpleNamespace
-
-import pytest
 
 from controller.llm_controller import LLMController
 from serving.webui.typefly import TypeFlyWebUI
@@ -69,6 +66,46 @@ def test_pause_gc_for_llm_wait_preempt_on_replan():
     assert ret is True
     assert c.gc_llm_wait_replan_preempt_count == 1
 
+
+def test_pause_gc_for_llm_wait_stale_or_discarded_response_resumes_without_replan():
+    c = _minimal_controller()
+
+    def _consume():
+        c.awaiting_llm_response = False
+        c.llm_wait_hover_active = False
+        c._planning_inflight = False
+        return False
+
+    c._consume_planning_response_queue = _consume
+    ret = c._pause_gc_for_llm_wait("C5")
+    assert ret is False
+    assert c._pending_heartbeat_replan_plan is None
+    assert c.gc_llm_wait_replan_preempt_count == 0
+    assert c.gc_llm_wait_resume_count == 1
+
+
+def test_should_trigger_auto_replan_is_strict_bool_and_threshold_gated():
+    c = LLMController.__new__(LLMController)
+    c.framework_mode = "typefly-threshold-replan"
+    c.replan_limit = 8
+    c._replan_attempts = 0
+    c.predicted_collision_replan_threshold = 0.5
+    c.predicted_collision_rearm_threshold = 0.2
+    c.predicted_collision_replan_strictly_greater = False
+    c.auto_replan_protection_remaining = 0
+    c.auto_replan_armed = True
+
+    below = c._should_trigger_auto_replan(0.49, source="go_checkpoint_loop")
+    at = c._should_trigger_auto_replan(0.5, source="go_checkpoint_loop")
+    assert isinstance(below, bool)
+    assert isinstance(at, bool)
+    assert below is False
+    assert at is True
+
+    c.framework_mode = "agent-heartbeat-soft"
+    non_threshold = c._should_trigger_auto_replan(0.99, source="go_checkpoint_loop")
+    assert isinstance(non_threshold, bool)
+    assert non_threshold is False
 
 def test_trajectory_sampler_uses_lightweight_reader_not_snapshot(monkeypatch):
     c = LLMController.__new__(LLMController)
