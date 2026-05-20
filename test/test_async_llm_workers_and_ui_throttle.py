@@ -90,7 +90,7 @@ def test_planning_inflight_skips_second_heartbeat_and_logs_skip():
     c._consume_planning_response_queue()
 
     assert len(planner.calls) == 1
-    assert any(t.get("skipped_due_to_inflight") and t.get("llm_call_role") == "heartbeat" for t in c.task_run_logger.traces)
+    assert not any(t.get("skipped_due_to_inflight") and t.get("llm_call_role") == "heartbeat" for t in c.task_run_logger.traces)
 
 
 def test_planning_continue_and_full_replan_and_stale_response_handling():
@@ -99,6 +99,8 @@ def test_planning_continue_and_full_replan_and_stale_response_handling():
     cont._planning_worker_thread.join(timeout=1.0)
     assert cont._consume_planning_response_queue() is False
     assert cont._pending_heartbeat_replan_plan is None
+    cont_ts = cont.last_planning_response_received_ts
+    assert cont.next_planning_allowed_ts >= cont_ts + 5.0
 
     replan_response = {"response": "full_replan_plan", "reason": "risk", "plan": "ml(0.3);gc('A2');", "raw_response": '{"response":"full_replan_plan"}', "parsed_ok": True}
     repl = _controller(_Planner(response=replan_response))
@@ -115,6 +117,8 @@ def test_planning_continue_and_full_replan_and_stale_response_handling():
     assert stale._consume_planning_response_queue() is False
     assert stale._pending_heartbeat_replan_plan is None
     assert any(t.get("response_discarded_reason") == "target_checkpoint_changed" for t in stale.task_run_logger.traces)
+    stale_ts = stale.last_planning_response_received_ts
+    assert stale.next_planning_allowed_ts >= stale_ts + 5.0
 
 
 def test_evaluator_worker_has_independent_inflight_and_latency_trace():
@@ -172,6 +176,16 @@ def test_ui_render_throttle_uses_gr_update_without_skipping_history():
     assert outputs[3].get("__type__") == "update"
     assert len(tf.position_history["drone_gt"]) == 1
     assert len(tf.worker_collision_history["worker_1"]) == 1
+
+
+def test_trajectory_xy_history_prefers_controller_sampler_points():
+    pytest.importorskip("gradio")
+    from serving.webui.typefly import TypeFly
+    tf = TypeFly.__new__(TypeFly)
+    tf.llm_controller = SimpleNamespace(get_uav_trajectory_points=lambda: [{"x": 9.0, "y": 8.0, "z": 1.0}])
+    tf.uav_trajectory_points = __import__('collections').deque([{"x": 1.0, "y": 2.0, "z": 3.0}], maxlen=100)
+    tf.position_history = {"drone_gt": __import__('collections').deque([(3.0, 4.0)], maxlen=100)}
+    assert tf._trajectory_xy_history() == [(9.0, 8.0)]
 
 
 def test_logger_latency_summary_excludes_skips_and_computes_parse_rate(tmp_path):

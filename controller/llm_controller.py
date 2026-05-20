@@ -259,6 +259,7 @@ class LLMController():
         self._current_active_plan: Optional[str] = None
         self._latest_full_replan_response: Optional[str] = None
         self._agent_heartbeat_index = 0
+        self.last_planning_response_received_ts = 0.0
         self.last_planning_response_commit_ts = 0.0
         self.next_planning_allowed_ts = 0.0
         self.planning_response_commit_count = 0
@@ -303,6 +304,10 @@ class LLMController():
         self._latest_uav_trajectory_points: list[dict] = []
         self._latest_uav_trajectory_stats: dict = {}
         self._virtual_position_thread: Optional[threading.Thread] = None
+        self._uav_trajectory_sampler_stop_event: Optional[threading.Event] = None
+        self._uav_trajectory_sampler_thread: Optional[threading.Thread] = None
+        self._uav_trajectory_sampler_interval_sec: float = 0.1
+        self._uav_trajectory_sampler_active_during_run: bool = False
 
 
     def set_uav_trajectory_points(self, points):
@@ -330,6 +335,59 @@ class LLMController():
             "trajectory_max_segment_distance_m": float(max(dists) if dists else 0.0),
             "trajectory_buffer_source": "position_callback",
         }
+
+    def get_uav_trajectory_points(self):
+        return list(getattr(self, "_latest_uav_trajectory_points", []) or [])
+
+    def _read_uav_position_for_sampler(self):
+        snapshot = (self.get_live_ui_snapshot() or {})
+        drone_gt = snapshot.get("drone_gt")
+        if drone_gt is None:
+            return None
+        return tuple(float(v) for v in drone_gt[:3])
+
+    def start_uav_trajectory_sampler(self, sample_interval_sec: float = 0.1):
+        self.stop_uav_trajectory_sampler()
+        self._uav_trajectory_sampler_interval_sec = max(0.02, float(sample_interval_sec or 0.1))
+        self._uav_trajectory_sampler_stop_event = threading.Event()
+        self._uav_trajectory_sampler_active_during_run = True
+        self._latest_uav_trajectory_points = []
+        self._latest_uav_trajectory_stats = {}
+
+        def _loop():
+            stop_event = self._uav_trajectory_sampler_stop_event
+            assert stop_event is not None
+            while not stop_event.is_set():
+                pos = self._read_uav_position_for_sampler()
+                if pos is not None:
+                    point = {
+                        "ts": float(time.time()),
+                        "x": float(pos[0]),
+                        "y": float(pos[1]),
+                        "z": float(pos[2]),
+                        "source": "backend_trajectory_sampler",
+                        "execution_mode": self.execution_mode,
+                        "current_target_checkpoint": (self.latest_benchmark_progress or {}).get("current_target"),
+                    }
+                    self._latest_uav_trajectory_points.append(point)
+                    if len(self._latest_uav_trajectory_points) > 5000:
+                        self._latest_uav_trajectory_points = self._latest_uav_trajectory_points[-5000:]
+                    self.set_uav_trajectory_points(self._latest_uav_trajectory_points)
+                    self._latest_uav_trajectory_stats["trajectory_buffer_source"] = "backend_trajectory_sampler"
+                stop_event.wait(self._uav_trajectory_sampler_interval_sec)
+
+        self._uav_trajectory_sampler_thread = threading.Thread(target=_loop, daemon=True)
+        self._uav_trajectory_sampler_thread.start()
+
+    def stop_uav_trajectory_sampler(self):
+        evt = getattr(self, "_uav_trajectory_sampler_stop_event", None)
+        if evt is not None:
+            evt.set()
+        th = getattr(self, "_uav_trajectory_sampler_thread", None)
+        if th is not None and th.is_alive():
+            th.join(timeout=1.0)
+        self._uav_trajectory_sampler_stop_event = None
+        self._uav_trajectory_sampler_thread = None
 
     def _default_active_objective_set(self) -> dict:
         return {
@@ -1891,8 +1949,13 @@ class LLMController():
             if raw_response:
                 self.append_message(f"[AGENT-HEARTBEAT-RAW] {raw_response}")
             stale_reason = self._planning_response_stale_reason(item)
+            response_end_ts = float(item.get("response_end_ts") or trace.get("response_end_ts") or time.time())
+            self.last_planning_response_received_ts = response_end_ts
+            if self._is_response_driven_heartbeat_pipeline() and (not self._should_skip_heartbeat_after_task_completion()):
+                self.next_planning_allowed_ts = response_end_ts + float(self.heartbeat_interval_seconds)
             if stale_reason:
                 trace["response_discarded_reason"] = stale_reason
+                trace["next_planning_allowed_ts"] = float(getattr(self, "next_planning_allowed_ts", 0.0))
                 self._append_llm_trace_event(trace)
                 print_t(f"[AGENT-HEARTBEAT] discarded stale response reason={stale_reason}")
                 continue
@@ -1901,10 +1964,8 @@ class LLMController():
             self._agent_heartbeat_index = max(int(self._agent_heartbeat_index), heartbeat_index)
             response_type = str(response.get("response", "continue"))
             reason = str(response.get("reason", ""))
-            now_commit_ts = float(time.time())
             if self._is_response_driven_heartbeat_pipeline():
-                self.last_planning_response_commit_ts = now_commit_ts
-                self.next_planning_allowed_ts = now_commit_ts + float(self.heartbeat_interval_seconds)
+                self.last_planning_response_commit_ts = response_end_ts
             self.planning_response_commit_count = int(getattr(self, "planning_response_commit_count", 0)) + 1
             if response_type == "full_replan_plan":
                 plan_text = self._sanitize_minispec_plan(response.get("plan", ""))
@@ -2031,6 +2092,9 @@ class LLMController():
             return False
         now = time.time()
         if self._is_response_driven_heartbeat_pipeline():
+            if self._planning_inflight or self.awaiting_llm_response:
+                self._start_agent_eval_worker_if_needed()
+                return False
             if (not force) and now < float(getattr(self, "next_planning_allowed_ts", 0.0)):
                 self._start_agent_eval_worker_if_needed()
                 return False
@@ -2053,7 +2117,8 @@ class LLMController():
         remaining = [cid for cid in active_ids if cid not in set(completed)]
         with self._planning_worker_lock:
             if self._planning_inflight:
-                self._log_llm_inflight_skip("planning", heartbeat_index=heartbeat_index, target_checkpoint=benchmark_progress.get("current_target"))
+                if not self._is_response_driven_heartbeat_pipeline():
+                    self._log_llm_inflight_skip("planning", heartbeat_index=heartbeat_index, target_checkpoint=benchmark_progress.get("current_target"))
                 self._start_agent_eval_worker_if_needed()
                 return False
             generation = int(self._planning_generation)
@@ -2565,6 +2630,7 @@ class LLMController():
         self._current_active_plan = None
         self._latest_full_replan_response = None
         self._agent_heartbeat_index = 0
+        self.last_planning_response_received_ts = 0.0
         self.last_planning_response_commit_ts = 0.0
         self.next_planning_allowed_ts = 0.0
         self.planning_response_commit_count = 0
@@ -2598,6 +2664,8 @@ class LLMController():
         self._interrupt_pending_until_new_plan = False
         self._last_exec_flow_blocked_log_ts = 0.0
         self._last_exec_flow_blocked_signature = ""
+        self._uav_trajectory_sampler_active_during_run = False
+        self.start_uav_trajectory_sampler(sample_interval_sec=0.1)
         def _run_monitor():
             while not monitor_stop.is_set():
                 try:
@@ -2857,6 +2925,7 @@ class LLMController():
                 return
 
             break
+        self.stop_uav_trajectory_sampler()
         final_snapshot = self.get_live_ui_snapshot()
         completion_state = self._derive_completion_state_from_snapshot(final_snapshot)
         completed_set = set(completion_state.get("true_completed_checkpoints", []))
@@ -3463,6 +3532,8 @@ class LLMController():
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
         trajectory_stats = dict(getattr(self, "_latest_uav_trajectory_stats", {}) or {})
+        trajectory_stats.setdefault("trajectory_sampler_interval_sec", float(getattr(self, "_uav_trajectory_sampler_interval_sec", 0.1)))
+        trajectory_stats.setdefault("trajectory_sampler_active_during_run", bool(getattr(self, "_uav_trajectory_sampler_active_during_run", False)))
         summary = {
             "run_status": str(run_status),
             "mission_success": bool(mission_success),
@@ -3495,6 +3566,17 @@ class LLMController():
             ),
             "response_driven_call_loop": bool(self._is_response_driven_heartbeat_pipeline()),
             "planning_response_commit_count": int(getattr(self, "planning_response_commit_count", 0)),
+            "last_planning_response_received_ts": float(getattr(self, "last_planning_response_received_ts", 0.0) or 0.0),
+            "last_planning_response_committed_ts": float(getattr(self, "last_planning_response_commit_ts", 0.0) or 0.0),
+            "next_planning_allowed_ts": float(getattr(self, "next_planning_allowed_ts", 0.0) or 0.0),
+            "response_to_next_request_delta_sec": (
+                None if (float(getattr(self, "next_planning_allowed_ts", 0.0) or 0.0) <= 0.0 or float(getattr(self, "last_planning_response_received_ts", 0.0) or 0.0) <= 0.0)
+                else round(
+                    float(getattr(self, "next_planning_allowed_ts", 0.0) or 0.0)
+                    - float(getattr(self, "last_planning_response_received_ts", 0.0) or 0.0),
+                    6,
+                )
+            ),
             "planning_call_loop_mode": (
                 "response_driven_execution_window" if self._is_response_driven_heartbeat_pipeline() else "fixed_heartbeat_period"
             ),
