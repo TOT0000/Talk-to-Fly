@@ -1985,9 +1985,9 @@ class LLMController():
 
     def _should_skip_heartbeat_after_task_completion(self) -> bool:
         if not self._is_active_objective_completed():
-            return "none"
+            return False
         if self._pending_execution_statement_count() > 0:
-            return "none"
+            return False
         return True
 
     def _planning_response_stale_reason(self, response_item: dict) -> str:
@@ -2277,10 +2277,15 @@ class LLMController():
                     "heartbeat_seconds": float(self.heartbeat_interval_seconds),
                 },
             }
-        self._planning_inflight = True
-        self._start_llm_wait(reason="heartbeat")
-            self._planning_worker_thread = threading.Thread(target=self._planning_worker_loop, args=(request_payload,), daemon=True)
+            self._planning_inflight = True
+            self._start_llm_wait(reason="heartbeat")
+            self._planning_worker_thread = threading.Thread(
+                target=self._planning_worker_loop,
+                args=(request_payload,),
+                daemon=True,
+            )
             self._planning_worker_thread.start()
+
         self._agent_heartbeat_index = heartbeat_index
         self.heartbeat_request_started_count = int(getattr(self, "heartbeat_request_started_count", 0)) + 1
         self.last_heartbeat_skip_reason = "request_started"

@@ -270,3 +270,59 @@ def test_reset_runtime_records_clears_ui_and_controller_trajectory_buffers():
     assert tf.llm_controller._latest_uav_trajectory_stats["trajectory_sample_count"] == 0
     assert tf.llm_controller.cleared is True
     assert tf._trajectory_xy_history() == []
+
+def test_should_skip_heartbeat_after_task_completion_returns_bool_only():
+    c = _controller(_Planner())
+
+    c.latest_benchmark_progress = {"completed": [], "current_target": "A1"}
+    c.active_objective_set = {"active_checkpoint_ids": ["A1"]}
+    assert c._should_skip_heartbeat_after_task_completion() is False
+    assert isinstance(c._should_skip_heartbeat_after_task_completion(), bool)
+
+    class _Q:
+        def qsize(self):
+            return 1
+
+    from controller import llm_controller as llm_controller_module
+    old_queue = llm_controller_module.Statement.execution_queue
+    llm_controller_module.Statement.execution_queue = _Q()
+    try:
+        c.latest_benchmark_progress = {"completed": ["A1"], "current_target": "A1"}
+        assert c._should_skip_heartbeat_after_task_completion() is False
+    finally:
+        llm_controller_module.Statement.execution_queue = old_queue
+
+    c.latest_benchmark_progress = {"completed": ["A1"], "current_target": "A1"}
+    c.active_objective_set = {"active_checkpoint_ids": ["A1"]}
+    assert c._should_skip_heartbeat_after_task_completion() is True
+
+
+def test_response_driven_heartbeat_not_misclassified_as_completed():
+    c = _controller(_Planner())
+    c.latest_benchmark_progress = {"completed": [], "current_target": "A1"}
+    c.active_objective_set = {"active_checkpoint_ids": ["A1"]}
+    c._planning_inflight = False
+    c.awaiting_llm_response = False
+    c.next_planning_allowed_ts = time.time() - 0.01
+
+    status = c._maybe_run_agent_heartbeat(force=False)
+    assert status == "request_started"
+    assert c.last_heartbeat_skip_reason != "active_objective_completed"
+    assert c.heartbeat_request_started_count >= 1
+    c._planning_worker_thread.join(timeout=1.0)
+
+
+def test_no_truthy_string_regression_for_bool_helpers():
+    from pathlib import Path
+
+    source = Path('controller/llm_controller.py').read_text(encoding='utf-8')
+    for fn_name in ('def _should_skip_heartbeat_after_task_completion', 'def _should_trigger_auto_replan'):
+        start = source.index(fn_name)
+        end = source.find('\n    def ', start + 1)
+        if end == -1:
+            end = len(source)
+        fn_source = source[start:end]
+        assert 'return "none"' not in fn_source
+        assert 'return "request_started"' not in fn_source
+        assert 'return True,' not in fn_source
+        assert 'return False,' not in fn_source
