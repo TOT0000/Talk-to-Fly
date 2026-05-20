@@ -72,6 +72,13 @@ def _controller(planner):
     c.append_message = lambda msg: None
     c._sanitize_minispec_plan = lambda raw: str(raw)
     c._record_replan_response = lambda **kwargs: c._replan_response_history.append(kwargs)
+    c.replan_requested_count = 0
+    c.replan_applied_count = 0
+    c.replan_discarded_count = 0
+    c.replan_discard_reason_counts = {}
+    c.latest_replan_request_reason = ""
+    c.latest_replan_applied_plan = ""
+    c.latest_replan_overwrote_previous_pending = False
     c.get_live_ui_snapshot = lambda: {"benchmark_progress": dict(c.latest_benchmark_progress), "active_objective_set": dict(c.active_objective_set), "workers": []}
     c._build_execution_history_for_llm = lambda: "history"
     return c
@@ -114,9 +121,10 @@ def test_planning_continue_and_full_replan_and_stale_response_handling():
     stale._maybe_run_agent_heartbeat(force=True)
     stale.latest_benchmark_progress["current_target"] = "A2"
     stale._planning_worker_thread.join(timeout=1.0)
-    assert stale._consume_planning_response_queue() is False
-    assert stale._pending_heartbeat_replan_plan is None
-    assert any(t.get("response_discarded_reason") == "target_checkpoint_changed" for t in stale.task_run_logger.traces)
+    assert stale._consume_planning_response_queue() is True
+    assert stale._pending_heartbeat_replan_plan == "ml(0.3);gc('A2');"
+    assert not any(t.get("response_discarded_reason") == "target_checkpoint_changed" for t in stale.task_run_logger.traces)
+    assert stale.replan_requested_count == 1
     stale_ts = stale.last_planning_response_received_ts
     assert stale.next_planning_allowed_ts >= stale_ts + 5.0
 
