@@ -81,6 +81,10 @@ RUN_COLUMNS = [
     "total_llm_wait_hover_sec",
     "completion_time_excluding_llm_wait_sec",
     "llm_wait_event_count",
+    "trajectory_sample_count",
+    "trajectory_buffer_source",
+    "trajectory_sampler_interval_sec",
+    "trajectory_sampler_active_during_run",
     "lmstudio_base_url",
     "lmstudio_connected",
     "generated_plan",
@@ -734,6 +738,8 @@ class TaskRunLogger:
             "trajectory_max_sample_dt_sec": final_mission_summary.get("trajectory_max_sample_dt_sec"),
             "trajectory_mean_sample_dt_sec": final_mission_summary.get("trajectory_mean_sample_dt_sec"),
             "trajectory_max_segment_distance_m": final_mission_summary.get("trajectory_max_segment_distance_m"),
+            "trajectory_sampler_interval_sec": final_mission_summary.get("trajectory_sampler_interval_sec"),
+            "trajectory_sampler_active_during_run": bool(final_mission_summary.get("trajectory_sampler_active_during_run", False)),
             "planning_trace_count": len(active.planning_trace),
         }
 
