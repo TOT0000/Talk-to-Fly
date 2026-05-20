@@ -283,6 +283,10 @@ class LLMController():
         self.total_llm_wait_hover_sec = 0.0
         self.llm_wait_event_count = 0
         self.llm_wait_intervals: list[dict] = []
+        self.gc_llm_wait_pause_count = 0
+        self.gc_llm_wait_total_sec = 0.0
+        self.gc_llm_wait_resume_count = 0
+        self.gc_llm_wait_replan_preempt_count = 0
         self.manual_heartbeat_interval_seconds: Optional[float] = None
         self.mission_start_ts: Optional[float] = None
         self.mission_end_ts: Optional[float] = None
@@ -367,11 +371,23 @@ class LLMController():
         self._uav_trajectory_sampler_active_during_run = False
 
     def _read_uav_position_for_sampler(self):
-        snapshot = (self.get_live_ui_snapshot() or {})
-        drone_gt = snapshot.get("drone_gt")
-        if drone_gt is None:
+        pos = None
+        drone = getattr(self, "drone", None)
+        state_provider = getattr(self, "state_provider", None)
+        try:
+            if drone is not None and hasattr(drone, "get_ground_truth_drone_position"):
+                pos = drone.get_ground_truth_drone_position()
+            elif drone is not None and hasattr(drone, "get_drone_position"):
+                pos = drone.get_drone_position()
+            elif state_provider is not None and hasattr(state_provider, "get_drone_position"):
+                pos = state_provider.get_drone_position()
+            elif state_provider is not None and hasattr(state_provider, "get_latest_drone_position_cached"):
+                pos = state_provider.get_latest_drone_position_cached()
+        except Exception:
+            pos = None
+        if pos is None:
             return None
-        return tuple(float(v) for v in drone_gt[:3])
+        return tuple(float(v) for v in tuple(pos)[:3])
 
     def start_uav_trajectory_sampler(self, sample_interval_sec: float = 0.1):
         self.stop_uav_trajectory_sampler()
@@ -406,9 +422,15 @@ class LLMController():
                         self._latest_uav_trajectory_points.append(point)
                         if len(self._latest_uav_trajectory_points) > 5000:
                             self._latest_uav_trajectory_points = self._latest_uav_trajectory_points[-5000:]
-                        points_copy = list(self._latest_uav_trajectory_points)
-                    self.set_uav_trajectory_points(points_copy)
+                        need_recompute = ((len(self._latest_uav_trajectory_points) % 10) == 0)
+                        points_copy = list(self._latest_uav_trajectory_points) if need_recompute else None
+                    if points_copy is not None:
+                        self.set_uav_trajectory_points(points_copy)
                     with self._uav_trajectory_lock:
+                        if points_copy is None and not self._latest_uav_trajectory_stats:
+                            self._latest_uav_trajectory_stats = {}
+                        self._latest_uav_trajectory_stats.setdefault("trajectory_sample_count", len(self._latest_uav_trajectory_points))
+                        self._latest_uav_trajectory_stats["trajectory_sample_count"] = len(self._latest_uav_trajectory_points)
                         self._latest_uav_trajectory_stats["trajectory_buffer_source"] = "backend_trajectory_sampler"
                         self._latest_uav_trajectory_stats["trajectory_sampler_interval_sec"] = float(self._uav_trajectory_sampler_interval_sec)
                         self._latest_uav_trajectory_stats["trajectory_sampler_active_during_run"] = bool(self._uav_trajectory_sampler_active_during_run)
@@ -1258,11 +1280,17 @@ class LLMController():
                 reached = True
                 stop_reason = "objective_completed"
                 return True
-            if self._maybe_run_agent_heartbeat():
+            hb_status = self._maybe_run_agent_heartbeat()
+            if hb_status == "replan_ready":
                 stop_reason = f"agent_heartbeat_replan({self._pending_heartbeat_reason or 'llm'})"
                 print_t(f"[QUEUE] clearing remaining statements due to replan")
                 preempted_for_replan = True
                 return True
+            if hb_status == "request_started" or self.awaiting_llm_response:
+                if self._pause_gc_for_llm_wait(checkpoint.id):
+                    stop_reason = f"agent_heartbeat_replan({self._pending_heartbeat_reason or 'llm'})"
+                    preempted_for_replan = True
+                    return True
             if self._should_trigger_auto_replan(current_p, source="go_checkpoint_loop"):
                 print_t(
                     "[TYPEFLY-INTERRUPT] "
@@ -1272,7 +1300,7 @@ class LLMController():
                 stop_reason = f"collision_probability_high({current_p:.3f})"
                 preempted_for_replan = True
                 return True
-            return False
+            return "none"
 
         for idx in range(max_iterations):
             snapshot = self.get_live_ui_snapshot()
@@ -1945,15 +1973,15 @@ class LLMController():
     def _is_active_objective_completed(self) -> bool:
         active_ids = set(str(v).upper() for v in self.active_objective_set.get("active_checkpoint_ids", []))
         if not active_ids:
-            return False
+            return "none"
         completed = set(str(v).upper() for v in (self.latest_benchmark_progress.get("completed") or []))
         return all(cid in completed for cid in active_ids)
 
     def _should_skip_heartbeat_after_task_completion(self) -> bool:
         if not self._is_active_objective_completed():
-            return False
+            return "none"
         if self._pending_execution_statement_count() > 0:
-            return False
+            return "none"
         return True
 
     def _planning_response_stale_reason(self, response_item: dict) -> str:
@@ -2113,36 +2141,70 @@ class LLMController():
                 self._planning_inflight = False
                 self._planning_worker_thread = None
 
-    def _maybe_run_agent_heartbeat(self, force: bool = False) -> bool:
+    def _pause_gc_for_llm_wait(self, checkpoint_id: Optional[str] = None) -> bool:
+        if not (self.awaiting_llm_response or self.llm_wait_hover_active or self._planning_inflight):
+            return bool(self._pending_heartbeat_replan_plan)
+        start_ts = time.time()
+        self.gc_llm_wait_pause_count += 1
+        print_debug(f"[GC-LLM-WAIT] pause reason=heartbeat_request_started checkpoint={checkpoint_id}", env_var="TYPEFLY_VERBOSE_DEBUG")
+        while self.awaiting_llm_response or self.llm_wait_hover_active or self._planning_inflight:
+            try:
+                if hasattr(self.drone, "hold_position"):
+                    held = self.drone.hold_position()
+                elif hasattr(self.drone, "set_hold_position_from_current"):
+                    held = self.drone.set_hold_position_from_current()
+                else:
+                    held = None
+                print_debug(f"[GC-LLM-WAIT] holding position={held}", env_var="TYPEFLY_VERBOSE_DEBUG")
+            except Exception:
+                pass
+            if self._consume_planning_response_queue():
+                self.gc_llm_wait_total_sec += max(0.0, time.time() - start_ts)
+                self.gc_llm_wait_replan_preempt_count += 1
+                print_debug("[GC-LLM-WAIT] response_received response=full_replan_plan", env_var="TYPEFLY_VERBOSE_DEBUG")
+                print_debug("[GC-LLM-WAIT] preempt_for_replan", env_var="TYPEFLY_VERBOSE_DEBUG")
+                return True
+            time.sleep(0.05)
+        self.gc_llm_wait_total_sec += max(0.0, time.time() - start_ts)
+        if self._pending_heartbeat_replan_plan:
+            self.gc_llm_wait_replan_preempt_count += 1
+            print_debug("[GC-LLM-WAIT] preempt_for_replan", env_var="TYPEFLY_VERBOSE_DEBUG")
+            return True
+        self.gc_llm_wait_resume_count += 1
+        print_debug("[GC-LLM-WAIT] response_received response=continue", env_var="TYPEFLY_VERBOSE_DEBUG")
+        print_debug("[GC-LLM-WAIT] resume_original_plan", env_var="TYPEFLY_VERBOSE_DEBUG")
+        return "request_started"
+
+    def _maybe_run_agent_heartbeat(self, force: bool = False) -> str:
         self._ensure_llm_worker_state()
         if not self._is_agent_heartbeat_mode():
-            return False
+            return "none"
         if self._consume_planning_response_queue():
-            return True
+            return "replan_ready"
         if self._pending_heartbeat_replan_plan:
-            return True
+            return "replan_ready"
         if self._should_skip_heartbeat_after_task_completion():
             print_debug(
                 "[AGENT-HEARTBEAT] skipped after task completion "
                 f"pending_statements={self._pending_execution_statement_count()}",
                 env_var="TYPEFLY_VERBOSE_DEBUG",
             )
-            return False
+            return "none"
         now = time.time()
         if self._is_response_driven_heartbeat_pipeline():
             if self._planning_inflight or self.awaiting_llm_response:
                 self._start_agent_eval_worker_if_needed()
-                return False
+                return "none"
             if (not force) and now < float(getattr(self, "next_planning_allowed_ts", 0.0)):
                 self._start_agent_eval_worker_if_needed()
-                return False
+                return "none"
         elif (not force) and (now - float(self.last_heartbeat_ts) < float(self.heartbeat_interval_seconds)):
             self._start_agent_eval_worker_if_needed()
-            return False
+            return "none"
         self.last_heartbeat_ts = now
         if getattr(self, "_replan_attempts", 0) >= int(self.replan_limit):
             print_t(f"[REPLAN-COUNT] current={self._replan_attempts} limit={self.replan_limit}")
-            return False
+            return "none"
         snapshot = self.get_live_ui_snapshot() or {}
         heartbeat_index = int(self._agent_heartbeat_index) + 1
         now_ts = time.time()
@@ -2158,7 +2220,7 @@ class LLMController():
                 if not self._is_response_driven_heartbeat_pipeline():
                     self._log_llm_inflight_skip("planning", heartbeat_index=heartbeat_index, target_checkpoint=benchmark_progress.get("current_target"))
                 self._start_agent_eval_worker_if_needed()
-                return False
+                return "none"
             generation = int(self._planning_generation)
             request_payload = {
                 "generation": generation,
@@ -2190,7 +2252,7 @@ class LLMController():
             self._planning_worker_thread.start()
         self._agent_heartbeat_index = heartbeat_index
         self._start_agent_eval_worker_if_needed()
-        return False
+        return "request_started"
 
     def _start_llm_wait(self, reason: str):
         if self.awaiting_llm_response:
@@ -2213,8 +2275,10 @@ class LLMController():
         self.llm_wait_started_ts = None
 
     def _should_trigger_auto_replan(self, predicted_p: float, source: str) -> bool:
+        if hb_status == "request_started" or bool(self.awaiting_llm_response):
+            return True, "awaiting_llm_response_hover"
         if not self._is_threshold_replan_mode():
-            return False
+            return "none"
         if int(getattr(self, "_replan_attempts", 0)) >= int(self.replan_limit):
             print_debug(
                 "[REPLAN_DEBUG] "
@@ -2222,7 +2286,7 @@ class LLMController():
                 f"current={int(getattr(self, '_replan_attempts', 0))} limit={int(self.replan_limit)} source={source}",
                 env_var="TYPEFLY_VERBOSE_DEBUG",
             )
-            return False
+            return "none"
         predicted_p = float(predicted_p)
         threshold = float(self.predicted_collision_replan_threshold)
         rearm_threshold = float(self.predicted_collision_rearm_threshold)
@@ -2241,7 +2305,7 @@ class LLMController():
                     f"remaining_statements={self.auto_replan_protection_remaining} source={source}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
-                return False
+                return "none"
 
         if not self.auto_replan_armed:
             if predicted_p <= rearm_threshold:
@@ -2258,7 +2322,7 @@ class LLMController():
                     f"auto_replan_suppressed p={predicted_p:.6f} reason=disarmed source={source}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
-            return False
+            return "none"
 
         trigger_replan = (predicted_p > threshold) if bool(self.predicted_collision_replan_strictly_greater) else (predicted_p >= threshold)
         if trigger_replan:
@@ -2271,7 +2335,7 @@ class LLMController():
             )
             print_debug("[REPLAN_DEBUG] auto_replan_armed=False", env_var="TYPEFLY_VERBOSE_DEBUG")
             return True
-        return False
+        return "request_started"
 
     def stop_controller(self):
         self.controller_active = False
@@ -2340,7 +2404,8 @@ class LLMController():
                 f"reason=runtime_replan_event detail={event_reason} {self._format_exec_flow_flags()}"
             )
             return True, event_reason
-        if self._maybe_run_agent_heartbeat():
+        hb_status = self._maybe_run_agent_heartbeat()
+        if hb_status == "replan_ready":
             print_t("[QUEUE] clearing remaining statements due to replan")
             self.interrupted_for_replan = True
             self.entered_awaiting_replan_response = True
@@ -2351,6 +2416,8 @@ class LLMController():
                 f"{self._format_exec_flow_flags()}"
             )
             return True, f"agent_heartbeat_replan:{self._pending_heartbeat_reason or 'llm'}"
+        if hb_status == "request_started" or bool(self.awaiting_llm_response):
+            return True, "awaiting_llm_response_hover"
         if not self._is_threshold_replan_mode():
             return False, ""
         snapshot = self.get_live_ui_snapshot()
@@ -2447,7 +2514,7 @@ class LLMController():
 
     def _has_live_sim_user_position(self) -> bool:
         if not hasattr(self, "state_provider"):
-            return False
+            return "none"
         last_ts = getattr(self.state_provider, "_last_user_position_ts", 0.0)
         return bool(last_ts and (time.time() - float(last_ts) < 1.5))
 
@@ -3623,6 +3690,10 @@ class LLMController():
             "completion_time_excluding_llm_wait_sec": completion_time_excluding_llm_wait_sec,
             "llm_wait_event_count": int(self.llm_wait_event_count),
             "llm_wait_intervals": list(self.llm_wait_intervals),
+            "gc_llm_wait_pause_count": int(getattr(self, "gc_llm_wait_pause_count", 0)),
+            "gc_llm_wait_total_sec": round(float(getattr(self, "gc_llm_wait_total_sec", 0.0) or 0.0), 6),
+            "gc_llm_wait_resume_count": int(getattr(self, "gc_llm_wait_resume_count", 0)),
+            "gc_llm_wait_replan_preempt_count": int(getattr(self, "gc_llm_wait_replan_preempt_count", 0)),
             **trajectory_stats,
         }
         self.final_mission_summary = dict(summary)

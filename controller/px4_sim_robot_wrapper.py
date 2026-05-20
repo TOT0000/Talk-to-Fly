@@ -779,6 +779,17 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         )
         return False
 
+    def hold_position(self):
+        pos = self.get_ground_truth_drone_position()
+        yaw = self.get_drone_yaw()
+        self._active_command_name = "llm_wait_hover"
+        self._active_command_last_writer = "hold_position"
+        self._active_command_value = 0.0
+        self._active_command_start_time = time.time()
+        self._set_active_target(float(pos[0]), float(pos[1]), float(pos[2]), float(yaw), source="llm_wait_hover", writer="hold_position")
+        print_debug(f"[GC-LLM-WAIT] holding position=({float(pos[0]):.3f},{float(pos[1]):.3f},{float(pos[2]):.3f})", env_var="TYPEFLY_VERBOSE_DEBUG")
+        return (float(pos[0]), float(pos[1]), float(pos[2]))
+
     def move_forward(self, distance: float) -> Tuple[bool, bool]:
         return self._move_by_body_offset("move_forward", float(distance), forward_m=float(distance))
 
