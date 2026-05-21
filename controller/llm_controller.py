@@ -322,6 +322,7 @@ class LLMController():
         self._uav_trajectory_sampler_stop_event: Optional[threading.Event] = None
         self._uav_trajectory_sampler_thread: Optional[threading.Thread] = None
         self._uav_trajectory_sampler_interval_sec: float = 0.1
+        self._uav_trajectory_history_max_points: int = int(os.getenv("TYPEFLY_TRAJECTORY_HISTORY_MAX_POINTS", "100000"))
         self._uav_trajectory_sampler_active_during_run: bool = False
         self._uav_trajectory_lock = threading.Lock()
         self._uav_trajectory_epoch: int = 0
@@ -433,8 +434,9 @@ class LLMController():
                             break
                         point["trajectory_epoch"] = sampler_epoch
                         self._latest_uav_trajectory_points.append(point)
-                        if len(self._latest_uav_trajectory_points) > 5000:
-                            self._latest_uav_trajectory_points = self._latest_uav_trajectory_points[-5000:]
+                        history_limit = int(getattr(self, "_uav_trajectory_history_max_points", 100000) or 100000)
+                        if history_limit > 0 and len(self._latest_uav_trajectory_points) > history_limit:
+                            self._latest_uav_trajectory_points = self._latest_uav_trajectory_points[-history_limit:]
                         need_recompute = ((len(self._latest_uav_trajectory_points) % 10) == 0)
                         points_copy = list(self._latest_uav_trajectory_points) if need_recompute else None
                     if points_copy is not None:

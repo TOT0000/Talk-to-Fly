@@ -43,7 +43,7 @@ from gradio import Timer
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 UI_TRAJECTORY_REFRESH_SECONDS = 0.25
-TRAJECTORY_HISTORY_MAX_POINTS = 5000
+TRAJECTORY_HISTORY_MAX_POINTS = int(os.getenv("TYPEFLY_TRAJECTORY_HISTORY_MAX_POINTS", "100000"))
 
 
 class TypeFly:
@@ -109,8 +109,8 @@ class TypeFly:
             self.planning_agent_model_id,
             self.evaluator_model_id,
         )
-        self.default_planning_agent_model_id = self.planning_agent_model_id
-        self.default_evaluator_model_id = self.evaluator_model_id
+        self.default_planning_agent_model_id = ""
+        self.default_evaluator_model_id = ""
         self.default_heartbeat_interval_seconds = float(getattr(self.llm_controller, "heartbeat_interval_seconds", 3.0))
         self.selected_worker_move_step = 0.5
         self.selected_worker_turn_step = 15.0
@@ -118,11 +118,12 @@ class TypeFly:
         # 狀態資料
         self.anchor_count = 0
         self.anchor_input_history = ""
+        history_maxlen = TRAJECTORY_HISTORY_MAX_POINTS if TRAJECTORY_HISTORY_MAX_POINTS > 0 else None
         self.position_history = {
-            "drone_gt": deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS),
-            "drone_est": deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS),
+            "drone_gt": deque(maxlen=history_maxlen),
+            "drone_est": deque(maxlen=history_maxlen),
         }
-        self.uav_trajectory_points = deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS)
+        self.uav_trajectory_points = deque(maxlen=history_maxlen)
         if getattr(self, "llm_controller", None) is not None:
             if hasattr(self.llm_controller, "clear_uav_trajectory"):
                 self.llm_controller.clear_uav_trajectory()
@@ -610,11 +611,12 @@ class TypeFly:
                 break
 
     def _reset_runtime_records(self):
+        history_maxlen = TRAJECTORY_HISTORY_MAX_POINTS if TRAJECTORY_HISTORY_MAX_POINTS > 0 else None
         self.position_history = {
-            "drone_gt": deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS),
-            "drone_est": deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS),
+            "drone_gt": deque(maxlen=history_maxlen),
+            "drone_est": deque(maxlen=history_maxlen),
         }
-        self.uav_trajectory_points = deque(maxlen=TRAJECTORY_HISTORY_MAX_POINTS)
+        self.uav_trajectory_points = deque(maxlen=history_maxlen)
         if getattr(self, "llm_controller", None) is not None:
             if hasattr(self.llm_controller, "clear_uav_trajectory"):
                 self.llm_controller.clear_uav_trajectory()
@@ -692,13 +694,13 @@ class TypeFly:
 
     def reset_system_state(self):
         try:
-            selected = self.llm_controller.set_manual_agent_models(
-                self.default_planning_agent_model_id,
-                self.default_evaluator_model_id,
+            self.llm_controller.set_manual_agent_models(
+                "",
+                "",
             )
             self.llm_controller.set_manual_heartbeat_interval(self.default_heartbeat_interval_seconds)
-            self.planning_agent_model_id = selected.get("planner_model_id", self.default_planning_agent_model_id)
-            self.evaluator_model_id = selected.get("evaluator_model_id", self.default_evaluator_model_id)
+            self.planning_agent_model_id = ""
+            self.evaluator_model_id = ""
             self.llm_controller.current_plan = None
             self.llm_controller.execution_history = None
             self.llm_controller.current_task_description = ""
@@ -711,8 +713,8 @@ class TypeFly:
             self._reset_runtime_records()
             return (
                 "System reset complete: drone/workers repositioned and runtime progress cleared; pipeline model/trigger settings restored to defaults.",
-                gr.update(value=self.planning_agent_model_id),
-                gr.update(value=self.evaluator_model_id),
+                gr.update(value=""),
+                gr.update(value=""),
                 gr.update(value=float(self.default_heartbeat_interval_seconds)),
                 self.render_agent_model_status(),
             )
@@ -747,11 +749,6 @@ class TypeFly:
         selected = self.llm_controller.get_selected_manual_agent_models()
         lm = self.llm_controller.get_lmstudio_connectivity_status()
         current_pipeline = str(getattr(self, "selected_baseline_id", "") or "")
-        pipeline_note = (
-            "active for Agent-Feedback-Eval"
-            if current_pipeline == "agent"
-            else f"stored (current pipeline: `{current_pipeline or 'n/a'}`)"
-        )
         model_preview = list(lm.get("model_ids") or [])[:6]
         model_preview_text = ", ".join(model_preview) if model_preview else "(none)"
         warning_lines = []
@@ -760,18 +757,26 @@ class TypeFly:
         if lm.get("error"):
             warning_lines.append(f"- ❌ lmstudio_error: `{lm.get('error')}`")
         warning_block = "\n".join(warning_lines) if warning_lines else "- ✅ selected planning/evaluator models visible in `/v1/models`"
-        return (
-            "### Agent Model Settings\n"
-            f"- planning agent model: `{selected.get('planner_model_id', '')}`\n"
-            f"- evaluator model: `{selected.get('evaluator_model_id', '')}`\n"
-            f"- pipeline behavior: {pipeline_note}\n"
-            f"- LM Studio provider: `{lm.get('provider', 'n/a')}`\n"
-            f"- LM Studio base_url: `{lm.get('base_url', 'n/a')}`\n"
-            f"- LM Studio api key: `{lm.get('api_key_masked', '(n/a)')}`\n"
-            f"- LM Studio connected: `{bool(lm.get('connected'))}`\n"
-            f"- visible model ids: {model_preview_text}\n"
-            f"{warning_block}"
-        )
+
+        lines = ["### Agent Model Settings"]
+        lines.append(f"- trigger mode: `{current_pipeline or 'n/a'}`")
+        lines.append(f"- planning agent model: `{selected.get('planner_model_id', '')}`")
+        if current_pipeline == "agent":
+            lines.append(f"- evaluator model: `{selected.get('evaluator_model_id', '')}`")
+            lines.append(f"- execution window after LLM response (seconds): `{self.llm_controller.heartbeat_interval_seconds}`")
+        elif current_pipeline == "baseline2":
+            lines.append(f"- execution window after LLM response (seconds): `{self.llm_controller.heartbeat_interval_seconds}`")
+        elif current_pipeline == "baseline3":
+            lines.append("- predicted risk threshold: `0.5`")
+        lines.extend([
+            f"- LM Studio provider: `{lm.get('provider', 'n/a')}`",
+            f"- LM Studio base_url: `{lm.get('base_url', 'n/a')}`",
+            f"- LM Studio api key: `{lm.get('api_key_masked', '(n/a)')}`",
+            f"- LM Studio connected: `{bool(lm.get('connected'))}`",
+            f"- visible model ids: {model_preview_text}",
+            warning_block,
+        ])
+        return "\n".join(lines)
 
     def set_agent_models(self, planning_agent_model: str, evaluator_model: str, heartbeat_seconds=None):
         selected = self.llm_controller.set_manual_agent_models(planning_agent_model, evaluator_model)
