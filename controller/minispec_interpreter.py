@@ -437,6 +437,63 @@ class Statement:
                 return True
         return False
 
+    def find_assignment_operator_outside_groups_and_quotes(self, expr: str) -> int:
+        """
+        Return the index of a valid top-level assignment '='.
+
+        Return -1 if no valid assignment exists.
+
+        A valid assignment '=' must:
+        1. Be outside single-quoted or double-quoted strings.
+        2. Be outside parentheses (), brackets [], and braces {}.
+        3. Not be part of comparison operators: ==, >=, <=, !=.
+        4. Be a top-level operator.
+        """
+        paren_count = 0
+        bracket_count = 0
+        brace_count = 0
+        in_quote = False
+        quote_char = ''
+        escape_next = False
+
+        for i, c in enumerate(expr):
+            if in_quote:
+                if escape_next:
+                    escape_next = False
+                    continue
+                if c == '\\':
+                    escape_next = True
+                    continue
+                if c == quote_char:
+                    in_quote = False
+                continue
+
+            if c in ("'", '"'):
+                in_quote = True
+                quote_char = c
+                continue
+
+            if c == '(':
+                paren_count += 1
+            elif c == ')':
+                paren_count -= 1
+            elif c == '[':
+                bracket_count += 1
+            elif c == ']':
+                bracket_count -= 1
+            elif c == '{':
+                brace_count += 1
+            elif c == '}':
+                brace_count -= 1
+
+            if c == '=' and paren_count == 0 and bracket_count == 0 and brace_count == 0:
+                prev_c = expr[i - 1] if i > 0 else ''
+                next_c = expr[i + 1] if i + 1 < len(expr) else ''
+                if prev_c in ('>', '<', '!', '=') or next_c == '=':
+                    continue
+                return i
+        return -1
+
 
     def eval_expr(self, var: str) -> MiniSpecReturnValue:
         print_t(f'Eval expr: {var}')
@@ -451,12 +508,13 @@ class Statement:
             self.ret = True
             return MiniSpecReturnValue(self.eval_expr(var.lstrip('->')).value, True)
 
-        if '=' in var:
-            var, expr = var.split('=', 1)
-            print_t(f'Eval expr var assign: {var} {expr}')
-            expr = expr.strip()
-            ret_val = self.eval_expr(expr)
-            self.env[var.strip()] = ret_val.value
+        assign_idx = self.find_assignment_operator_outside_groups_and_quotes(var)
+        if assign_idx >= 0:
+            lhs = var[:assign_idx].strip()
+            rhs = var[assign_idx + 1:].strip()
+            print_t(f'Eval expr var assign: {lhs} {rhs}')
+            ret_val = self.eval_expr(rhs)
+            self.env[lhs] = ret_val.value
             return ret_val
 
         # 只有括號外有運算符才拆解計算
