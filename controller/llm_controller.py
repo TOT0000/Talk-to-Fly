@@ -300,6 +300,22 @@ class LLMController():
         self.latest_replan_request_reason = ""
         self.latest_replan_applied_plan = ""
         self.latest_replan_overwrote_previous_pending = False
+        self._event_predrisk_pending_trigger = None
+        self.event_predrisk_threshold_check_count = 0
+        self.event_predrisk_trigger_count = 0
+        self.event_predrisk_pending_trigger_count = 0
+        self.event_predrisk_trigger_consumed_count = 0
+        self.event_predrisk_wait_count = 0
+        self.event_predrisk_wait_total_sec = 0.0
+        self.event_predrisk_replan_request_count = 0
+        self.event_predrisk_replan_applied_count = 0
+        self.event_predrisk_invalid_response_count = 0
+        self.event_predrisk_suppressed_count = 0
+        self.event_predrisk_suppress_reason_counts = {}
+        self.event_predrisk_latest_trigger_probability = None
+        self.event_predrisk_latest_trigger_source = ""
+        self.event_predrisk_latest_trigger_target = ""
+        self.event_predrisk_latest_plan = ""
         self.manual_heartbeat_interval_seconds: Optional[float] = None
         self.mission_start_ts: Optional[float] = None
         self.mission_end_ts: Optional[float] = None
@@ -1197,7 +1213,15 @@ class LLMController():
         return None, False
 
     def skill_delay(self, s: float) -> Tuple[None, bool]:
-        time.sleep(s)
+        end_ts = time.time() + max(0.0, float(s))
+        while True:
+            now = time.time()
+            if now >= end_ts:
+                break
+            time.sleep(min(0.1, max(0.0, end_ts - now)))
+            snapshot = self.get_live_ui_snapshot() or {}
+            if self._check_event_predrisk_threshold(snapshot, source="delay_statement"):
+                self._mark_event_predrisk_pending_trigger(snapshot=snapshot, source="delay_statement")
         return None, False
 
     def skill_go_checkpoint(self, checkpoint_id: str) -> Tuple[str, bool]:
@@ -1582,6 +1606,64 @@ class LLMController():
             f"remaining_statements={remaining_statements} "
             f"{self._format_exec_flow_flags()}"
         )
+        snapshot = self.get_live_ui_snapshot() or {}
+        if self._check_event_predrisk_threshold(snapshot, source="statement_boundary"):
+            self._mark_event_predrisk_pending_trigger(snapshot=snapshot, source="statement_boundary")
+        self._consume_pending_event_predrisk_trigger(source="statement_boundary")
+
+    def _record_event_predrisk_suppressed(self, reason: str):
+        key = str(reason or "unknown")
+        self.event_predrisk_suppressed_count = int(self.event_predrisk_suppressed_count) + 1
+        counts = dict(self.event_predrisk_suppress_reason_counts or {})
+        counts[key] = int(counts.get(key, 0)) + 1
+        self.event_predrisk_suppress_reason_counts = counts
+
+    def _check_event_predrisk_threshold(self, snapshot: dict, source: str) -> bool:
+        self.event_predrisk_threshold_check_count = int(self.event_predrisk_threshold_check_count) + 1
+        if not self._is_threshold_replan_mode():
+            return False
+        safety_context = (snapshot or {}).get("safety_context") or self.latest_safety_context
+        if safety_context is None:
+            return False
+        current_p = float(getattr(safety_context, "predicted_collision_probability", 0.0))
+        threshold = float(self.predicted_collision_replan_threshold)
+        triggered = (current_p > threshold) if bool(self.predicted_collision_replan_strictly_greater) else (current_p >= threshold)
+        if triggered:
+            self.event_predrisk_trigger_count = int(self.event_predrisk_trigger_count) + 1
+            self.event_predrisk_latest_trigger_probability = float(current_p)
+            self.event_predrisk_latest_trigger_source = str(source or "")
+            self.event_predrisk_latest_trigger_target = str(((snapshot or {}).get("benchmark_progress") or {}).get("current_target") or "")
+        return triggered
+
+    def _mark_event_predrisk_pending_trigger(self, snapshot: Optional[dict], source: str):
+        snap = dict(snapshot or {})
+        p = None
+        safety_context = snap.get("safety_context") or self.latest_safety_context
+        if safety_context is not None:
+            p = float(getattr(safety_context, "predicted_collision_probability", 0.0))
+        self._event_predrisk_pending_trigger = {"source": str(source or ""), "probability": p, "snapshot": snap, "ts": time.time()}
+        self.event_predrisk_pending_trigger_count = int(self.event_predrisk_pending_trigger_count) + 1
+
+    def _consume_pending_event_predrisk_trigger(self, source: str) -> bool:
+        if not self._is_threshold_replan_mode():
+            return False
+        pending = self._event_predrisk_pending_trigger
+        if not isinstance(pending, dict):
+            return False
+        if int(getattr(self, "_replan_attempts", 0)) >= int(self.replan_limit):
+            self._record_event_predrisk_suppressed("replan_limit_reached")
+            return False
+        if bool(self._planning_inflight):
+            self._record_event_predrisk_suppressed("planning_inflight")
+            return False
+        if bool(self.awaiting_llm_response):
+            self._record_event_predrisk_suppressed("awaiting_llm_response")
+            return False
+        self._event_predrisk_pending_trigger = None
+        self.event_predrisk_trigger_consumed_count = int(self.event_predrisk_trigger_consumed_count) + 1
+        reason = f"event_predrisk_pending:{pending.get('source') or source}"
+        self._set_runtime_replan_event(reason=reason)
+        return True
 
     def _on_execution_flow_blocked(self, flow_meta: Optional[dict] = None):
         flow_meta = dict(flow_meta or {})
@@ -2352,6 +2434,7 @@ class LLMController():
         if not self._is_threshold_replan_mode():
             return False
         if int(getattr(self, "_replan_attempts", 0)) >= int(self.replan_limit):
+            self._record_event_predrisk_suppressed("replan_limit_reached")
             print_debug(
                 "[REPLAN_DEBUG] "
                 f"auto_replan_suppressed p={float(predicted_p):.6f} reason=max_replan_attempts_reached "
@@ -2377,6 +2460,7 @@ class LLMController():
                     f"remaining_statements={self.auto_replan_protection_remaining} source={source}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
+                self._record_event_predrisk_suppressed("protection_window")
                 return False
 
         if not self.auto_replan_armed:
@@ -2394,6 +2478,7 @@ class LLMController():
                     f"auto_replan_suppressed p={predicted_p:.6f} reason=disarmed source={source}",
                     env_var="TYPEFLY_VERBOSE_DEBUG",
                 )
+                self._record_event_predrisk_suppressed("disarmed")
             return False
 
         trigger_replan = (predicted_p > threshold) if bool(self.predicted_collision_replan_strictly_greater) else (predicted_p >= threshold)
@@ -2467,6 +2552,8 @@ class LLMController():
             return False, ""
         event_triggered, event_reason = self._consume_runtime_replan_event()
         if event_triggered:
+            if str(event_reason).startswith("event_predrisk"):
+                self.event_predrisk_wait_count = int(self.event_predrisk_wait_count) + 1
             print_t("[QUEUE] clearing remaining statements due to replan")
             self.interrupted_for_replan = True
             self.entered_awaiting_replan_response = True
@@ -2504,7 +2591,7 @@ class LLMController():
         ui_is_fresh = bool(ui_p is not None and (time.time() - float(self.latest_ui_collision_timestamp)) <= 1.5)
         if ui_is_fresh:
             current_p = max(float(current_p), float(ui_p))
-        should_abort = self._should_trigger_auto_replan(current_p, source="interpreter_callback")
+        should_abort = self._check_event_predrisk_threshold(snapshot, source="interpreter_callback") and self._should_trigger_auto_replan(current_p, source="interpreter_callback")
         if should_abort:
             dominant = str(getattr(safety_context, "dominant_threat_id", "unknown"))
             ui_p_text = "n/a" if ui_p is None else f"{float(ui_p):.6f}"
@@ -2927,9 +3014,12 @@ class LLMController():
                     else:
                         llm_wait_started_for_replan = False
                         if str(planning_stage).strip().lower() == "replan":
+                            if selected_framework == MODE_TYPEFLY_THRESHOLD_REPLAN:
+                                self.event_predrisk_replan_request_count = int(self.event_predrisk_replan_request_count) + 1
                             llm_wait_reason = "event_predrisk_replan" if selected_framework == MODE_TYPEFLY_THRESHOLD_REPLAN else ("periodic_infoaware" if pipeline.id == "baseline2" else "agent_heartbeat")
                             self._start_llm_wait(reason=llm_wait_reason)
                             llm_wait_started_for_replan = True
+                            wait_started_ts = time.time()
                         self.current_plan = self.planner.plan(
                             task_description=task_description,
                             scene_description=scene_description,
@@ -2960,8 +3050,13 @@ class LLMController():
                         )
                         if llm_wait_started_for_replan:
                             self._finish_llm_wait(reason="planning_response")
+                            if selected_framework == MODE_TYPEFLY_THRESHOLD_REPLAN:
+                                self.event_predrisk_wait_total_sec += max(0.0, time.time() - wait_started_ts)
                 self.current_plan = self._sanitize_minispec_plan(self.current_plan)
                 if replan_attempts > 0 and llm_called:
+                    if selected_framework == MODE_TYPEFLY_THRESHOLD_REPLAN and str(self.current_plan or "").strip():
+                        self.event_predrisk_replan_applied_count = int(self.event_predrisk_replan_applied_count) + 1
+                        self.event_predrisk_latest_plan = str(self.current_plan or "")
                     self._record_replan_response(
                         source="typefly_llm_full_replan_response",
                         reason=f"planning_stage={planning_stage}",
@@ -3847,6 +3942,21 @@ class LLMController():
             "gc_llm_wait_total_sec": round(float(getattr(self, "gc_llm_wait_total_sec", 0.0) or 0.0), 6),
             "gc_llm_wait_resume_count": int(getattr(self, "gc_llm_wait_resume_count", 0)),
             "gc_llm_wait_replan_preempt_count": int(getattr(self, "gc_llm_wait_replan_preempt_count", 0)),
+            "event_predrisk_threshold_check_count": int(getattr(self, "event_predrisk_threshold_check_count", 0)),
+            "event_predrisk_trigger_count": int(getattr(self, "event_predrisk_trigger_count", 0)),
+            "event_predrisk_pending_trigger_count": int(getattr(self, "event_predrisk_pending_trigger_count", 0)),
+            "event_predrisk_trigger_consumed_count": int(getattr(self, "event_predrisk_trigger_consumed_count", 0)),
+            "event_predrisk_wait_count": int(getattr(self, "event_predrisk_wait_count", 0)),
+            "event_predrisk_wait_total_sec": round(float(getattr(self, "event_predrisk_wait_total_sec", 0.0) or 0.0), 6),
+            "event_predrisk_replan_request_count": int(getattr(self, "event_predrisk_replan_request_count", 0)),
+            "event_predrisk_replan_applied_count": int(getattr(self, "event_predrisk_replan_applied_count", 0)),
+            "event_predrisk_invalid_response_count": int(getattr(self, "event_predrisk_invalid_response_count", 0)),
+            "event_predrisk_suppressed_count": int(getattr(self, "event_predrisk_suppressed_count", 0)),
+            "event_predrisk_suppress_reason_counts": dict(getattr(self, "event_predrisk_suppress_reason_counts", {}) or {}),
+            "event_predrisk_latest_trigger_probability": getattr(self, "event_predrisk_latest_trigger_probability", None),
+            "event_predrisk_latest_trigger_source": str(getattr(self, "event_predrisk_latest_trigger_source", "") or ""),
+            "event_predrisk_latest_trigger_target": str(getattr(self, "event_predrisk_latest_trigger_target", "") or ""),
+            "event_predrisk_latest_plan": str(getattr(self, "event_predrisk_latest_plan", "") or ""),
             "heartbeat_check_count": int(getattr(self, "heartbeat_check_count", 0)),
             "heartbeat_request_started_count": int(getattr(self, "heartbeat_request_started_count", 0)),
             "heartbeat_skip_reason_counts": dict(getattr(self, "heartbeat_skip_reason_counts", {}) or {}),
@@ -4074,7 +4184,17 @@ class LLMController():
             "original_planned_path": None,
             "updated_path": None,
             "replan_count": int(getattr(self, "_replan_attempts", 0)),
+            "event_predrisk_pending_trigger": bool(self._event_predrisk_pending_trigger),
+            "event_predrisk_current_threshold": float(self.predicted_collision_replan_threshold),
+            "event_predrisk_strictly_greater": bool(self.predicted_collision_replan_strictly_greater),
+            "event_predrisk_latest_trigger_source": str(getattr(self, "event_predrisk_latest_trigger_source", "") or ""),
+            "event_predrisk_latest_trigger_probability": getattr(self, "event_predrisk_latest_trigger_probability", None),
         }
+        predrisk_triggered = self._check_event_predrisk_threshold(snapshot, source="runtime_snapshot")
+        snapshot["event_predrisk_checked"] = bool(self._is_threshold_replan_mode())
+        snapshot["event_predrisk_triggered"] = bool(predrisk_triggered)
+        snapshot["event_predrisk_trigger_source"] = "runtime_snapshot" if predrisk_triggered else ""
+        snapshot["event_predrisk_suppressed_reason"] = ""
         self._update_proximity_metrics(snapshot)
         if self.final_mission_summary is not None:
             summary = dict(self.final_mission_summary)
