@@ -2328,6 +2328,13 @@ class LLMController():
         self.llm_wait_hover_active = True
         self.llm_wait_started_ts = time.time()
         self.llm_wait_event_count += 1
+        try:
+            if hasattr(self.drone, "hold_position"):
+                self.drone.hold_position()
+            elif hasattr(self.drone, "set_hold_position_from_current"):
+                self.drone.set_hold_position_from_current()
+        except Exception:
+            pass
 
     def _finish_llm_wait(self, reason: str):
         if not self.awaiting_llm_response:
@@ -2918,6 +2925,11 @@ class LLMController():
                         llm_called = False
                         final_plan_source = "agent_heartbeat"
                     else:
+                        llm_wait_started_for_replan = False
+                        if str(planning_stage).strip().lower() == "replan":
+                            llm_wait_reason = "event_predrisk_replan" if selected_framework == MODE_TYPEFLY_THRESHOLD_REPLAN else ("periodic_infoaware" if pipeline.id == "baseline2" else "agent_heartbeat")
+                            self._start_llm_wait(reason=llm_wait_reason)
+                            llm_wait_started_for_replan = True
                         self.current_plan = self.planner.plan(
                             task_description=task_description,
                             scene_description=scene_description,
@@ -2933,16 +2945,21 @@ class LLMController():
                             self.execution_resumed_from_new_plan = True
                             self.entered_awaiting_replan_response = False
                             self._interrupt_pending_until_new_plan = False
+                        llm_call_purpose = planning_stage
+                        if str(planning_stage).strip().lower() == "replan":
+                            llm_call_purpose = "event_predrisk_replan" if selected_framework == MODE_TYPEFLY_THRESHOLD_REPLAN else ("periodic_infoaware" if pipeline.id == "baseline2" else "agent_heartbeat")
                         self.task_run_logger.append_planning_trace(
                             trace={
                                 **self.planner.get_last_plan_trace(),
                                 "plan_source": final_plan_source,
-                                "llm_call_purpose": planning_stage,
+                                "llm_call_purpose": llm_call_purpose,
                                 "parsed_plan": self.current_plan,
                                 "selected_baseline_id": pipeline.id,
                                 "scene_id": self.baseline_scene_id,
                             }
                         )
+                        if llm_wait_started_for_replan:
+                            self._finish_llm_wait(reason="planning_response")
                 self.current_plan = self._sanitize_minispec_plan(self.current_plan)
                 if replan_attempts > 0 and llm_called:
                     self._record_replan_response(
@@ -3691,6 +3708,48 @@ class LLMController():
         assessed_context.candidate_path_summaries = candidate_path_summaries or []
         return assessed_context
 
+    def _compute_llm_response_metrics(self) -> dict:
+        traces = list(getattr(getattr(self.task_run_logger, "_active", None), "planning_trace", []) or [])
+        totals = {
+            "initial_planning_latency_sec": 0.0,
+            "total_initial_planning_latency_sec": 0.0,
+            "total_replan_response_time_sec": 0.0,
+            "total_heartbeat_response_time_sec": 0.0,
+            "total_event_predrisk_response_time_sec": 0.0,
+            "total_periodic_infoaware_response_time_sec": 0.0,
+            "total_agent_heartbeat_response_time_sec": 0.0,
+            "total_evaluator_response_time_sec": 0.0,
+            "total_all_llm_response_time_sec": 0.0,
+        }
+        for trace in traces:
+            if bool(trace.get("skipped_due_to_inflight")):
+                continue
+            try:
+                latency = float(trace.get("latency_sec"))
+            except Exception:
+                continue
+            role = str(trace.get("llm_call_role") or trace.get("planning_stage") or "").strip().lower()
+            purpose = str(trace.get("llm_call_purpose") or "").strip().lower()
+            stage = str(trace.get("planning_stage") or "").strip().lower()
+            totals["total_all_llm_response_time_sec"] += latency
+            if role == "evaluator" or "evaluator" in purpose:
+                totals["total_evaluator_response_time_sec"] += latency
+            elif stage == "initial" or purpose == "initial":
+                totals["initial_planning_latency_sec"] = latency
+                totals["total_initial_planning_latency_sec"] += latency
+            elif "event_predrisk" in purpose:
+                totals["total_event_predrisk_response_time_sec"] += latency
+                totals["total_replan_response_time_sec"] += latency
+            elif "periodic_infoaware" in purpose:
+                totals["total_periodic_infoaware_response_time_sec"] += latency
+                totals["total_heartbeat_response_time_sec"] += latency
+            elif "agent_heartbeat" in purpose or role == "heartbeat" or stage == "heartbeat":
+                totals["total_agent_heartbeat_response_time_sec"] += latency
+                totals["total_heartbeat_response_time_sec"] += latency
+            elif stage == "replan" or "replan" in purpose:
+                totals["total_replan_response_time_sec"] += latency
+        return {k: round(float(v), 6) for k, v in totals.items()}
+
     def _build_final_mission_summary(self, snapshot: dict, *, run_status: str, mission_success: bool, termination_reason: str) -> dict:
         mission_end_ts = time.time()
         self.mission_end_ts = mission_end_ts if bool(mission_success) else None
@@ -3701,6 +3760,12 @@ class LLMController():
             else round(float(self.mission_end_ts) - float(self.mission_start_ts), 3)
         )
         total_llm_wait_hover_sec = round(float(getattr(self, "total_llm_wait_hover_sec", 0.0) or 0.0), 6)
+        llm_response_metrics = self._compute_llm_response_metrics()
+        completion_time_excluding_all_llm_response_sec = (
+            None
+            if completion_time_mission_sec is None
+            else max(0.0, round(float(completion_time_mission_sec) - float(llm_response_metrics.get("total_all_llm_response_time_sec", 0.0)), 6))
+        )
         completion_time_excluding_llm_wait_sec = (
             None
             if completion_time_mission_sec is None
@@ -3723,6 +3788,10 @@ class LLMController():
             "mission_start_ts": self.mission_start_ts,
             "mission_end_ts": self.mission_end_ts,
             "completion_time_mission_sec": completion_time_mission_sec,
+            "completion_time_including_all_llm_response_sec": completion_time_mission_sec,
+            "completion_time_excluding_all_llm_response_sec": completion_time_excluding_all_llm_response_sec,
+            "completion_time_excluding_in_mission_llm_wait_sec": completion_time_excluding_llm_wait_sec,
+            "completion_time_excluding_llm_wait_sec_legacy_semantics": "excludes in-mission hover wait only",
             "collision_count": int((snapshot or {}).get("collision_count", 0) or 0),
             "near_miss_count": int((snapshot or {}).get("near_miss_count", 0) or 0),
             "replan_count": int(getattr(self, "_replan_attempts", 0)),
@@ -3789,6 +3858,7 @@ class LLMController():
                 if float(getattr(self, "next_planning_allowed_ts", 0.0) or 0.0) <= 0.0
                 else round(float(time.time()) - float(getattr(self, "next_planning_allowed_ts", 0.0) or 0.0), 6)
             ),
+            **llm_response_metrics,
             **trajectory_stats,
         }
         self.final_mission_summary = dict(summary)
