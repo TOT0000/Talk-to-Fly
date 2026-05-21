@@ -163,6 +163,48 @@ def test_ui_collision_event_triggers_runtime_replan_abort():
     assert "source=ui_event" in str(reason)
 
 
+def test_event_predrisk_delay_marks_pending_trigger_without_ui_callback(monkeypatch):
+    pytest.importorskip("PIL")
+    from controller.llm_controller import LLMController
+
+    controller = LLMController.__new__(LLMController)
+    controller.framework_mode = "typefly-threshold-replan"
+    controller.predicted_collision_replan_threshold = 0.5
+    controller.predicted_collision_replan_strictly_greater = True
+    controller.latest_safety_context = None
+    controller._event_predrisk_pending_trigger = None
+    controller.event_predrisk_threshold_check_count = 0
+    controller.event_predrisk_trigger_count = 0
+    controller.event_predrisk_pending_trigger_count = 0
+    safety = SimpleNamespace(predicted_collision_probability=0.85)
+    controller.get_live_ui_snapshot = lambda: {"safety_context": safety, "benchmark_progress": {"current_target": "C5"}}
+    monkeypatch.setattr("controller.llm_controller.time.sleep", lambda _: None)
+    controller.skill_delay(0.02)
+    assert controller._event_predrisk_pending_trigger is not None
+    assert controller.event_predrisk_trigger_count >= 1
+
+
+def test_statement_boundary_consumes_pending_event_predrisk_trigger():
+    pytest.importorskip("PIL")
+    from controller.llm_controller import LLMController
+
+    controller = LLMController.__new__(LLMController)
+    controller.framework_mode = "typefly-threshold-replan"
+    controller.replan_limit = 3
+    controller._replan_attempts = 0
+    controller._planning_inflight = False
+    controller.awaiting_llm_response = False
+    controller._runtime_replan_event = threading.Event()
+    controller._runtime_replan_reason = ""
+    controller._event_predrisk_pending_trigger = {"source": "delay_statement", "probability": 0.8}
+    controller.event_predrisk_trigger_consumed_count = 0
+    controller.event_predrisk_suppressed_count = 0
+    controller.event_predrisk_suppress_reason_counts = {}
+    controller._on_statement_executed_for_replan(flow_meta={"statement": "d(2.0)", "queue_size": 1, "remaining_statements": 1})
+    assert controller._runtime_replan_event.is_set() is True
+    assert controller.event_predrisk_trigger_consumed_count == 1
+
+
 def _build_minimal_controller_for_postcheck(plans, completed_after_exec, mode="typefly-threshold-replan", replan_limit=8):
     pytest.importorskip("PIL")
     from controller.llm_controller import LLMController
