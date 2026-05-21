@@ -252,12 +252,15 @@ class LLMController():
         self.last_heartbeat_ts = 0.0
         self._pending_heartbeat_replan_plan: Optional[str] = None
         self._pending_heartbeat_reason: str = ""
+        self._pending_heartbeat_replan_id: str = ""
         self._runtime_replan_event = threading.Event()
         self._runtime_replan_reason: str = ""
         self._replan_response_history: list[dict] = []
         self._mission_original_plan: Optional[str] = None
         self._current_active_plan: Optional[str] = None
         self._latest_full_replan_response: Optional[str] = None
+        self._accepted_replan_ids: set[str] = set()
+        self._accepted_replan_seq = 0
         self._agent_heartbeat_index = 0
         self.last_planning_response_received_ts = 0.0
         self.last_planning_response_commit_ts = 0.0
@@ -294,7 +297,11 @@ class LLMController():
         self.gc_llm_wait_resume_count = 0
         self.gc_llm_wait_replan_preempt_count = 0
         self.replan_requested_count = 0
+        self.full_replan_response_count = 0
+        self.accepted_replan_count = 0
         self.replan_applied_count = 0
+        self.replan_interrupt_count = 0
+        self.replan_execution_resume_count = 0
         self.replan_discarded_count = 0
         self.replan_discard_reason_counts: dict[str, int] = {}
         self.latest_replan_request_reason = ""
@@ -1492,6 +1499,7 @@ class LLMController():
             self.interrupted_for_replan = True
             self.entered_awaiting_replan_response = True
             self._interrupt_pending_until_new_plan = True
+            self.replan_interrupt_count = int(getattr(self, "replan_interrupt_count", 0)) + 1
         # Keep gc non-replan on pure kinematic convergence limits (e.g. max_iterations).
         return summary, should_request_replan
 
@@ -2094,6 +2102,21 @@ class LLMController():
             return "target_checkpoint_changed"
         return ""
 
+
+    def _new_replan_id(self) -> str:
+        return f"replan-{uuid.uuid4().hex[:12]}"
+
+    def _accept_replan_once(self, replan_id: str) -> bool:
+        rid = str(replan_id or "").strip()
+        if not rid or rid in self._accepted_replan_ids:
+            return False
+        self._accepted_replan_ids.add(rid)
+        self.accepted_replan_count = int(getattr(self, "accepted_replan_count", 0)) + 1
+        self._replan_attempts = int(getattr(self, "_replan_attempts", 0)) + 1
+        self.replan_applied_count = int(getattr(self, "replan_applied_count", 0)) + 1
+        self._accepted_replan_seq = int(getattr(self, "_accepted_replan_seq", 0)) + 1
+        return True
+
     def _consume_planning_response_queue(self) -> bool:
         self._ensure_llm_worker_state()
         triggered = False
@@ -2123,6 +2146,7 @@ class LLMController():
             if replan_requested:
                 self.replan_requested_count = int(getattr(self, "replan_requested_count", 0)) + 1
                 self.latest_replan_request_reason = reason
+                self.full_replan_response_count = int(getattr(self, "full_replan_response_count", 0)) + 1
             if stale_reason and not (replan_requested and plan_text):
                 trace["response_discarded_reason"] = stale_reason
                 trace["next_planning_allowed_ts"] = float(getattr(self, "next_planning_allowed_ts", 0.0))
@@ -2143,6 +2167,9 @@ class LLMController():
                 self.last_planning_response_commit_ts = response_end_ts
             self.planning_response_commit_count = int(getattr(self, "planning_response_commit_count", 0)) + 1
             if response_type == "full_replan_plan":
+                replan_id = self._new_replan_id()
+                trace["replan_id"] = replan_id
+                trace["full_replan_response_index"] = int(getattr(self, "full_replan_response_count", 0))
                 if plan_text:
                     snapshot = dict(item.get("snapshot") or {})
                     now_ts = float(item.get("request_start_ts") or time.time())
@@ -2168,6 +2195,10 @@ class LLMController():
                     self.latest_replan_overwrote_previous_pending = bool(self._pending_heartbeat_replan_plan)
                     self._pending_heartbeat_replan_plan = plan_text
                     self._pending_heartbeat_reason = reason
+                    self._pending_heartbeat_replan_id = replan_id
+                    accepted = self._accept_replan_once(replan_id)
+                    trace["accepted_replan"] = bool(accepted)
+                    trace["accepted_replan_index"] = int(getattr(self, "accepted_replan_count", 0))
                     self._set_runtime_replan_event(reason=f"agent_heartbeat_replan:{reason if reason else 'llm'}")
                     self._record_replan_response(source="agent_heartbeat_full_replan_response", reason=reason, plan_text=plan_text, raw_response=raw_response)
                     print_t(f"[AGENT-HEARTBEAT] response=replan plan={plan_text}")
@@ -2180,6 +2211,8 @@ class LLMController():
                 counts = dict(getattr(self, "replan_discard_reason_counts", {}) or {})
                 counts["invalid_empty_plan"] = int(counts.get("invalid_empty_plan", 0)) + 1
                 self.replan_discard_reason_counts = counts
+                trace["accepted_replan"] = False
+                trace["discard_reason"] = "invalid_empty_plan"
             if response_type not in {"continue", "full_replan_plan"}:
                 print_t(
                     "[AGENT-HEARTBEAT] invalid_response_fallback "
@@ -2558,6 +2591,7 @@ class LLMController():
             self.interrupted_for_replan = True
             self.entered_awaiting_replan_response = True
             self._interrupt_pending_until_new_plan = True
+            self.replan_interrupt_count = int(getattr(self, "replan_interrupt_count", 0)) + 1
             print_t(
                 "[EXEC-FLOW-BLOCKED] "
                 f"reason=runtime_replan_event detail={event_reason} {self._format_exec_flow_flags()}"
@@ -2569,6 +2603,7 @@ class LLMController():
             self.interrupted_for_replan = True
             self.entered_awaiting_replan_response = True
             self._interrupt_pending_until_new_plan = True
+            self.replan_interrupt_count = int(getattr(self, "replan_interrupt_count", 0)) + 1
             print_t(
                 "[EXEC-FLOW-BLOCKED] "
                 f"reason=agent_heartbeat_replan detail={self._pending_heartbeat_reason or 'llm'} "
@@ -2603,6 +2638,7 @@ class LLMController():
             self.interrupted_for_replan = True
             self.entered_awaiting_replan_response = True
             self._interrupt_pending_until_new_plan = True
+            self.replan_interrupt_count = int(getattr(self, "replan_interrupt_count", 0)) + 1
             print_t(
                 "[EXEC-FLOW-BLOCKED] "
                 f"reason=collision_threshold_interrupt decision_pc={current_p:.6f} "
@@ -2889,9 +2925,14 @@ class LLMController():
         self.last_heartbeat_ts = 0.0
         self._pending_heartbeat_replan_plan = None
         self._pending_heartbeat_reason = ""
+        self._pending_heartbeat_replan_id = ""
         self._replan_response_history = []
         self.replan_requested_count = 0
+        self.full_replan_response_count = 0
+        self.accepted_replan_count = 0
         self.replan_applied_count = 0
+        self.replan_interrupt_count = 0
+        self.replan_execution_resume_count = 0
         self.replan_discarded_count = 0
         self.replan_discard_reason_counts = {}
         self.latest_replan_request_reason = ""
@@ -2900,6 +2941,8 @@ class LLMController():
         self._mission_original_plan = None
         self._current_active_plan = None
         self._latest_full_replan_response = None
+        self._accepted_replan_ids = set()
+        self._accepted_replan_seq = 0
         self._agent_heartbeat_index = 0
         self.last_planning_response_received_ts = 0.0
         self.last_planning_response_commit_ts = 0.0
@@ -2980,15 +3023,15 @@ class LLMController():
                     planning_stage = ("initial" if replan_attempts == 0 else "replan")
                     if self._pending_heartbeat_replan_plan:
                         self.current_plan = self._pending_heartbeat_replan_plan
-                        replan_attempts += 1
-                        self._replan_attempts = replan_attempts
-                        self.replan_applied_count = int(getattr(self, "replan_applied_count", 0)) + 1
+                        replan_attempts = int(getattr(self, "_replan_attempts", 0))
                         self.latest_replan_applied_plan = str(self.current_plan or "")
                         self._pending_heartbeat_replan_plan = None
                         self._pending_heartbeat_reason = ""
+                        self._pending_heartbeat_replan_id = ""
                         self._clear_runtime_replan_event()
                         if self._interrupt_pending_until_new_plan:
                             self.execution_resumed_from_new_plan = True
+                            self.replan_execution_resume_count = int(getattr(self, "replan_execution_resume_count", 0)) + 1
                         self._interrupt_pending_until_new_plan = False
                         self.entered_awaiting_replan_response = False
                         current_progress = dict(self.latest_benchmark_progress or {})
@@ -3000,6 +3043,7 @@ class LLMController():
                                 "planning_stage": "replan",
                                 "plan_source": "committed_replan",
                                 "llm_call_purpose": "heartbeat_commit",
+                                "replan_id": getattr(self, "_pending_heartbeat_replan_id", ""),
                                 "parsed_plan": self.current_plan,
                                 "selected_baseline_id": self.selected_pipeline_id,
                                 "scene_id": self.baseline_scene_id,
@@ -3035,6 +3079,7 @@ class LLMController():
                             self.execution_resumed_from_new_plan = True
                             self.entered_awaiting_replan_response = False
                             self._interrupt_pending_until_new_plan = False
+                            self.replan_execution_resume_count = int(getattr(self, "replan_execution_resume_count", 0)) + 1
                         llm_call_purpose = planning_stage
                         if str(planning_stage).strip().lower() == "replan":
                             llm_call_purpose = "event_predrisk_replan" if selected_framework == MODE_TYPEFLY_THRESHOLD_REPLAN else ("periodic_infoaware" if pipeline.id == "baseline2" else "agent_heartbeat")
@@ -3130,8 +3175,6 @@ class LLMController():
                                 f"[LOG] Replan requested but limit reached ({replan_attempts}/{max_replan_attempts})."
                             )
                         else:
-                            replan_attempts += 1
-                            self._replan_attempts = replan_attempts
                             self.execution_mode = "AwaitingReplanResponse"
                             self.interrupted_for_replan = True
                             self.entered_awaiting_replan_response = True
@@ -3889,9 +3932,13 @@ class LLMController():
             "completion_time_excluding_llm_wait_sec_legacy_semantics": "excludes in-mission hover wait only",
             "collision_count": int((snapshot or {}).get("collision_count", 0) or 0),
             "near_miss_count": int((snapshot or {}).get("near_miss_count", 0) or 0),
-            "replan_count": int(getattr(self, "_replan_attempts", 0)),
+            "replan_count": int(getattr(self, "accepted_replan_count", 0)),
+            "accepted_replan_count": int(getattr(self, "accepted_replan_count", 0)),
+            "full_replan_response_count": int(getattr(self, "full_replan_response_count", 0)),
             "replan_requested_count": int(getattr(self, "replan_requested_count", 0)),
             "replan_applied_count": int(getattr(self, "replan_applied_count", 0)),
+            "replan_interrupt_count": int(getattr(self, "replan_interrupt_count", 0)),
+            "replan_execution_resume_count": int(getattr(self, "replan_execution_resume_count", 0)),
             "replan_discarded_count": int(getattr(self, "replan_discarded_count", 0)),
             "replan_discard_reason_counts": dict(getattr(self, "replan_discard_reason_counts", {}) or {}),
             "latest_replan_request_reason": str(getattr(self, "latest_replan_request_reason", "") or ""),
@@ -4678,6 +4725,7 @@ class LLMController():
         self._clear_runtime_replan_event()
         self._pending_heartbeat_replan_plan = None
         self._pending_heartbeat_reason = ""
+        self._pending_heartbeat_replan_id = ""
         self._interrupt_pending_until_new_plan = False
         self.interrupted_for_replan = False
         self.entered_awaiting_replan_response = False

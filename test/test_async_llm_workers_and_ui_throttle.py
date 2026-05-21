@@ -51,6 +51,7 @@ def _controller(planner):
     c.archive_enabled = True
     c._pending_heartbeat_replan_plan = None
     c._pending_heartbeat_reason = ""
+    c._pending_heartbeat_replan_id = ""
     c.last_heartbeat_ts = 0.0
     c.heartbeat_interval_seconds = 5.0
     c.replan_limit = 8
@@ -61,6 +62,8 @@ def _controller(planner):
     c._mission_original_plan = c.current_plan
     c._current_active_plan = c.current_plan
     c._latest_full_replan_response = None
+    c._accepted_replan_ids = set()
+    c._accepted_replan_seq = 0
     c.latest_benchmark_progress = {"completed": [], "current_target": "A1"}
     c.active_objective_set = {"active_checkpoint_ids": ["A1", "A2"]}
     c._runtime_replan_event = threading.Event()
@@ -73,7 +76,11 @@ def _controller(planner):
     c._sanitize_minispec_plan = lambda raw: str(raw)
     c._record_replan_response = lambda **kwargs: c._replan_response_history.append(kwargs)
     c.replan_requested_count = 0
+    c.full_replan_response_count = 0
+    c.accepted_replan_count = 0
     c.replan_applied_count = 0
+    c.replan_interrupt_count = 0
+    c.replan_execution_resume_count = 0
     c.replan_discarded_count = 0
     c.replan_discard_reason_counts = {}
     c.latest_replan_request_reason = ""
@@ -127,6 +134,15 @@ def test_planning_continue_and_full_replan_and_stale_response_handling():
     assert stale.replan_requested_count == 1
     stale_ts = stale.last_planning_response_received_ts
     assert stale.next_planning_allowed_ts >= stale_ts + 5.0
+
+
+def test_accepted_replan_count_is_idempotent_for_same_replan_id():
+    c = _controller(_Planner())
+    rid = c._new_replan_id()
+    assert c._accept_replan_once(rid) is True
+    assert c._accept_replan_once(rid) is False
+    assert c.accepted_replan_count == 1
+    assert c._replan_attempts == 1
 
 
 def test_evaluator_worker_has_independent_inflight_and_latency_trace():
