@@ -332,6 +332,7 @@ class LLMController():
         self.execution_resumed_from_new_plan = False
         self.next_statement_executed_after_interrupt = False
         self._interrupt_pending_until_new_plan = False
+        self._threshold_replan_requested_by_retval = False
         self._last_exec_flow_blocked_log_ts = 0.0
         self._last_exec_flow_blocked_signature = ""
         self.set_selected_pipeline(self.selected_pipeline_id)
@@ -2189,8 +2190,10 @@ class LLMController():
         if not rid or rid in self._accepted_replan_ids:
             return False
         self._accepted_replan_ids.add(rid)
-        self.accepted_replan_count = int(getattr(self, "accepted_replan_count", 0)) + 1
-        self._replan_attempts = int(getattr(self, "accepted_replan_count", 0)) + 1
+        old_count = int(getattr(self, "accepted_replan_count", 0))
+        new_count = old_count + 1
+        self.accepted_replan_count = new_count
+        self._replan_attempts = new_count
         self.replan_applied_count = int(getattr(self, "replan_applied_count", 0)) + 1
         self._accepted_replan_seq = int(getattr(self, "_accepted_replan_seq", 0)) + 1
         return True
@@ -3098,7 +3101,12 @@ class LLMController():
                 else:
                     previous_plan = self.current_plan
                     self.execution_mode = "Planning"
-                    planning_stage = ("initial" if replan_attempts == 0 else "replan")
+                    should_force_replan_stage = bool(
+                        self._interrupt_pending_until_new_plan
+                        or self.entered_awaiting_replan_response
+                        or (selected_framework == MODE_TYPEFLY_THRESHOLD_REPLAN and bool(getattr(self, "_threshold_replan_requested_by_retval", False)))
+                    )
+                    planning_stage = ("replan" if (replan_attempts > 0 or should_force_replan_stage) else "initial")
                     if self._pending_heartbeat_replan_plan:
                         self.current_plan = self._pending_heartbeat_replan_plan
                         replan_attempts = int(getattr(self, "accepted_replan_count", 0))
@@ -3135,6 +3143,7 @@ class LLMController():
                         final_plan_source = "agent_heartbeat"
                     else:
                         llm_wait_started_for_replan = False
+                        replan_id = ""
                         if str(planning_stage).strip().lower() == "replan":
                             if selected_framework == MODE_TYPEFLY_THRESHOLD_REPLAN:
                                 self.event_predrisk_replan_request_count = int(self.event_predrisk_replan_request_count) + 1
@@ -3153,6 +3162,24 @@ class LLMController():
                         )
                         llm_called = True
                         final_plan_source = f"llm_{planning_stage}"
+                        if (
+                            selected_framework == MODE_TYPEFLY_THRESHOLD_REPLAN
+                            and str(planning_stage).strip().lower() == "replan"
+                            and str(self.current_plan or "").strip()
+                        ):
+                            replan_id = self._new_replan_id()
+                            accepted = self._accept_replan_once(replan_id)
+                            replan_attempts = int(getattr(self, "accepted_replan_count", 0))
+                            self.latest_replan_applied_plan = str(self.current_plan or "")
+                            self.event_predrisk_replan_applied_count = int(getattr(self, "event_predrisk_replan_applied_count", 0)) + 1
+                            self.event_predrisk_latest_plan = str(self.current_plan or "")
+                            final_plan_source = "event_predrisk_replan"
+                            self._clear_runtime_replan_event()
+                            self.entered_awaiting_replan_response = False
+                            self._interrupt_pending_until_new_plan = False
+                            self.execution_resumed_from_new_plan = True
+                            self.replan_execution_resume_count = int(getattr(self, "replan_execution_resume_count", 0)) + 1
+                            self._threshold_replan_requested_by_retval = False
                         if str(planning_stage).strip().lower() == "replan" and self._interrupt_pending_until_new_plan:
                             self.execution_resumed_from_new_plan = True
                             self.entered_awaiting_replan_response = False
@@ -3169,6 +3196,9 @@ class LLMController():
                                 "parsed_plan": self.current_plan,
                                 "selected_baseline_id": pipeline.id,
                                 "scene_id": self.baseline_scene_id,
+                                "accepted_replan": bool(selected_framework == MODE_TYPEFLY_THRESHOLD_REPLAN and str(planning_stage).strip().lower() == "replan" and str(self.current_plan or "").strip()),
+                                "accepted_replan_index": int(getattr(self, "accepted_replan_count", 0)),
+                                "replan_id": (replan_id if 'replan_id' in locals() else ""),
                             }
                         )
                         if llm_wait_started_for_replan:
@@ -3177,9 +3207,6 @@ class LLMController():
                                 self.event_predrisk_wait_total_sec += max(0.0, time.time() - wait_started_ts)
                 self.current_plan = self._sanitize_minispec_plan(self.current_plan)
                 if replan_attempts > 0 and llm_called:
-                    if selected_framework == MODE_TYPEFLY_THRESHOLD_REPLAN and str(self.current_plan or "").strip():
-                        self.event_predrisk_replan_applied_count = int(self.event_predrisk_replan_applied_count) + 1
-                        self.event_predrisk_latest_plan = str(self.current_plan or "")
                     self._record_replan_response(
                         source="typefly_llm_full_replan_response",
                         reason=f"planning_stage={planning_stage}",
@@ -3259,6 +3286,8 @@ class LLMController():
                             self.interrupted_for_replan = True
                             self.entered_awaiting_replan_response = True
                             self._interrupt_pending_until_new_plan = True
+                            if selected_framework == MODE_TYPEFLY_THRESHOLD_REPLAN:
+                                self._threshold_replan_requested_by_retval = True
                             self.append_message(
                                 "[TYPEFLY-INTERRUPT] statement requested replan, aborting current execution: "
                                 f"{replan_value if replan_value else 'no detail'}"
