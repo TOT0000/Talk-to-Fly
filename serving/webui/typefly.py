@@ -1305,6 +1305,19 @@ class TypeFly:
         if safety_context is None:
             return "### Status\nWaiting for safety state..."
         final_summary = dict((snapshot or {}).get("final_mission_summary") or {})
+        def _get_metric(key):
+            if final_summary and final_summary.get(key) not in (None, ""):
+                return final_summary.get(key)
+            return (snapshot or {}).get(key)
+
+        def _fmt_metric(value, suffix=""):
+            if value in (None, ""):
+                return "n/a"
+            try:
+                return f"{float(value):.3f}{suffix}"
+            except Exception:
+                return "n/a"
+
         active_ids = set(self.objective_state.get("active_checkpoint_ids", set()))
         completed_set = set(self.benchmark_progress["completed"])
         completed_active = len(completed_set.intersection(active_ids))
@@ -1358,6 +1371,10 @@ class TypeFly:
             f"- termination reason: {termination_reason if termination_reason else 'n/a'}",
             f"- mission elapsed time: {elapsed_text}",
             f"- mission completion time: {completion_text}",
+            f"- completion_time_excluding_llm_wait_sec: {_fmt_metric(_get_metric('completion_time_excluding_llm_wait_sec'), ' s')}",
+            f"- min_uav_worker_distance_m: {_fmt_metric(_get_metric('min_uav_worker_distance_m'), ' m')}",
+            f"- planning_latency_mean_sec: {_fmt_metric(_get_metric('planning_latency_mean_sec'), ' s')}",
+            f"- planning_latency_p95_sec: {_fmt_metric(_get_metric('planning_latency_p95_sec'), ' s')}",
         ]
 
         return "\n".join(lines)
