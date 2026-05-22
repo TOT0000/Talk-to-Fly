@@ -1658,7 +1658,7 @@ class LLMController():
         pending = self._event_predrisk_pending_trigger
         if not isinstance(pending, dict):
             return False
-        if int(getattr(self, "_replan_attempts", 0)) >= int(self.replan_limit):
+        if int(getattr(self, "accepted_replan_count", 0)) >= int(self.replan_limit):
             self._record_event_predrisk_suppressed("replan_limit_reached")
             return False
         if bool(self._planning_inflight):
@@ -2094,7 +2094,7 @@ class LLMController():
             return "framework_mode_not_agent_heartbeat"
         if self._should_skip_heartbeat_after_task_completion():
             return "mission_completed"
-        if int(getattr(self, "_replan_attempts", 0)) >= int(self.replan_limit):
+        if int(getattr(self, "accepted_replan_count", 0)) >= int(self.replan_limit):
             return "replan_limit_reached"
         request_target = response_item.get("request_target_checkpoint")
         current_target = (self.latest_benchmark_progress or {}).get("current_target")
@@ -2112,7 +2112,7 @@ class LLMController():
             return False
         self._accepted_replan_ids.add(rid)
         self.accepted_replan_count = int(getattr(self, "accepted_replan_count", 0)) + 1
-        self._replan_attempts = int(getattr(self, "_replan_attempts", 0)) + 1
+        self._replan_attempts = int(getattr(self, "accepted_replan_count", 0)) + 1
         self.replan_applied_count = int(getattr(self, "replan_applied_count", 0)) + 1
         self._accepted_replan_seq = int(getattr(self, "_accepted_replan_seq", 0)) + 1
         return True
@@ -2373,8 +2373,8 @@ class LLMController():
             self._start_agent_eval_worker_if_needed()
             return self._record_heartbeat_skip("not_response_driven_pipeline")
         self.last_heartbeat_ts = now
-        if getattr(self, "_replan_attempts", 0) >= int(self.replan_limit):
-            print_t(f"[REPLAN-COUNT] current={self._replan_attempts} limit={self.replan_limit}")
+        if int(getattr(self, "accepted_replan_count", 0)) >= int(self.replan_limit):
+            print_t(f"[REPLAN-COUNT] current={int(getattr(self, 'accepted_replan_count', 0))} limit={self.replan_limit}")
             return self._record_heartbeat_skip("replan_limit_reached")
         snapshot = self.get_live_ui_snapshot() or {}
         heartbeat_index = int(self._agent_heartbeat_index) + 1
@@ -2466,12 +2466,12 @@ class LLMController():
     def _should_trigger_auto_replan(self, predicted_p: float, source: str) -> bool:
         if not self._is_threshold_replan_mode():
             return False
-        if int(getattr(self, "_replan_attempts", 0)) >= int(self.replan_limit):
+        if int(getattr(self, "accepted_replan_count", 0)) >= int(self.replan_limit):
             self._record_event_predrisk_suppressed("replan_limit_reached")
             print_debug(
                 "[REPLAN_DEBUG] "
                 f"auto_replan_suppressed p={float(predicted_p):.6f} reason=max_replan_attempts_reached "
-                f"current={int(getattr(self, '_replan_attempts', 0))} limit={int(self.replan_limit)} source={source}",
+                f"current={int(getattr(self, 'accepted_replan_count', 0))} limit={int(self.replan_limit)} source={source}",
                 env_var="TYPEFLY_VERBOSE_DEBUG",
             )
             return False
@@ -3023,7 +3023,7 @@ class LLMController():
                     planning_stage = ("initial" if replan_attempts == 0 else "replan")
                     if self._pending_heartbeat_replan_plan:
                         self.current_plan = self._pending_heartbeat_replan_plan
-                        replan_attempts = int(getattr(self, "_replan_attempts", 0))
+                        replan_attempts = int(getattr(self, "accepted_replan_count", 0))
                         self.latest_replan_applied_plan = str(self.current_plan or "")
                         self._pending_heartbeat_replan_plan = None
                         self._pending_heartbeat_reason = ""
@@ -3175,8 +3175,8 @@ class LLMController():
                                 f"[LOG] Replan requested but limit reached ({replan_attempts}/{max_replan_attempts})."
                             )
                         else:
-                            self._replan_attempts = int(getattr(self, "_replan_attempts", 0)) + 1
-                            replan_attempts = int(self._replan_attempts)
+                            self.replan_interrupt_count = int(getattr(self, "replan_interrupt_count", 0)) + 1
+                            replan_attempts = int(getattr(self, "accepted_replan_count", 0))
                             self.execution_mode = "AwaitingReplanResponse"
                             self.interrupted_for_replan = True
                             self.entered_awaiting_replan_response = True
@@ -4232,7 +4232,7 @@ class LLMController():
             ],
             "original_planned_path": None,
             "updated_path": None,
-            "replan_count": int(getattr(self, "_replan_attempts", 0)),
+            "replan_count": int(getattr(self, "accepted_replan_count", 0)),
             "event_predrisk_pending_trigger": bool(self._event_predrisk_pending_trigger),
             "event_predrisk_current_threshold": float(self.predicted_collision_replan_threshold),
             "event_predrisk_strictly_greater": bool(self.predicted_collision_replan_strictly_greater),
@@ -4249,7 +4249,7 @@ class LLMController():
             summary = dict(self.final_mission_summary)
             summary["collision_count"] = int(summary.get("collision_count", snapshot.get("collision_count", 0)) or 0)
             summary["near_miss_count"] = int(summary.get("near_miss_count", snapshot.get("near_miss_count", 0)) or 0)
-            summary["replan_count"] = int(summary.get("replan_count", getattr(self, "_replan_attempts", 0)) or 0)
+            summary["replan_count"] = int(summary.get("replan_count", getattr(self, "accepted_replan_count", 0)) or 0)
             snapshot["final_mission_summary"] = summary
         if safety_state is not None and safety_context is not None:
             consistency_from_gap = bool(float(safety_state.envelope_gap_m) < 0.0)

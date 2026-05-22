@@ -8,7 +8,7 @@ import time
 from zipfile import BadZipFile
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 from uuid import uuid4
 
 try:
@@ -24,6 +24,11 @@ RUNS_SHEET = "runs"
 EVENTS_SHEET = "events"
 DEBUG_SHEET = "debug"
 DEFAULT_ARCHIVE_ROOT = "/home/jiafenli/typefly_logs_archive/archive/manual_runs"
+
+from .benchmark_layout import UAV_RADIUS_M, WORKER_RADIUS_M
+
+NEAR_MISS_ENTER_DISTANCE_M = 1.0
+NEAR_MISS_EXIT_DISTANCE_M = 1.05
 
 RUN_COLUMNS = [
     "timestamp",
@@ -236,6 +241,71 @@ class _RunRecord:
 
 
 class TaskRunLogger:
+    @staticmethod
+    def _distance_point_to_segment(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+        vx, vy = (bx - ax), (by - ay)
+        wx, wy = (px - ax), (py - ay)
+        vv = (vx * vx) + (vy * vy)
+        if vv <= 1e-12:
+            return float(((px - ax) ** 2 + (py - ay) ** 2) ** 0.5)
+        t = max(0.0, min(1.0, ((wx * vx) + (wy * vy)) / vv))
+        proj_x, proj_y = (ax + (t * vx)), (ay + (t * vy))
+        return float(((px - proj_x) ** 2 + (py - proj_y) ** 2) ** 0.5)
+
+    @classmethod
+    def _recompute_proximity_metrics(cls, runtime_trace: List[Dict]) -> Dict:
+        collision_radius = float(UAV_RADIUS_M + WORKER_RADIUS_M)
+        collision_count = 0
+        near_miss_count = 0
+        min_distance = None
+        collision_active: Dict[str, bool] = {}
+        near_miss_active: Dict[str, bool] = {}
+        prev_uav = None
+        prev_workers: Dict[str, Tuple[float, float]] = {}
+        for row in list(runtime_trace or []):
+            uav = row.get("drone_gt")
+            if not (isinstance(uav, (list, tuple)) and len(uav) >= 2):
+                continue
+            ux, uy = float(uav[0]), float(uav[1])
+            workers = {}
+            for worker in list(row.get("workers") or []):
+                wid = str(worker.get("id"))
+                gt_xy = worker.get("gt_xy")
+                if wid and isinstance(gt_xy, (list, tuple)) and len(gt_xy) >= 2:
+                    workers[wid] = (float(gt_xy[0]), float(gt_xy[1]))
+            for wid, (wx, wy) in workers.items():
+                d_now = float(((ux - wx) ** 2 + (uy - wy) ** 2) ** 0.5)
+                d_step = d_now
+                if prev_uav is not None and wid in prev_workers:
+                    pux, puy = prev_uav
+                    pwx, pwy = prev_workers[wid]
+                    d_step = min(
+                        d_step,
+                        cls._distance_point_to_segment(wx, wy, pux, puy, ux, uy),
+                        cls._distance_point_to_segment(pwx, pwy, pux, puy, ux, uy),
+                        cls._distance_point_to_segment(ux, uy, pwx, pwy, wx, wy),
+                        cls._distance_point_to_segment(pux, puy, pwx, pwy, wx, wy),
+                    )
+                if min_distance is None or d_step < min_distance:
+                    min_distance = d_step
+                colliding = bool(d_step <= collision_radius)
+                if colliding and not bool(collision_active.get(wid, False)):
+                    collision_count += 1
+                collision_active[wid] = colliding
+                near_active = bool(near_miss_active.get(wid, False))
+                if (not colliding) and (d_step <= NEAR_MISS_ENTER_DISTANCE_M) and (not near_active):
+                    near_miss_count += 1
+                    near_miss_active[wid] = True
+                elif near_active and (d_step > NEAR_MISS_EXIT_DISTANCE_M):
+                    near_miss_active[wid] = False
+            prev_uav = (ux, uy)
+            prev_workers = workers
+        return {
+            "collision_count": int(collision_count),
+            "near_miss_count": int(near_miss_count),
+            "min_uav_worker_distance_m": (None if min_distance is None else float(min_distance)),
+        }
+
     def __init__(self, excel_path: Optional[str] = None):
         archive_dir, resolved_excel_path = resolve_archive_root_and_excel_path(excel_path)
         self.excel_path = resolved_excel_path
@@ -734,6 +804,7 @@ class TaskRunLogger:
         if active_scope_ids:
             completion_ratio = float(len([cid for cid in true_completed if cid in set(active_scope_ids)])) / float(len(active_scope_ids))
         llm_latency_summary = self._compute_llm_latency_summary(active)
+        proximity_metrics = self._recompute_proximity_metrics(active.runtime_trace)
         return {
             "run_id": active.run_id,
             "task_id": active.task_id,
@@ -751,8 +822,8 @@ class TaskRunLogger:
             "current_target_checkpoint": active.current_target_checkpoint,
             "checkpoint_status_snapshot": dict(active.checkpoint_status_snapshot),
             "completion_state_source": active.completion_state_source,
-            "collision_count": int(final_mission_summary.get("collision_count", final.get("collision_count", 0)) or 0),
-            "near_miss_count": int(final_mission_summary.get("near_miss_count", final.get("near_miss_count", 0)) or 0),
+            "collision_count": int(proximity_metrics.get("collision_count", 0) or 0),
+            "near_miss_count": int(proximity_metrics.get("near_miss_count", 0) or 0),
             "replan_count": int(final_mission_summary.get("replan_count", final.get("replan_count", 0)) or 0),
             "completion_time_mission_sec": active.completion_time_mission_sec,
             "mission_start_ts": active.mission_start_ts,
@@ -847,6 +918,7 @@ class TaskRunLogger:
 
         planner_info = active.planner_info or {}
         llm_latency_summary = self._compute_llm_latency_summary(active)
+        proximity_metrics = self._recompute_proximity_metrics(active.runtime_trace)
         final_mission_summary = dict(final.get("final_mission_summary") or {})
         trajectory_sample_count = int(final_mission_summary.get("trajectory_sample_count", 0) or 0)
         trajectory_buffer_source = str(final_mission_summary.get("trajectory_buffer_source", "runtime_snapshot_fallback"))
@@ -923,7 +995,7 @@ class TaskRunLogger:
             "json_parse_success_rate": llm_latency_summary["json_parse_success_rate"],
             "collision_count": int(final_mission_summary.get("collision_count", (final or {}).get("collision_count", 0)) or 0),
             "near_miss_count": int(final_mission_summary.get("near_miss_count", (final or {}).get("near_miss_count", 0)) or 0),
-            "min_uav_worker_distance_m": active.min_uav_worker_distance_m,
+            "min_uav_worker_distance_m": proximity_metrics.get("min_uav_worker_distance_m"),
             "completed_checkpoints": self._json_text(true_completed),
             "completion_ratio": completion_ratio,
             "planner_model_id": active.run_context.get("planner_model_id", planner_info.get("planner_model_id", "")),
@@ -990,7 +1062,7 @@ class TaskRunLogger:
             **llm_latency_summary,
             "collision_count": int(final_mission_summary.get("collision_count", (final or {}).get("collision_count", 0)) or 0),
             "near_miss_count": int(final_mission_summary.get("near_miss_count", (final or {}).get("near_miss_count", 0)) or 0),
-            "min_uav_worker_distance_m": active.min_uav_worker_distance_m,
+            "min_uav_worker_distance_m": proximity_metrics.get("min_uav_worker_distance_m"),
             "completed_checkpoints": list(true_completed),
             "completion_ratio": completion_ratio,
             "true_completed_checkpoints": list(true_completed),
@@ -1047,7 +1119,7 @@ class TaskRunLogger:
             "run_summary": run_summary,
             "metrics": {
                 "near_miss_count": int(active.near_miss_count),
-                "min_uav_worker_distance_m": active.min_uav_worker_distance_m,
+                "min_uav_worker_distance_m": proximity_metrics.get("min_uav_worker_distance_m"),
                 "collision_count": int(final_mission_summary.get("collision_count", (final or {}).get("collision_count", 0)) or 0),
                 "replan_count": int(final_mission_summary.get("replan_count", (final or {}).get("replan_count", 0)) or 0),
             },

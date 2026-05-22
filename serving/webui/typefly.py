@@ -1297,22 +1297,8 @@ class TypeFly:
     def _update_mission_collision_count(self, snapshot):
         if not snapshot:
             return
-        drone_gt = snapshot.get("drone_gt")
-        workers = snapshot.get("workers") or []
-        if drone_gt is None:
-            return
-        collision_radius = float(UAV_RADIUS_M + WORKER_RADIUS_M)
-        worker_map = {str(item.get("id")): item for item in workers}
-        for worker_id in ("worker_1", "worker_2", "worker_3"):
-            worker = worker_map.get(worker_id)
-            worker_gt = None if worker is None else worker.get("gt_xy")
-            currently_colliding = False
-            if worker_gt is not None:
-                distance_xy = math.hypot(float(drone_gt[0]) - float(worker_gt[0]), float(drone_gt[1]) - float(worker_gt[1]))
-                currently_colliding = bool(distance_xy <= collision_radius)
-            if currently_colliding and not self.worker_collision_active.get(worker_id, False):
-                self.mission_collision_count += 1
-            self.worker_collision_active[worker_id] = currently_colliding
+        # Keep UI field aligned with the unified backend summary metric.
+        self.mission_collision_count = int(snapshot.get("collision_count", self.mission_collision_count) or 0)
 
     def render_status_markdown(self, snapshot):
         safety_context = snapshot.get("safety_context") if snapshot else None
