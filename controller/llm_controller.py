@@ -387,6 +387,72 @@ class LLMController():
         with self._uav_trajectory_lock:
             return list(getattr(self, "_latest_uav_trajectory_points", []) or [])
 
+    @staticmethod
+    def _distance_point_to_segment(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+        vx, vy = (bx - ax), (by - ay)
+        wx, wy = (px - ax), (py - ay)
+        vv = (vx * vx) + (vy * vy)
+        if vv <= 1e-12:
+            return float(math.hypot(px - ax, py - ay))
+        t = max(0.0, min(1.0, ((wx * vx) + (wy * vy)) / vv))
+        proj_x, proj_y = (ax + (t * vx)), (ay + (t * vy))
+        return float(math.hypot(px - proj_x, py - proj_y))
+
+    @classmethod
+    def _compute_proximity_metrics_from_trajectory(cls, trajectory_points: list[dict]) -> dict:
+        collision_radius = float(UAV_RADIUS_M + WORKER_RADIUS_M)
+        collision_count = 0
+        near_miss_count = 0
+        min_distance = None
+        collision_active_by_worker: dict[str, bool] = {}
+        near_miss_active_by_worker: dict[str, bool] = {}
+        prev_uav = None
+        prev_workers: dict[str, tuple[float, float]] = {}
+        for point in list(trajectory_points or []):
+            if not isinstance(point, dict):
+                continue
+            if point.get("x") is None or point.get("y") is None:
+                continue
+            ux, uy = float(point.get("x")), float(point.get("y"))
+            workers = {}
+            for worker in list(point.get("workers") or []):
+                wid = str(worker.get("id"))
+                gt_xy = worker.get("gt_xy")
+                if wid and isinstance(gt_xy, (list, tuple)) and len(gt_xy) >= 2:
+                    workers[wid] = (float(gt_xy[0]), float(gt_xy[1]))
+            for wid, (wx, wy) in workers.items():
+                d_step = float(math.hypot(ux - wx, uy - wy))
+                if prev_uav is not None and wid in prev_workers:
+                    pux, puy = prev_uav
+                    pwx, pwy = prev_workers[wid]
+                    d_step = min(
+                        d_step,
+                        cls._distance_point_to_segment(wx, wy, pux, puy, ux, uy),
+                        cls._distance_point_to_segment(pwx, pwy, pux, puy, ux, uy),
+                        cls._distance_point_to_segment(ux, uy, pwx, pwy, wx, wy),
+                        cls._distance_point_to_segment(pux, puy, pwx, pwy, wx, wy),
+                    )
+                if min_distance is None or d_step < min_distance:
+                    min_distance = d_step
+                colliding = bool(d_step <= collision_radius)
+                if colliding and not bool(collision_active_by_worker.get(wid, False)):
+                    collision_count += 1
+                collision_active_by_worker[wid] = colliding
+                near_active = bool(near_miss_active_by_worker.get(wid, False))
+                if (not colliding) and (d_step <= NEAR_MISS_ENTER_DISTANCE_M) and (not near_active):
+                    near_miss_count += 1
+                    near_miss_active_by_worker[wid] = True
+                elif near_active and (d_step > NEAR_MISS_EXIT_DISTANCE_M):
+                    near_miss_active_by_worker[wid] = False
+            prev_uav = (ux, uy)
+            prev_workers = workers
+        return {
+            "collision_count": int(collision_count),
+            "near_miss_count": int(near_miss_count),
+            "min_uav_worker_distance_m": (None if min_distance is None else float(min_distance)),
+            "collision_active_by_worker": collision_active_by_worker,
+            "near_miss_active_by_worker": near_miss_active_by_worker,
+        }
 
     def clear_uav_trajectory(self, stop_sampler: bool = True):
         if stop_sampler:
@@ -443,11 +509,23 @@ class LLMController():
             while not stop_event.is_set():
                 pos = self._read_uav_position_for_sampler()
                 if pos is not None:
+                    workers_for_sample = []
+                    try:
+                        now_for_workers = time.time()
+                        elapsed_scene_s = max(0.0, now_for_workers - float((self.baseline_scene_state or {}).get("captured_at", now_for_workers)))
+                        obstacle_states = compute_obstacle_envelope_states(self.get_baseline_scene(), now_s=elapsed_scene_s)
+                        workers_for_sample = [
+                            {"id": str(obs.id), "gt_xy": (float(obs.gt_xy[0]), float(obs.gt_xy[1]))}
+                            for obs in list(obstacle_states or [])
+                        ]
+                    except Exception:
+                        workers_for_sample = []
                     point = {
                         "ts": float(time.time()),
                         "x": float(pos[0]),
                         "y": float(pos[1]),
                         "z": float(pos[2]),
+                        "workers": workers_for_sample,
                         "source": "backend_trajectory_sampler",
                         "execution_mode": self.execution_mode,
                         "current_target_checkpoint": (self.latest_benchmark_progress or {}).get("current_target"),
@@ -3932,8 +4010,8 @@ class LLMController():
             "completion_time_excluding_all_llm_response_sec": completion_time_excluding_all_llm_response_sec,
             "completion_time_excluding_in_mission_llm_wait_sec": completion_time_excluding_llm_wait_sec,
             "completion_time_excluding_llm_wait_sec_legacy_semantics": "excludes in-mission hover wait only",
-            "collision_count": int((snapshot or {}).get("collision_count", 0) or 0),
-            "near_miss_count": int((snapshot or {}).get("near_miss_count", 0) or 0),
+            "collision_count": int(self.collision_count),
+            "near_miss_count": int(self.near_miss_count),
             "replan_count": int(getattr(self, "accepted_replan_count", 0)),
             "accepted_replan_count": int(getattr(self, "accepted_replan_count", 0)),
             "full_replan_response_count": int(getattr(self, "full_replan_response_count", 0)),
@@ -4276,45 +4354,16 @@ class LLMController():
         return snapshot
 
     def _update_proximity_metrics(self, snapshot: dict):
-        drone_gt = snapshot.get("drone_gt")
-        workers = list(snapshot.get("workers") or [])
-        events = []
-        if drone_gt is None:
-            snapshot["near_miss_count"] = int(self.near_miss_count)
-            snapshot["collision_count"] = int(self.collision_count)
-            snapshot["near_miss_events"] = events
-            snapshot["min_uav_worker_distance_m"] = self.min_uav_worker_distance_m
-            return
-        collision_distance = float(UAV_RADIUS_M + WORKER_RADIUS_M)
-        for worker in workers:
-            wid = str(worker.get("id"))
-            if wid not in self._near_miss_active_by_worker:
-                self._near_miss_active_by_worker[wid] = False
-                self._collision_active_by_worker[wid] = False
-            worker_xy = worker.get("gt_xy")
-            if worker_xy is None:
-                continue
-            d = float(math.hypot(float(drone_gt[0]) - float(worker_xy[0]), float(drone_gt[1]) - float(worker_xy[1])))
-            if self.min_uav_worker_distance_m is None or d < self.min_uav_worker_distance_m:
-                self.min_uav_worker_distance_m = d
-            colliding = bool(d <= collision_distance)
-            if colliding and not self._collision_active_by_worker.get(wid, False):
-                self.collision_count += 1
-                events.append({"worker_id": wid, "event": "collision_enter", "distance_m": d})
-            self._collision_active_by_worker[wid] = colliding
-
-            near_active = bool(self._near_miss_active_by_worker.get(wid, False))
-            if (not colliding) and (d <= NEAR_MISS_ENTER_DISTANCE_M) and (not near_active):
-                self.near_miss_count += 1
-                self._near_miss_active_by_worker[wid] = True
-                events.append({"worker_id": wid, "event": "near_miss_enter", "distance_m": d})
-            elif near_active and (d > NEAR_MISS_EXIT_DISTANCE_M):
-                self._near_miss_active_by_worker[wid] = False
-                events.append({"worker_id": wid, "event": "near_miss_exit", "distance_m": d})
-        self._latest_near_miss_events = list(events)
+        metrics = self._compute_proximity_metrics_from_trajectory(self.get_uav_trajectory_points())
+        self.collision_count = int(metrics.get("collision_count", 0) or 0)
+        self.near_miss_count = int(metrics.get("near_miss_count", 0) or 0)
+        self.min_uav_worker_distance_m = metrics.get("min_uav_worker_distance_m")
+        self._collision_active_by_worker = dict(metrics.get("collision_active_by_worker", {}) or {})
+        self._near_miss_active_by_worker = dict(metrics.get("near_miss_active_by_worker", {}) or {})
+        self._latest_near_miss_events = []
         snapshot["near_miss_count"] = int(self.near_miss_count)
         snapshot["collision_count"] = int(self.collision_count)
-        snapshot["near_miss_events"] = events
+        snapshot["near_miss_events"] = []
         snapshot["min_uav_worker_distance_m"] = self.min_uav_worker_distance_m
 
     def _debug_log_collision_probability_pipeline(self, snapshot: dict):
