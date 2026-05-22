@@ -205,6 +205,74 @@ def test_statement_boundary_consumes_pending_event_predrisk_trigger():
     assert controller.event_predrisk_trigger_consumed_count == 1
 
 
+def test_accept_replan_once_idempotent_and_attempts_synced():
+    pytest.importorskip("PIL")
+    from controller.llm_controller import LLMController
+
+    controller = LLMController.__new__(LLMController)
+    controller._accepted_replan_ids = set()
+    controller.accepted_replan_count = 0
+    controller._replan_attempts = 0
+    controller.replan_applied_count = 0
+    controller._accepted_replan_seq = 0
+
+    assert controller._accept_replan_once("r1") is True
+    assert controller._accept_replan_once("r1") is False
+    assert controller._accept_replan_once("r2") is True
+    assert controller.accepted_replan_count == 2
+    assert controller._replan_attempts == 2
+    assert controller.replan_applied_count == 2
+
+
+def test_event_predrisk_replan_forces_replan_stage_and_accept_count(monkeypatch):
+    controller, planner_calls, queued_programs, _ = _build_minimal_controller_for_postcheck(
+        plans=["lo('init');", "lo('replan');mr(0.5);tu(15);gc('C4');d(2.0);"],
+        completed_after_exec=[[], ["A1", "A2"]],
+        mode="typefly-threshold-replan",
+        replan_limit=8,
+    )
+    monkeypatch.setattr("controller.llm_controller.AUTO_REPLAN_PROTECTION_STATEMENTS", 0)
+
+    def _exec(program_text, silent=False, allow_auto_interrupt=True):
+        queued_programs.append(program_text)
+        if len(queued_programs) == 1:
+            controller.latest_benchmark_progress = {"completed": []}
+            return MiniSpecReturnValue("risk", True)
+        controller.latest_benchmark_progress = {"completed": ["A1", "A2"]}
+        return MiniSpecReturnValue("ok", False)
+
+    controller.execute_minispec = _exec
+    controller.execute_task_description("run mission", framework_mode="typefly-threshold-replan")
+
+    assert planner_calls[1]["planning_stage"] == "replan"
+    assert controller.accepted_replan_count == 1
+    assert controller.replan_applied_count == 1
+    assert controller.event_predrisk_replan_applied_count == 1
+    assert controller.latest_replan_applied_plan == "lo('replan');mr(0.5);tu(15);gc('C4');d(2.0);"
+    assert controller.execution_resumed_from_new_plan is True
+
+
+def test_pending_event_predrisk_suppressed_when_replan_limit_reached():
+    pytest.importorskip("PIL")
+    from controller.llm_controller import LLMController
+
+    controller = LLMController.__new__(LLMController)
+    controller.framework_mode = "typefly-threshold-replan"
+    controller.replan_limit = 2
+    controller.accepted_replan_count = 2
+    controller._planning_inflight = False
+    controller.awaiting_llm_response = False
+    controller._runtime_replan_event = threading.Event()
+    controller._runtime_replan_reason = ""
+    controller._event_predrisk_pending_trigger = {"source": "statement_boundary", "probability": 0.9}
+    controller.event_predrisk_suppressed_count = 0
+    controller.event_predrisk_suppress_reason_counts = {}
+    controller._consume_pending_event_predrisk_trigger(source="statement_boundary")
+
+    assert controller._runtime_replan_event.is_set() is False
+    assert controller.event_predrisk_suppress_reason_counts.get("replan_limit_reached") == 1
+
+
 def _build_minimal_controller_for_postcheck(plans, completed_after_exec, mode="typefly-threshold-replan", replan_limit=8):
     pytest.importorskip("PIL")
     from controller.llm_controller import LLMController
