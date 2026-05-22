@@ -3175,6 +3175,8 @@ class LLMController():
                                 f"[LOG] Replan requested but limit reached ({replan_attempts}/{max_replan_attempts})."
                             )
                         else:
+                            self._replan_attempts = int(getattr(self, "_replan_attempts", 0)) + 1
+                            replan_attempts = int(self._replan_attempts)
                             self.execution_mode = "AwaitingReplanResponse"
                             self.interrupted_for_replan = True
                             self.entered_awaiting_replan_response = True
