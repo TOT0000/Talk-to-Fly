@@ -35,7 +35,7 @@ RESULT_COLUMNS = [
     "replan_count",
     "collision_count",
     "near_miss_count",
-    "min_uav_worker_distance_m",
+    "min_uav_obstacle_distance_m",
     "completion_ratio",
     "completed_checkpoints",
     "remaining_checkpoints",

@@ -252,7 +252,7 @@ class CollisionProbabilityCore:
     def evaluate_scene(
         self,
         uav: CollisionEntity2D,
-        workers: List[CollisionEntity2D],
+        obstacles: List[CollisionEntity2D],
         *,
         max_terms: int = 256,
         tolerance: float = 1e-12,
@@ -264,17 +264,17 @@ class CollisionProbabilityCore:
         uav_mean = np.asarray(uav.mean_xy, dtype=float).reshape(2) - np.asarray(uav.bias_xy, dtype=float).reshape(2)
         uav_cov = np.asarray(uav.cov_xy, dtype=float).reshape(2, 2)
 
-        for worker in workers:
-            # Bias-corrected worker mean: p_k_hat - b_k
-            worker_mean = np.asarray(worker.mean_xy, dtype=float).reshape(2) - np.asarray(worker.bias_xy, dtype=float).reshape(2)
-            worker_cov = np.asarray(worker.cov_xy, dtype=float).reshape(2, 2)
+        for obstacle in obstacles:
+            # Bias-corrected obstacle mean: p_k_hat - b_k
+            obstacle_mean = np.asarray(obstacle.mean_xy, dtype=float).reshape(2) - np.asarray(obstacle.bias_xy, dtype=float).reshape(2)
+            obstacle_cov = np.asarray(obstacle.cov_xy, dtype=float).reshape(2, 2)
 
             # Relative Gaussian
-            mu_k = worker_mean - uav_mean
-            sigma_rel = worker_cov + uav_cov
+            mu_k = obstacle_mean - uav_mean
+            sigma_rel = obstacle_cov + uav_cov
 
             # Circle collision region quadratic form
-            r_c = max(1e-6, float(uav.radius_m) + float(worker.radius_m))
+            r_c = max(1e-6, float(uav.radius_m) + float(obstacle.radius_m))
             A = (1.0 / (r_c * r_c)) * np.eye(2, dtype=float)
 
             p_soft = approximate_collision_probability_gauss_hermite(
@@ -301,9 +301,9 @@ class CollisionProbabilityCore:
             p_ck = float(p_hard_approx)
 
             p_mc = None
-            if debug_mc_enabled and worker.entity_id == "worker_3":
+            if debug_mc_enabled and obstacle.entity_id == "obstacle_3":
                 p_mc = self._estimate_collision_probability_monte_carlo(
-                    entity_id=str(worker.entity_id),
+                    entity_id=str(obstacle.entity_id),
                     mu_k=mu_k,
                     sigma_rel=sigma_rel,
                     r_c=float(r_c),
@@ -312,7 +312,7 @@ class CollisionProbabilityCore:
 
             results.append(
                 CollisionProbabilityResult(
-                    entity_id=str(worker.entity_id),
+                    entity_id=str(obstacle.entity_id),
                     probability=float(p_ck),
                     soft_probability=float(p_soft),
                     approximate_probability=float(p_hard_approx),
