@@ -10,17 +10,17 @@ Baseline 2 profile:
 - Trigger family: periodic heartbeat replanning.
 - Heartbeat interval: 5 seconds.
 - Planning style: periodic-infoaware.
-- Main decision signals: UAV position, UAV heading, worker positions, checkpoint geometry, mission progress, predicted collision probability, per-worker collision probabilities, and dominant risky worker.
+- Main decision signals: UAV position, UAV heading, obstacle positions, checkpoint geometry, mission progress, predicted collision probability, per-obstacle collision probabilities, and dominant risky obstacle.
 - This baseline is intentionally more risk-aware than Baseline 1.
 
 Baseline 2 initial planning requirements:
 - Produce one complete MiniSpec mission plan for the active checkpoints.
 - Select the full checkpoint visit sequence dynamically; never hard-code A1->A2->A3->A4.
-- Sequence decisions must jointly consider UAV position, UAV heading, worker positions, checkpoint geometry, predicted collision probability, and route smoothness.
+- Sequence decisions must jointly consider UAV position, UAV heading, obstacle positions, checkpoint geometry, predicted collision probability, and route smoothness.
 - The predicted collision probability refers to the collision risk over the next 3 seconds, not only the current instant.
 - If risk is low and geometry is clear, prioritize efficient progress.
-- If predicted collision probability is elevated or any worker geometry looks suspicious, proactively insert low-level shaping actions before direct gc().
-- Use predicted collision probability together with UAV-worker geometry to judge whether a preventive avoidance maneuver is needed before checkpoint progress.
+- If predicted collision probability is elevated or any obstacle geometry looks suspicious, proactively insert low-level shaping actions before direct gc().
+- Use predicted collision probability together with UAV-obstacle geometry to judge whether a preventive avoidance maneuver is needed before checkpoint progress.
 - If this plan intends to complete any checkpoint, include d(2.0) dwell behavior at that checkpoint.
 
 Guides:
