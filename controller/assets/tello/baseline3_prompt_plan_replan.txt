@@ -21,7 +21,7 @@ Continuation context:
 Baseline 3 replan requirements:
 - Explicit replan threshold > 0.5.
 - The predicted collision probability refers to the collision risk over the next 3 seconds, not only the current instant.
-- Since replan has already been triggered, first determine what preventive avoidance behavior is needed from the predicted collision probability and the current UAV-worker geometry.
+- Since replan has already been triggered, first determine what preventive avoidance behavior is needed from the predicted collision probability and the current UAV-obstacle geometry.
 - This baseline responds earlier than a high-threshold replan baseline. Therefore:
   - if risk is just above threshold and geometry is only mildly suspicious, a small preventive detour may be enough,
   - if risk is much higher or geometry is clearly unsafe, use a larger and more conservative detour.

@@ -19,8 +19,8 @@ Full replan budget:
 
 Heartbeat decision policy:
 - Use predicted_collision_probability as a 3-second future-risk signal.
-- Judge safety using both predicted collision probability and UAV-worker geometry; do not rely on probability alone.
-- Also consider per-worker probabilities, dominant risky worker, queue progress, mission progress, and execution history.
+- Judge safety using both predicted collision probability and UAV-obstacle geometry; do not rely on probability alone.
+- Also consider per-obstacle probabilities, dominant risky obstacle, queue progress, mission progress, and execution history.
 - Continue when future risk is low and the current path geometry is clear.
 - Replan when future risk is meaningfully elevated, or when geometry suggests a likely close pass before the next checkpoint.
 - Scale avoidance strength with risk severity:
@@ -50,9 +50,9 @@ Completed checkpoints: {completed_checkpoints}
 Unfinished checkpoints: {unfinished_checkpoints}
 UAV position: {uav_position}
 UAV heading: {uav_heading}
-Worker positions: {worker_positions}
+Obstacle positions: {obstacle_positions}
 predicted_collision_probability: {predicted_collision_probability}
-dominant risky worker: {dominant_worker}
+dominant risky obstacle: {dominant_obstacle}
 Current executing plan: {current_executing_plan}
 Queue progress: {queue_progress}
 Execution history: {execution_history}
