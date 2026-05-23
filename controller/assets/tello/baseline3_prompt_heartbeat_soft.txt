@@ -11,7 +11,7 @@ Full replans already used: {full_replan_count} / 8
 Baseline 3 heartbeat policy:
 - This is the event-predrisk-0.5 baseline.
 - The main future-risk signal is predicted_collision_probability over the next 3 seconds.
-- Use predicted_collision_probability together with UAV-worker geometry, per-worker probabilities, dominant risky worker, queue progress, and mission progress.
+- Use predicted_collision_probability together with UAV-obstacle geometry, per-obstacle probabilities, dominant risky obstacle, queue progress, and mission progress.
 - If future risk is low and geometry is clear, continue the current plan.
 - If future risk is meaningfully elevated, or geometry suggests a likely close pass before the next checkpoint, return one full_replan_plan.
 - Choose avoidance amplitude according to severity:
@@ -31,9 +31,9 @@ Completed checkpoints: {completed_checkpoints}
 Unfinished checkpoints: {unfinished_checkpoints}
 UAV position: {uav_position}
 UAV heading: {uav_heading}
-Worker positions: {worker_positions}
+Obstacle positions: {obstacle_positions}
 predicted_collision_probability: {predicted_collision_probability}
-dominant risky worker: {dominant_worker}
+dominant risky obstacle: {dominant_obstacle}
 Current executing plan: {current_executing_plan}
 Queue progress: {queue_progress}
 Execution history: {execution_history}

@@ -35,15 +35,27 @@ from controller.benchmark_layout import (
     CHECKPOINT_DWELL_SECONDS,
     CHECKPOINT_RADIUS_M,
     UAV_RADIUS_M,
-    WORKER_RADIUS_M,
+    OBSTACLE_RADIUS_M,
     BENCHMARK_CHECKPOINT_ORDER,
     BENCHMARK_CHECKPOINTS_BY_ID,
 )
 from gradio import Timer
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+ICON_DIR = os.path.join(CURRENT_DIR, "assets")
+DRONE_ICON_PATH = os.path.join(ICON_DIR, "drone.png")
+OBSTACLE_ICON_PATH = os.path.join(ICON_DIR, "obstacle.png")
 UI_TRAJECTORY_REFRESH_SECONDS = 0.25
 TRAJECTORY_HISTORY_MAX_POINTS = int(os.getenv("TYPEFLY_TRAJECTORY_HISTORY_MAX_POINTS", "100000"))
+
+
+def _load_icon(path):
+    try:
+        if os.path.exists(path):
+            return Image.open(path).convert("RGBA")
+    except Exception:
+        return None
+    return None
 
 
 class TypeFly:
@@ -100,10 +112,10 @@ class TypeFly:
         self.robot_type = controller_robot_type
         self.selected_baseline_id = normalize_pipeline_id(os.getenv("TYPEFLY_BASELINE_ID", "baseline1"))
         self.planning_agent_model_id = str(
-            os.getenv("TYPEFLY_MANUAL_PLANNER_MODEL", "") or self.llm_controller.planner.model_name
+            os.getenv("TYPEFLY_MANUAL_PLANNER_MODEL", "")
         ).strip()
         self.evaluator_model_id = str(
-            os.getenv("TYPEFLY_MANUAL_EVALUATOR_MODEL", "") or self.llm_controller.planner.evaluator_model_name
+            os.getenv("TYPEFLY_MANUAL_EVALUATOR_MODEL", "")
         ).strip()
         self.llm_controller.set_manual_agent_models(
             self.planning_agent_model_id,
@@ -112,8 +124,8 @@ class TypeFly:
         self.default_planning_agent_model_id = ""
         self.default_evaluator_model_id = ""
         self.default_heartbeat_interval_seconds = float(getattr(self.llm_controller, "heartbeat_interval_seconds", 3.0))
-        self.selected_worker_move_step = 0.5
-        self.selected_worker_turn_step = 15.0
+        self.selected_obstacle_move_step = 0.5
+        self.selected_obstacle_turn_step = 15.0
 
         # 狀態資料
         self.anchor_count = 0
@@ -129,15 +141,15 @@ class TypeFly:
                 self.llm_controller.clear_uav_trajectory()
             elif hasattr(self.llm_controller, "set_uav_trajectory_points"):
                 self.llm_controller.set_uav_trajectory_points([])
-        self.worker_collision_history = {
-            "worker_1": deque(maxlen=100),
-            "worker_2": deque(maxlen=100),
-            "worker_3": deque(maxlen=100),
+        self.obstacle_collision_history = {
+            "obstacle_1": deque(maxlen=100),
+            "obstacle_2": deque(maxlen=100),
+            "obstacle_3": deque(maxlen=100),
         }
-        self.worker_collision_active = {
-            "worker_1": False,
-            "worker_2": False,
-            "worker_3": False,
+        self.obstacle_collision_active = {
+            "obstacle_1": False,
+            "obstacle_2": False,
+            "obstacle_3": False,
         }
         # UI trajectory/workspace/status refresh intervals (higher frequency for smoother trajectory updates).
         self._workspace_render_interval_sec = UI_TRAJECTORY_REFRESH_SECONDS
@@ -154,6 +166,8 @@ class TypeFly:
             "user": {"main": "#C5221F", "light": "#F28B82"},
         }
         self.anchor_provider = AnchorGeometryProvider()
+        self._drone_icon_image = _load_icon(DRONE_ICON_PATH)
+        self._obstacle_icon_image = _load_icon(OBSTACLE_ICON_PATH)
         self.benchmark_progress = {
             "order": list(BENCHMARK_CHECKPOINT_ORDER),
             "completed": set(),
@@ -204,13 +218,13 @@ class TypeFly:
                         gr.Markdown("### Pipeline Model / Trigger Settings")
                         self.planning_agent_model_input = gr.Textbox(
                             value=self.planning_agent_model_id,
-                            label="Planning model",
-                            placeholder="e.g. google/gemma-2-9b",
+                            label="Planning agent model",
+                            placeholder="留空 = OpenAI gpt-4o；輸入值 = LM Studio model id",
                         )
                         self.evaluator_model_input = gr.Textbox(
                             value=self.evaluator_model_id,
                             label="Evaluator model",
-                            placeholder="e.g. deepseek/deepseek-r1-0528-qwen3-8b",
+                            placeholder="留空 = OpenAI gpt-4o；輸入值 = LM Studio model id",
                             visible=(self.selected_baseline_id == "agent"),
                         )
                         self.heartbeat_interval_input = gr.Number(
@@ -227,7 +241,7 @@ class TypeFly:
                     baseline_scene_choices = [
                         sid for sid in (
                             "SCENE_BENCHMARK_DEMO",
-                            "SCENE_MANUAL_WORKER_CONTROL",
+                            "SCENE_MANUAL_OBSTACLE_CONTROL",
                             "SCENE_FIXED_W13_MANUAL_W2",
                             "SCENE1",
                             "SCENE2",
@@ -242,17 +256,17 @@ class TypeFly:
                     self.baseline_scene_apply_btn = gr.Button("Apply Baseline Scene")
                     self.reset_system_btn = gr.Button("Reset System (Clear All Records)")
                 with gr.Column(scale=1, min_width=320, elem_classes="user-move-panel"):
-                    self.worker_selector = gr.Dropdown(
-                        choices=["worker_1", "worker_2", "worker_3"],
-                        value="worker_1",
-                        label="Controlled Worker",
+                    self.obstacle_selector = gr.Dropdown(
+                        choices=["obstacle_1", "obstacle_2", "obstacle_3"],
+                        value="obstacle_1",
+                        label="Controlled Obstacle",
                     )
                     self.user_move_step = gr.Slider(
                         minimum=0.1,
                         maximum=1.0,
                         value=0.5,
                         step=0.1,
-                        label="Worker Move Step (m)",
+                        label="Obstacle Move Step (m)",
                         elem_classes="user-move-step",
                     )
                     self.user_turn_step = gr.Slider(
@@ -260,7 +274,7 @@ class TypeFly:
                         maximum=90,
                         value=15,
                         step=5,
-                        label="Worker Turn Step (deg)",
+                        label="Obstacle Turn Step (deg)",
                         elem_classes="user-move-step",
                     )
                     with gr.Row(elem_classes="user-move-row"):
@@ -326,49 +340,49 @@ class TypeFly:
                 inputs=[],
                 outputs=[self.scenario_status, self.postrun_summary],
             )
-            self.worker_selector.change(
-                fn=self.select_controlled_worker,
-                inputs=[self.worker_selector],
+            self.obstacle_selector.change(
+                fn=self.select_controlled_obstacle,
+                inputs=[self.obstacle_selector],
                 outputs=[self.scenario_status],
             )
             self.user_move_step.change(
-                fn=self.set_worker_move_step,
+                fn=self.set_obstacle_move_step,
                 inputs=[self.user_move_step],
                 outputs=[],
             )
             self.user_turn_step.change(
-                fn=self.set_worker_turn_step,
+                fn=self.set_obstacle_turn_step,
                 inputs=[self.user_turn_step],
                 outputs=[],
             )
 
             self.user_move_forward_btn.click(
-                fn=self.move_worker_forward,
+                fn=self.move_obstacle_forward,
                 inputs=[],
                 outputs=[self.scenario_status],
             )
             self.user_move_backward_btn.click(
-                fn=self.move_worker_backward,
+                fn=self.move_obstacle_backward,
                 inputs=[],
                 outputs=[self.scenario_status],
             )
             self.user_move_left_btn.click(
-                fn=self.move_worker_left,
+                fn=self.move_obstacle_left,
                 inputs=[],
                 outputs=[self.scenario_status],
             )
             self.user_move_right_btn.click(
-                fn=self.move_worker_right,
+                fn=self.move_obstacle_right,
                 inputs=[],
                 outputs=[self.scenario_status],
             )
             self.user_turn_cw_btn.click(
-                fn=self.turn_worker_cw,
+                fn=self.turn_obstacle_cw,
                 inputs=[],
                 outputs=[self.scenario_status],
             )
             self.user_turn_ccw_btn.click(
-                fn=self.turn_worker_ccw,
+                fn=self.turn_obstacle_ccw,
                 inputs=[],
                 outputs=[self.scenario_status],
             )
@@ -409,9 +423,9 @@ class TypeFly:
 
             with gr.Row():
                 self.xy_plot = gr.Image(value=self.create_blank_plot("Local XY", "X (m)", "Y (m)", xlim=(0, 12), ylim=(0, 12), figsize=(5, 4)), label="Local XY", height=320)
-                self.x_plot = gr.Image(value=self.create_sequence_plot("worker_1 3s Predicted Collision Probability", "Sample", "P(predicted collision)", xlim=(0, 1), ylim=(0, 1)), label="worker_1 P(predicted collision)", height=320)
-                self.y_plot = gr.Image(value=self.create_sequence_plot("worker_2 3s Predicted Collision Probability", "Sample", "P(predicted collision)", xlim=(0, 1), ylim=(0, 1)), label="worker_2 P(predicted collision)", height=320)
-                self.z_plot = gr.Image(value=self.create_sequence_plot("worker_3 3s Predicted Collision Probability", "Sample", "P(predicted collision)", xlim=(0, 1), ylim=(0, 1)), label="worker_3 P(predicted collision)", height=320)
+                self.x_plot = gr.Image(value=self.create_sequence_plot("obstacle_1 3s Predicted Collision Probability", "Sample", "P(predicted collision)", xlim=(0, 1), ylim=(0, 1)), label="obstacle_1 P(predicted collision)", height=320)
+                self.y_plot = gr.Image(value=self.create_sequence_plot("obstacle_2 3s Predicted Collision Probability", "Sample", "P(predicted collision)", xlim=(0, 1), ylim=(0, 1)), label="obstacle_2 P(predicted collision)", height=320)
+                self.z_plot = gr.Image(value=self.create_sequence_plot("obstacle_3 3s Predicted Collision Probability", "Sample", "P(predicted collision)", xlim=(0, 1), ylim=(0, 1)), label="obstacle_3 P(predicted collision)", height=320)
 
             self.counter = gr.State(0)
             self.timer = Timer(value=0.08)
@@ -622,19 +636,19 @@ class TypeFly:
                 self.llm_controller.clear_uav_trajectory()
             elif hasattr(self.llm_controller, "set_uav_trajectory_points"):
                 self.llm_controller.set_uav_trajectory_points([])
-        self.worker_collision_history = {
-            "worker_1": deque(maxlen=100),
-            "worker_2": deque(maxlen=100),
-            "worker_3": deque(maxlen=100),
+        self.obstacle_collision_history = {
+            "obstacle_1": deque(maxlen=100),
+            "obstacle_2": deque(maxlen=100),
+            "obstacle_3": deque(maxlen=100),
         }
         self._last_workspace_render_ts = 0.0
         self._last_probability_render_ts = 0.0
         self._last_status_render_ts = 0.0
         self._last_postrun_render_ts = 0.0
-        self.worker_collision_active = {
-            "worker_1": False,
-            "worker_2": False,
-            "worker_3": False,
+        self.obstacle_collision_active = {
+            "obstacle_1": False,
+            "obstacle_2": False,
+            "obstacle_3": False,
         }
         self.mission_collision_count = 0
         self.mission_clock = {
@@ -712,7 +726,7 @@ class TypeFly:
             self.llm_controller.apply_baseline_scene()
             self._reset_runtime_records()
             return (
-                "System reset complete: drone/workers repositioned and runtime progress cleared; pipeline model/trigger settings restored to defaults.",
+                "System reset complete: drone/obstacles repositioned and runtime progress cleared; pipeline model/trigger settings restored to defaults.",
                 gr.update(value=""),
                 gr.update(value=""),
                 gr.update(value=float(self.default_heartbeat_interval_seconds)),
@@ -756,13 +770,21 @@ class TypeFly:
             warning_lines.append(f"- ⚠️ {warning}")
         if lm.get("error"):
             warning_lines.append(f"- ❌ lmstudio_error: `{lm.get('error')}`")
-        warning_block = "\n".join(warning_lines) if warning_lines else "- ✅ selected planning/evaluator models visible in `/v1/models`"
+        warning_block = "\n".join(warning_lines) if warning_lines else "- ✅ model routing checks passed"
+        planner_input = selected.get('planner_model_id', '')
+        evaluator_input = selected.get('evaluator_model_id', '')
+        planner_display_input = planner_input if planner_input else "(blank → OpenAI gpt-4o)"
+        evaluator_display_input = evaluator_input if evaluator_input else "(blank → OpenAI gpt-4o)"
 
         lines = ["### Agent Model Settings"]
         lines.append(f"- trigger mode: `{current_pipeline or 'n/a'}`")
-        lines.append(f"- planning agent model: `{selected.get('planner_model_id', '')}`")
+        lines.append(f"- planning agent model input: `{planner_display_input}`")
+        lines.append(f"- planning route provider: `{selected.get('planner_resolved_provider', 'n/a')}`")
+        lines.append(f"- planning route model: `{selected.get('planner_resolved_model', 'n/a')}`")
         if current_pipeline == "agent":
-            lines.append(f"- evaluator model: `{selected.get('evaluator_model_id', '')}`")
+            lines.append(f"- evaluator model input: `{evaluator_display_input}`")
+            lines.append(f"- evaluator route provider: `{selected.get('evaluator_resolved_provider', 'n/a')}`")
+            lines.append(f"- evaluator route model: `{selected.get('evaluator_resolved_model', 'n/a')}`")
             lines.append(f"- execution window after LLM response (seconds): `{self.llm_controller.heartbeat_interval_seconds}`")
         elif current_pipeline == "baseline2":
             lines.append(f"- execution window after LLM response (seconds): `{self.llm_controller.heartbeat_interval_seconds}`")
@@ -773,12 +795,16 @@ class TypeFly:
             f"- LM Studio base_url: `{lm.get('base_url', 'n/a')}`",
             f"- LM Studio api key: `{lm.get('api_key_masked', '(n/a)')}`",
             f"- LM Studio connected: `{bool(lm.get('connected'))}`",
+            f"- OPENAI_API_KEY present: `{bool(lm.get('openai_api_key_present'))}`",
             f"- visible model ids: {model_preview_text}",
             warning_block,
         ])
         return "\n".join(lines)
 
     def set_agent_models(self, planning_agent_model: str, evaluator_model: str, heartbeat_seconds=None):
+        print_debug(
+            f"[UI-MODEL] set_agent_models received planning={planning_agent_model!r} evaluator={evaluator_model!r}"
+        )
         selected = self.llm_controller.set_manual_agent_models(planning_agent_model, evaluator_model)
         self.llm_controller.set_manual_heartbeat_interval(heartbeat_seconds)
         self.planning_agent_model_id = selected.get("planner_model_id", "")
@@ -849,51 +875,51 @@ class TypeFly:
         yaw = self.llm_controller.turn_user_heading(float(deg_step))
         return f"User heading turned CCW by {deg_step:.1f}°. new_yaw={math.degrees(yaw):.1f}°"
 
-    def select_controlled_worker(self, worker_id: str):
-        selected = self.llm_controller.set_manual_worker_selection(worker_id)
-        return f"Controlled worker set to {selected}"
+    def select_controlled_obstacle(self, obstacle_id: str):
+        selected = self.llm_controller.set_manual_obstacle_selection(obstacle_id)
+        return f"Controlled obstacle set to {selected}"
 
-    def set_worker_move_step(self, step_m: float):
-        self.selected_worker_move_step = float(step_m)
+    def set_obstacle_move_step(self, step_m: float):
+        self.selected_obstacle_move_step = float(step_m)
 
-    def set_worker_turn_step(self, deg_step: float):
-        self.selected_worker_turn_step = float(deg_step)
+    def set_obstacle_turn_step(self, deg_step: float):
+        self.selected_obstacle_turn_step = float(deg_step)
 
-    def _move_worker(self, local_forward: float, local_right: float, step_m: float | None = None):
-        step = float(self.selected_worker_move_step if step_m is None else step_m)
-        state = self.llm_controller.move_selected_worker_relative(local_forward=local_forward, local_right=local_right, step_m=step)
+    def _move_obstacle(self, local_forward: float, local_right: float, step_m: float | None = None):
+        step = float(self.selected_obstacle_move_step if step_m is None else step_m)
+        state = self.llm_controller.move_selected_obstacle_relative(local_forward=local_forward, local_right=local_right, step_m=step)
         if state is None:
-            return "Manual worker control is only available in SCENE_MANUAL_WORKER_CONTROL."
+            return "Manual obstacle control is only available in SCENE_MANUAL_OBSTACLE_CONTROL."
         return (
-            f"{state['worker_id']} moved to ({state['x']:.2f}, {state['y']:.2f}), "
+            f"{state['obstacle_id']} moved to ({state['x']:.2f}, {state['y']:.2f}), "
             f"heading={state['yaw_deg']:.1f}°"
         )
 
-    def move_worker_forward(self, step_m: float | None = None):
-        return self._move_worker(local_forward=1.0, local_right=0.0, step_m=step_m)
+    def move_obstacle_forward(self, step_m: float | None = None):
+        return self._move_obstacle(local_forward=1.0, local_right=0.0, step_m=step_m)
 
-    def move_worker_backward(self, step_m: float | None = None):
-        return self._move_worker(local_forward=-1.0, local_right=0.0, step_m=step_m)
+    def move_obstacle_backward(self, step_m: float | None = None):
+        return self._move_obstacle(local_forward=-1.0, local_right=0.0, step_m=step_m)
 
-    def move_worker_left(self, step_m: float | None = None):
-        return self._move_worker(local_forward=0.0, local_right=-1.0, step_m=step_m)
+    def move_obstacle_left(self, step_m: float | None = None):
+        return self._move_obstacle(local_forward=0.0, local_right=-1.0, step_m=step_m)
 
-    def move_worker_right(self, step_m: float | None = None):
-        return self._move_worker(local_forward=0.0, local_right=1.0, step_m=step_m)
+    def move_obstacle_right(self, step_m: float | None = None):
+        return self._move_obstacle(local_forward=0.0, local_right=1.0, step_m=step_m)
 
-    def turn_worker_cw(self, deg_step: float | None = None):
-        turn_step = float(self.selected_worker_turn_step if deg_step is None else deg_step)
-        state = self.llm_controller.turn_selected_worker(-turn_step)
+    def turn_obstacle_cw(self, deg_step: float | None = None):
+        turn_step = float(self.selected_obstacle_turn_step if deg_step is None else deg_step)
+        state = self.llm_controller.turn_selected_obstacle(-turn_step)
         if state is None:
-            return "Manual worker control is only available in SCENE_MANUAL_WORKER_CONTROL."
-        return f"{state['worker_id']} heading={state['yaw_deg']:.1f}°"
+            return "Manual obstacle control is only available in SCENE_MANUAL_OBSTACLE_CONTROL."
+        return f"{state['obstacle_id']} heading={state['yaw_deg']:.1f}°"
 
-    def turn_worker_ccw(self, deg_step: float | None = None):
-        turn_step = float(self.selected_worker_turn_step if deg_step is None else deg_step)
-        state = self.llm_controller.turn_selected_worker(turn_step)
+    def turn_obstacle_ccw(self, deg_step: float | None = None):
+        turn_step = float(self.selected_obstacle_turn_step if deg_step is None else deg_step)
+        state = self.llm_controller.turn_selected_obstacle(turn_step)
         if state is None:
-            return "Manual worker control is only available in SCENE_MANUAL_WORKER_CONTROL."
-        return f"{state['worker_id']} heading={state['yaw_deg']:.1f}°"
+            return "Manual obstacle control is only available in SCENE_MANUAL_OBSTACLE_CONTROL."
+        return f"{state['obstacle_id']} heading={state['yaw_deg']:.1f}°"
 
     def process_message(self, message, history):
         print_t(f"[S] Receiving task description: {message}")
@@ -916,10 +942,13 @@ class TypeFly:
                 (cid for cid in self.benchmark_progress["order"] if cid in active_ids),
                 None,
             )
-            self.worker_collision_active = {k: False for k in self.worker_collision_active.keys()}
+            self.obstacle_collision_active = {k: False for k in self.obstacle_collision_active.keys()}
             self.mission_collision_count = 0
             framework_mode = MODE_TYPEFLY_ONESHOT
             self.llm_controller.set_selected_pipeline(self.selected_baseline_id)
+            print_debug(
+                f"[UI-MODEL] process_message using cached planning={self.planning_agent_model_id!r} evaluator={self.evaluator_model_id!r}"
+            )
             self.llm_controller.set_manual_agent_models(
                 self.planning_agent_model_id,
                 self.evaluator_model_id,
@@ -1063,7 +1092,7 @@ class TypeFly:
             self.llm_controller.update_ui_collision_probability(ui_pc)
         self._sync_objective_state(snapshot)
         self._append_history(snapshot)
-        self._append_worker_collision_history(snapshot)
+        self._append_obstacle_collision_history(snapshot)
         self._update_mission_collision_count(snapshot)
         self._update_checkpoint_progress(snapshot)
         now_ts = time.time()
@@ -1164,6 +1193,13 @@ class TypeFly:
         if value is None:
             return "(n/a)"
         return f"({value[0]:.3f}, {value[1]:.3f}, {value[2]:.3f})"
+
+    @staticmethod
+    def _display_obstacle_id(value) -> str:
+        text = str(value or "")
+        if text.startswith("worker_"):
+            return "obstacle_" + text.split("worker_", 1)[1]
+        return text
 
     def _fmt_float(self, value, suffix=""):
         if value is None:
@@ -1283,16 +1319,16 @@ class TypeFly:
             return [(float(p["x"]), float(p["y"])) for p in self.uav_trajectory_points]
         return list(self.position_history.get("drone_gt", []))
 
-    def _append_worker_collision_history(self, snapshot):
+    def _append_obstacle_collision_history(self, snapshot):
         safety_context = snapshot.get("safety_context") if snapshot else None
-        per_worker = {}
+        per_obstacle = {}
         if safety_context is not None:
-            per_worker = {
+            per_obstacle = {
                 str(row.get("id")): float(row.get("predicted_collision_probability", 0.0))
-                for row in (getattr(safety_context, "per_worker_collision_probabilities", []) or [])
+                for row in (getattr(safety_context, "per_obstacle_collision_probabilities", []) or [])
             }
-        for worker_id in ("worker_1", "worker_2", "worker_3"):
-            self.worker_collision_history[worker_id].append(float(per_worker.get(worker_id, 0.0)))
+        for obstacle_id in ("obstacle_1", "obstacle_2", "obstacle_3"):
+            self.obstacle_collision_history[obstacle_id].append(float(per_obstacle.get(obstacle_id, 0.0)))
 
     def _update_mission_collision_count(self, snapshot):
         if not snapshot:
@@ -1359,7 +1395,7 @@ class TypeFly:
             f"- active zones: {', '.join(sorted(z.replace('zone_', '') for z in self.objective_state.get('active_zone_ids', set())))}",
             f"- active checkpoints: {len(active_ids)}",
             f"- predicted_collision_probability: {self._fmt_prob(getattr(safety_context, 'predicted_collision_probability', 0.0))}",
-            f"- dominant risky worker: {getattr(safety_context, 'dominant_threat_id', 'n/a')}",
+            f"- dominant risky obstacle: {self._display_obstacle_id(getattr(safety_context, 'dominant_threat_id', 'n/a'))}",
             f"- current target checkpoint: {target}",
             f"- checkpoint progress: {completed_active}/{total}",
             f"- zone progress: {', '.join(zone_parts) if zone_parts else 'n/a'}",
@@ -1372,7 +1408,7 @@ class TypeFly:
             f"- mission elapsed time: {elapsed_text}",
             f"- mission completion time: {completion_text}",
             f"- completion_time_excluding_llm_wait_sec: {_fmt_metric(_get_metric('completion_time_excluding_llm_wait_sec'), ' s')}",
-            f"- min_uav_worker_distance_m: {_fmt_metric(_get_metric('min_uav_worker_distance_m'), ' m')}",
+            f"- min_uav_obstacle_distance_m: {_fmt_metric(_get_metric('min_uav_obstacle_distance_m'), ' m')}",
             f"- planning_latency_mean_sec: {_fmt_metric(_get_metric('planning_latency_mean_sec'), ' s')}",
             f"- planning_latency_p95_sec: {_fmt_metric(_get_metric('planning_latency_p95_sec'), ' s')}",
         ]
@@ -1381,8 +1417,8 @@ class TypeFly:
 
     def render_entity_markdown(self, snapshot):
         positions = self._extract_ui_positions(snapshot)
-        workers = snapshot.get("workers") or []
-        worker_map = {str(item.get("id")): item for item in workers}
+        obstacles = snapshot.get("obstacles") or []
+        obstacle_map = {str(item.get("id")): item for item in obstacles}
 
         def _fmt_xy(pos):
             if pos is None:
@@ -1394,10 +1430,11 @@ class TypeFly:
             f"- UAV true: {_fmt_xy(positions.get('drone_gt'))}",
             f"- UAV est: {_fmt_xy(positions.get('drone_est'))}",
         ]
-        for worker_id in ("worker_1", "worker_2", "worker_3"):
-            worker = worker_map.get(worker_id)
-            lines.append(f"- {worker_id} true: {_fmt_xy(None if worker is None else worker.get('gt_xy'))}")
-            lines.append(f"- {worker_id} est: {_fmt_xy(None if worker is None else worker.get('est_xy_bias_corrected'))}")
+        for obstacle_id in ("obstacle_1", "obstacle_2", "obstacle_3"):
+            obstacle = obstacle_map.get(obstacle_id)
+            label = self._display_obstacle_id(obstacle_id)
+            lines.append(f"- {label} true: {_fmt_xy(None if obstacle is None else obstacle.get('gt_xy'))}")
+            lines.append(f"- {label} est: {_fmt_xy(None if obstacle is None else obstacle.get('est_xy_bias_corrected'))}")
         return "\n".join(lines)
 
     def _estimate_heading_from_history(self, primary_key: str, fallback_key: str = None):
@@ -1440,6 +1477,26 @@ class TypeFly:
             return (0.0, 5.0), (0.0, 5.0)
         pad = 0.5
         return (min(xs) - pad, max(xs) + pad), (min(ys) - pad, max(ys) + pad)
+
+    def _add_icon_extent(self, ax, xy, image, radius_m, zorder=6, rotation_deg=None):
+        if xy is None or image is None:
+            return False
+        x, y = float(xy[0]), float(xy[1])
+        r = float(radius_m)
+        img = image
+        if rotation_deg is not None:
+            try:
+                img = image.rotate(-float(rotation_deg), expand=True, resample=Image.BICUBIC)
+            except Exception:
+                img = image
+        ax.imshow(
+            img,
+            extent=(x - r, x + r, y - r, y + r),
+            zorder=zorder,
+            interpolation="bilinear",
+            aspect="auto",
+        )
+        return True
 
 
     def _render_xy_view(self, snapshot, xlim, ylim, title, figsize=(5, 4), show_legend=True, show_error_ellipse=False, show_raw_estimate=False):
@@ -1492,33 +1549,37 @@ class TypeFly:
                 label="UAV est trajectory",
             )
         if drone_gt is not None:
-            ax_xy.add_patch(Circle((drone_gt[0], drone_gt[1]), UAV_RADIUS_M, fill=False, edgecolor="#0B57D0", linewidth=2.0, label="UAV true"))
+            added = self._add_icon_extent(
+                ax_xy,
+                drone_gt,
+                self._drone_icon_image,
+                UAV_RADIUS_M,
+                zorder=6,
+                rotation_deg=math.degrees(float(snapshot.get("drone_yaw_rad", 0.0) or 0.0)),
+            )
+            if not added:
+                ax_xy.scatter([drone_gt[0]], [drone_gt[1]], c="#0B57D0", s=42, label="UAV true")
+            ax_xy.text(float(drone_gt[0]), float(drone_gt[1]) - (UAV_RADIUS_M + 0.08), "UAV", fontsize=8, color="#000000", ha="center", va="top")
         if drone_est is not None:
-            ax_xy.add_patch(Circle((drone_est[0], drone_est[1]), UAV_RADIUS_M, fill=False, edgecolor="#8AB4F8", linewidth=1.6, linestyle="--", label="UAV bias-corrected"))
+            ax_xy.scatter([drone_est[0]], [drone_est[1]], marker="x", c="#8AB4F8", s=24, label="UAV bias-corrected")
         if drone_gt is not None and drone_est is not None:
             ax_xy.plot([drone_gt[0], drone_est[0]], [drone_gt[1], drone_est[1]], color="#0B57D0", linewidth=0.8, alpha=0.8)
 
-        workers = snapshot.get("workers") or []
-        for worker in workers:
-            gt_xy = worker.get("gt_xy")
-            est_xy = worker.get("est_xy_bias_corrected")
-            ui_xy = worker.get("ui_xy") or est_xy or gt_xy
-            wid = worker.get("id")
-            if gt_xy is not None:
-                ax_xy.add_patch(Circle((gt_xy[0], gt_xy[1]), WORKER_RADIUS_M, fill=False, edgecolor="#7B1FA2", linewidth=1.8))
+        obstacles = snapshot.get("obstacles") or []
+        for obstacle in obstacles:
+            gt_xy = obstacle.get("gt_xy")
+            est_xy = obstacle.get("est_xy_bias_corrected")
+            ui_xy = obstacle.get("ui_xy") or est_xy or gt_xy
+            wid = self._display_obstacle_id(obstacle.get("id"))
             if ui_xy is not None:
-                ax_xy.add_patch(Circle((ui_xy[0], ui_xy[1]), WORKER_RADIUS_M, fill=False, edgecolor="#CE93D8", linewidth=1.3, linestyle="--"))
-                ax_xy.text(ui_xy[0] + 0.08, ui_xy[1] + 0.08, str(wid), fontsize=8, color="#4A148C")
-                heading = float(worker.get("heading_yaw_rad", 0.0))
-                arrow_len = 0.45
-                wx, wy = float(ui_xy[0]), float(ui_xy[1])
-                wdx = arrow_len * float(math.cos(heading))
-                wdy = arrow_len * float(math.sin(heading))
-                ax_xy.arrow(wx, wy, wdx, wdy, head_width=0.12, head_length=0.14, color="#6A1B9A", linewidth=1.2, length_includes_head=True, zorder=4)
+                added = self._add_icon_extent(ax_xy, ui_xy, self._obstacle_icon_image, OBSTACLE_RADIUS_M, zorder=5)
+                if not added:
+                    ax_xy.scatter([ui_xy[0]], [ui_xy[1]], c="#7B1FA2", s=30)
+                ax_xy.text(float(ui_xy[0]), float(ui_xy[1]) - (OBSTACLE_RADIUS_M + 0.08), str(wid), fontsize=8, color="#000000", ha="center", va="top")
             if gt_xy is not None and ui_xy is not None:
                 ax_xy.plot([gt_xy[0], ui_xy[0]], [gt_xy[1], ui_xy[1]], color="#8E24AA", linewidth=0.7, alpha=0.8)
-            if show_raw_estimate and worker.get("est_xy_raw") is not None:
-                raw = worker["est_xy_raw"]
+            if show_raw_estimate and obstacle.get("est_xy_raw") is not None:
+                raw = obstacle["est_xy_raw"]
                 ax_xy.scatter([raw[0]], [raw[1]], marker="x", c="#6A1B9A", s=22)
 
         if show_raw_estimate and snapshot.get("drone_est_raw") is not None:
@@ -1532,9 +1593,9 @@ class TypeFly:
             angle = math.degrees(math.atan2(eigvecs[1, 1], eigvecs[0, 1]))
             ax_xy.add_patch(Ellipse((drone_est[0], drone_est[1]), width=2 * math.sqrt(eigvals[1]), height=2 * math.sqrt(eigvals[0]), angle=angle, edgecolor="#42A5F5", facecolor="none", linestyle=":", linewidth=1.4, label="UAV variance ellipse"))
         if show_error_ellipse:
-            for worker in workers:
-                p = worker.get("P_xy")
-                est_xy = worker.get("est_xy_bias_corrected")
+            for obstacle in obstacles:
+                p = obstacle.get("P_xy")
+                est_xy = obstacle.get("est_xy_bias_corrected")
                 if p is None or est_xy is None:
                     continue
                 p = np.asarray(p, dtype=float)
@@ -1549,17 +1610,6 @@ class TypeFly:
         updated_path = snapshot.get("updated_path") or []
         if len(updated_path) >= 2:
             ax_xy.plot([p[0] for p in updated_path], [p[1] for p in updated_path], color="#1565C0", linestyle="-", linewidth=1.7, label="Current path")
-
-        drone_for_heading = positions.get("drone_gt") or positions.get("drone_est")
-        yaw_rad = float(snapshot.get("drone_yaw_rad") or 0.0) if snapshot else 0.0
-        if drone_for_heading is not None:
-            hx = float(drone_for_heading[0])
-            hy = float(drone_for_heading[1])
-            arrow_len = 0.55
-            dx = arrow_len * float(math.cos(yaw_rad))
-            dy = arrow_len * float(math.sin(yaw_rad))
-            ax_xy.arrow(hx, hy, dx, dy, head_width=0.16, head_length=0.18, color="#0B57D0", linewidth=1.6, length_includes_head=True, zorder=5)
-            ax_xy.text(hx + dx + 0.05, hy + dy + 0.05, "Heading", fontsize=8, color="#0B57D0")
 
         ax_xy.set_xlim(*xlim)
         ax_xy.set_ylim(*ylim)
@@ -1612,14 +1662,14 @@ class TypeFly:
 
     def update_probability_plots(self):
         imgs = []
-        worker_specs = [
-            ("worker_1", "#7B1FA2"),
-            ("worker_2", "#00897B"),
-            ("worker_3", "#EF6C00"),
+        obstacle_specs = [
+            ("obstacle_1", "#7B1FA2"),
+            ("obstacle_2", "#00897B"),
+            ("obstacle_3", "#EF6C00"),
         ]
-        for worker_id, color in worker_specs:
+        for obstacle_id, color in obstacle_specs:
             fig, ax = plt.subplots(figsize=(5, 4))
-            history = list(self.worker_collision_history[worker_id])
+            history = list(self.obstacle_collision_history[obstacle_id])
             if history:
                 ax.plot(
                     list(range(len(history))),
@@ -1630,14 +1680,14 @@ class TypeFly:
                     markersize=3,
                     markerfacecolor=color,
                     markeredgecolor=color,
-                    label=f"{worker_id} P(predicted collision)",
+                    label=f"{obstacle_id} P(predicted collision)",
                 )
             else:
-                ax.plot([], [], color=color, label=f"{worker_id} P(predicted collision)")
+                ax.plot([], [], color=color, label=f"{obstacle_id} P(predicted collision)")
             max_len = max(len(history), 1)
             ax.set_xlim(0, max(max_len - 1, 1))
             ax.set_ylim(0.0, 1.0)
-            ax.set_title(f"{worker_id} 3s Predicted Collision Probability")
+            ax.set_title(f"{obstacle_id} 3s Predicted Collision Probability")
             ax.set_xlabel("Sample")
             ax.set_ylabel("P(predicted collision)")
             ax.grid(True, linestyle='--', linewidth=0.5)
