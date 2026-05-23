@@ -228,14 +228,13 @@ class GcsSafetyAssessmentService:
         *,
         drone_packet,
         obstacle_packets: Optional[list[tuple[str, object]]] = None,
-        obstacle_packets: Optional[list[tuple[str, object]]] = None,
         now: Optional[float] = None,
         safety_state=None,
         uav_velocity_hint_xy: Optional[np.ndarray] = None,
         uav_prediction_intent: Optional[dict] = None,
     ) -> SafetyContext:
         if obstacle_packets is None:
-            obstacle_packets = obstacle_packets or []
+            obstacle_packets = []
         now = time.time() if now is None else float(now)
         uav_entity = CollisionEntity2D(
             entity_id="uav",
@@ -346,10 +345,9 @@ class GcsSafetyAssessmentService:
         safety_state,
         now: Optional[float] = None,
         obstacle_packets: Optional[list[tuple[str, object]]] = None,
-        obstacle_packets: Optional[list[tuple[str, object]]] = None,
     ) -> Optional[SafetyContext]:
         if obstacle_packets is None:
-            obstacle_packets = obstacle_packets
+            obstacle_packets = []
         now = time.time() if now is None else float(now)
         if safety_state is None:
             return SafetyContext(
