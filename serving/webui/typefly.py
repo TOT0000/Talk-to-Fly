@@ -1575,12 +1575,6 @@ class TypeFly:
                 if not added:
                     ax_xy.scatter([ui_xy[0]], [ui_xy[1]], c="#7B1FA2", s=30)
                 ax_xy.text(ui_xy[0] + 0.08, ui_xy[1] + 0.08, str(wid), fontsize=8, color="#4A148C")
-                heading = float(obstacle.get("heading_yaw_rad", 0.0))
-                arrow_len = 0.45
-                wx, wy = float(ui_xy[0]), float(ui_xy[1])
-                wdx = arrow_len * float(math.cos(heading))
-                wdy = arrow_len * float(math.sin(heading))
-                ax_xy.arrow(wx, wy, wdx, wdy, head_width=0.12, head_length=0.14, color="#6A1B9A", linewidth=1.2, length_includes_head=True, zorder=4)
             if gt_xy is not None and ui_xy is not None:
                 ax_xy.plot([gt_xy[0], ui_xy[0]], [gt_xy[1], ui_xy[1]], color="#8E24AA", linewidth=0.7, alpha=0.8)
             if show_raw_estimate and obstacle.get("est_xy_raw") is not None:
