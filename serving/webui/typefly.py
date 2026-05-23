@@ -1559,6 +1559,7 @@ class TypeFly:
             )
             if not added:
                 ax_xy.scatter([drone_gt[0]], [drone_gt[1]], c="#0B57D0", s=42, label="UAV true")
+            ax_xy.text(float(drone_gt[0]), float(drone_gt[1]) - (UAV_RADIUS_M + 0.08), "UAV", fontsize=8, color="#000000", ha="center", va="top")
         if drone_est is not None:
             ax_xy.scatter([drone_est[0]], [drone_est[1]], marker="x", c="#8AB4F8", s=24, label="UAV bias-corrected")
         if drone_gt is not None and drone_est is not None:
@@ -1574,7 +1575,7 @@ class TypeFly:
                 added = self._add_icon_extent(ax_xy, ui_xy, self._obstacle_icon_image, OBSTACLE_RADIUS_M, zorder=5)
                 if not added:
                     ax_xy.scatter([ui_xy[0]], [ui_xy[1]], c="#7B1FA2", s=30)
-                ax_xy.text(ui_xy[0] + 0.08, ui_xy[1] + 0.08, str(wid), fontsize=8, color="#4A148C")
+                ax_xy.text(float(ui_xy[0]), float(ui_xy[1]) - (OBSTACLE_RADIUS_M + 0.08), str(wid), fontsize=8, color="#000000", ha="center", va="top")
             if gt_xy is not None and ui_xy is not None:
                 ax_xy.plot([gt_xy[0], ui_xy[0]], [gt_xy[1], ui_xy[1]], color="#8E24AA", linewidth=0.7, alpha=0.8)
             if show_raw_estimate and obstacle.get("est_xy_raw") is not None:
@@ -1609,17 +1610,6 @@ class TypeFly:
         updated_path = snapshot.get("updated_path") or []
         if len(updated_path) >= 2:
             ax_xy.plot([p[0] for p in updated_path], [p[1] for p in updated_path], color="#1565C0", linestyle="-", linewidth=1.7, label="Current path")
-
-        drone_for_heading = positions.get("drone_gt") or positions.get("drone_est")
-        yaw_rad = float(snapshot.get("drone_yaw_rad") or 0.0) if snapshot else 0.0
-        if drone_for_heading is not None:
-            hx = float(drone_for_heading[0])
-            hy = float(drone_for_heading[1])
-            arrow_len = 0.55
-            dx = arrow_len * float(math.cos(yaw_rad))
-            dy = arrow_len * float(math.sin(yaw_rad))
-            ax_xy.arrow(hx, hy, dx, dy, head_width=0.16, head_length=0.18, color="#0B57D0", linewidth=1.6, length_includes_head=True, zorder=5)
-            ax_xy.text(hx + dx + 0.05, hy + dy + 0.05, "Heading", fontsize=8, color="#0B57D0")
 
         ax_xy.set_xlim(*xlim)
         ax_xy.set_ylim(*ylim)
