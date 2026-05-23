@@ -14,6 +14,8 @@ import matplotlib
 matplotlib.use('Agg')  # 非互動後端避免開啟GUI視窗
 import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse, Circle, Arc
+from matplotlib.offsetbox import AnnotationBbox, OffsetImage
+from mpl_toolkits.mplot3d import proj3d
 from PIL import Image
 from threading import Thread
 from flask import Flask, Response, request
@@ -45,8 +47,14 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 ICON_DIR = os.path.join(CURRENT_DIR, "assets")
 DRONE_ICON_PATH = os.path.join(ICON_DIR, "drone.png")
 OBSTACLE_ICON_PATH = os.path.join(ICON_DIR, "obstacle.png")
+UAV_3D_ICON_PATH = os.path.join(ICON_DIR, "technology.png")
 UI_TRAJECTORY_REFRESH_SECONDS = 0.25
 TRAJECTORY_HISTORY_MAX_POINTS = int(os.getenv("TYPEFLY_TRAJECTORY_HISTORY_MAX_POINTS", "100000"))
+UAV_3D_ICON_WIDTH_M = 0.8
+UAV_3D_ICON_HEIGHT_M = 0.5
+UAV_3D_ALTITUDE_M = 3.0
+OBSTACLE_CYLINDER_RADIUS_M = 0.3
+OBSTACLE_CYLINDER_HEIGHT_M = 5.0
 
 
 def _load_icon(path):
@@ -168,6 +176,7 @@ class TypeFly:
         self.anchor_provider = AnchorGeometryProvider()
         self._drone_icon_image = _load_icon(DRONE_ICON_PATH)
         self._obstacle_icon_image = _load_icon(OBSTACLE_ICON_PATH)
+        self._uav_3d_icon_image = _load_icon(UAV_3D_ICON_PATH)
         self.benchmark_progress = {
             "order": list(BENCHMARK_CHECKPOINT_ORDER),
             "completed": set(),
@@ -246,6 +255,7 @@ class TypeFly:
                             "SCENE1",
                             "SCENE2",
                             "SCENE3",
+                            "SCENE4",
                         ) if sid in BASELINE_SCENES
                     ]
                     self.baseline_scene_selector = gr.Dropdown(
@@ -1628,6 +1638,94 @@ class TypeFly:
         plt.close(fig_xy)
         return Image.open(buf_xy)
 
+    def _draw_cylinder(self, ax, center_xy, radius=OBSTACLE_CYLINDER_RADIUS_M, height=OBSTACLE_CYLINDER_HEIGHT_M, color="#9E9E9E", alpha=0.55):
+        if center_xy is None:
+            return
+        cx, cy = float(center_xy[0]), float(center_xy[1])
+        theta = np.linspace(0, 2.0 * np.pi, 32)
+        z = np.linspace(0.0, float(height), 2)
+        theta_grid, z_grid = np.meshgrid(theta, z)
+        x_grid = cx + float(radius) * np.cos(theta_grid)
+        y_grid = cy + float(radius) * np.sin(theta_grid)
+        ax.plot_surface(x_grid, y_grid, z_grid, color=color, alpha=alpha, linewidth=0, antialiased=True, shade=True)
+        top_x = cx + float(radius) * np.cos(theta)
+        top_y = cy + float(radius) * np.sin(theta)
+        top_z = np.full_like(top_x, float(height))
+        ax.plot_trisurf(top_x, top_y, top_z, color=color, alpha=min(0.95, alpha + 0.15), linewidth=0)
+
+    def _render_c_zone_3d_view(self, snapshot, title="C Zone 3D View", figsize=(5, 4)):
+        positions = self._extract_ui_positions(snapshot)
+        fig = plt.figure(figsize=figsize)
+        ax = fig.add_subplot(111, projection="3d")
+        ax.view_init(elev=24, azim=-55)
+        xx, yy = np.meshgrid(np.linspace(0.0, 12.0, 2), np.linspace(0.0, 6.0, 2))
+        zz = np.zeros_like(xx)
+        ax.plot_surface(xx, yy, zz, color="#ECEFF1", alpha=0.25, linewidth=0, shade=False)
+
+        current_target = self.benchmark_progress.get("current_target")
+        active_progress = float(self.benchmark_progress.get("active_progress", 0.0))
+        for cid in ("C1", "C2", "C3", "C4", "C5", "C6"):
+            cp = BENCHMARK_CHECKPOINTS_BY_ID.get(cid)
+            if cp is None:
+                continue
+            if cid in self.benchmark_progress["completed"]:
+                color = "#2E7D32"
+            elif cid == current_target and active_progress > 0:
+                color = "#FB8C00"
+            else:
+                color = "#9E9E9E"
+            ax.scatter([cp.x], [cp.y], [0.0], c=color, s=28, depthshade=True)
+            ax.text(float(cp.x), float(cp.y), 0.2, cid, fontsize=8, color="#37474F")
+
+        gt_history = self._trajectory_xy_history()
+        if len(gt_history) >= 2:
+            ax.plot(
+                [p[0] for p in gt_history],
+                [p[1] for p in gt_history],
+                [UAV_3D_ALTITUDE_M for _ in gt_history],
+                color="#0B57D0",
+                linewidth=1.5,
+                alpha=0.8,
+                label="UAV trajectory",
+            )
+
+        obstacles = snapshot.get("obstacles") or []
+        for obstacle in obstacles:
+            xy = obstacle.get("ui_xy") or obstacle.get("est_xy_bias_corrected") or obstacle.get("gt_xy")
+            if xy is None:
+                continue
+            self._draw_cylinder(ax, xy)
+            ax.text(float(xy[0]), float(xy[1]), OBSTACLE_CYLINDER_HEIGHT_M + 0.1, self._display_obstacle_id(obstacle.get("id")), fontsize=8, color="#263238")
+
+        drone_xy = positions.get("drone_gt") or positions.get("drone_est")
+        if drone_xy is not None:
+            ux, uy = float(drone_xy[0]), float(drone_xy[1])
+            ax.scatter([ux], [uy], [UAV_3D_ALTITUDE_M], c="#0B57D0", s=40, label="UAV")
+            ax.text(ux, uy, UAV_3D_ALTITUDE_M + 0.12, "UAV", fontsize=8, color="#0B57D0")
+            if self._uav_3d_icon_image is not None:
+                x2d, y2d, _ = proj3d.proj_transform(ux, uy, UAV_3D_ALTITUDE_M, ax.get_proj())
+                icon = OffsetImage(np.asarray(self._uav_3d_icon_image), zoom=0.08)
+                ab = AnnotationBbox(icon, (x2d, y2d), xycoords="data", frameon=False)
+                ax.add_artist(ab)
+
+        ax.set_xlim(0.0, 12.0)
+        ax.set_ylim(0.0, 6.0)
+        ax.set_zlim(0.0, 5.5)
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
+        ax.set_zlabel("Z (m)")
+        ax.set_title(title)
+        ax.grid(True, linestyle="--", linewidth=0.5)
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            dedup = dict(zip(labels, handles))
+            ax.legend(dedup.values(), dedup.keys(), fontsize=8, loc="upper right")
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png')
+        buf.seek(0)
+        plt.close(fig)
+        return Image.open(buf)
+
     def update_workspace_plots(self, snapshot, show_error_ellipse=False, show_raw_estimate=False):
         positions = self._extract_ui_positions(snapshot)
         dynamic_xlim, dynamic_ylim = self._axis_limits_from_snapshot(snapshot)
@@ -1638,16 +1736,24 @@ class TypeFly:
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
 
-        global_xy = self._render_xy_view(
-            snapshot=snapshot,
-            xlim=(0.0, 12.0),
-            ylim=(0.0, 12.0),
-            title="Global XY Map (Fixed 0-12m Workspace)",
-            figsize=(10, 8),
-            show_legend=True,
-            show_error_ellipse=show_error_ellipse,
-            show_raw_estimate=show_raw_estimate,
-        )
+        current_scene_id = str(snapshot.get("baseline_scene_id", getattr(self.llm_controller, "baseline_scene_id", "")) or "").upper()
+        if current_scene_id == "SCENE4":
+            global_xy = self._render_c_zone_3d_view(
+                snapshot=snapshot,
+                title="C Zone 3D View",
+                figsize=(10, 8),
+            )
+        else:
+            global_xy = self._render_xy_view(
+                snapshot=snapshot,
+                xlim=(0.0, 12.0),
+                ylim=(0.0, 12.0),
+                title="Global XY Map (Fixed 0-12m Workspace)",
+                figsize=(10, 8),
+                show_legend=True,
+                show_error_ellipse=show_error_ellipse,
+                show_raw_estimate=show_raw_estimate,
+            )
         local_xy = self._render_xy_view(
             snapshot=snapshot,
             xlim=dynamic_xlim,
