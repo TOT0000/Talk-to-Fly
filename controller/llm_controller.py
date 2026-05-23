@@ -3832,7 +3832,7 @@ class LLMController():
     def _simulate_obstacle_returns(self, obstacle_states, now: float):
         _ = now
         states = list(obstacle_states or [])
-        if self.get_baseline_scene().id != "SCENE_MANUAL_OBSTACLE_CONTROL":
+        if self.get_baseline_scene().id not in {"SCENE_MANUAL_OBSTACLE_CONTROL", "SCENE_MANUAL_WORKER_CONTROL"}:
             return states
         updated_states = []
         for state in states:
@@ -4352,7 +4352,7 @@ class LLMController():
                     ),
                     "ui_xy": (
                         tuple(float(v) for v in obs.gt_xy)
-                        if self.get_baseline_scene().id == "SCENE_MANUAL_OBSTACLE_CONTROL"
+                        if self.get_baseline_scene().id in {"SCENE_MANUAL_OBSTACLE_CONTROL", "SCENE_MANUAL_WORKER_CONTROL"}
                         else (
                             float(obs.localization_packet.estimated_position_3d[0] - obs.localization_packet.b_xy[0]),
                             float(obs.localization_packet.estimated_position_3d[1] - obs.localization_packet.b_xy[1]),
