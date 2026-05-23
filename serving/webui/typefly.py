@@ -100,10 +100,10 @@ class TypeFly:
         self.robot_type = controller_robot_type
         self.selected_baseline_id = normalize_pipeline_id(os.getenv("TYPEFLY_BASELINE_ID", "baseline1"))
         self.planning_agent_model_id = str(
-            os.getenv("TYPEFLY_MANUAL_PLANNER_MODEL", "") or self.llm_controller.planner.model_name
+            os.getenv("TYPEFLY_MANUAL_PLANNER_MODEL", "")
         ).strip()
         self.evaluator_model_id = str(
-            os.getenv("TYPEFLY_MANUAL_EVALUATOR_MODEL", "") or self.llm_controller.planner.evaluator_model_name
+            os.getenv("TYPEFLY_MANUAL_EVALUATOR_MODEL", "")
         ).strip()
         self.llm_controller.set_manual_agent_models(
             self.planning_agent_model_id,
@@ -204,13 +204,13 @@ class TypeFly:
                         gr.Markdown("### Pipeline Model / Trigger Settings")
                         self.planning_agent_model_input = gr.Textbox(
                             value=self.planning_agent_model_id,
-                            label="Planning model",
-                            placeholder="e.g. google/gemma-2-9b",
+                            label="Planning agent model",
+                            placeholder="留空 = OpenAI gpt-4o；輸入值 = LM Studio model id",
                         )
                         self.evaluator_model_input = gr.Textbox(
                             value=self.evaluator_model_id,
                             label="Evaluator model",
-                            placeholder="e.g. deepseek/deepseek-r1-0528-qwen3-8b",
+                            placeholder="留空 = OpenAI gpt-4o；輸入值 = LM Studio model id",
                             visible=(self.selected_baseline_id == "agent"),
                         )
                         self.heartbeat_interval_input = gr.Number(
@@ -756,13 +756,21 @@ class TypeFly:
             warning_lines.append(f"- ⚠️ {warning}")
         if lm.get("error"):
             warning_lines.append(f"- ❌ lmstudio_error: `{lm.get('error')}`")
-        warning_block = "\n".join(warning_lines) if warning_lines else "- ✅ selected planning/evaluator models visible in `/v1/models`"
+        warning_block = "\n".join(warning_lines) if warning_lines else "- ✅ model routing checks passed"
+        planner_input = selected.get('planner_model_id', '')
+        evaluator_input = selected.get('evaluator_model_id', '')
+        planner_display_input = planner_input if planner_input else "(blank → OpenAI gpt-4o)"
+        evaluator_display_input = evaluator_input if evaluator_input else "(blank → OpenAI gpt-4o)"
 
         lines = ["### Agent Model Settings"]
         lines.append(f"- trigger mode: `{current_pipeline or 'n/a'}`")
-        lines.append(f"- planning agent model: `{selected.get('planner_model_id', '')}`")
+        lines.append(f"- planning agent model input: `{planner_display_input}`")
+        lines.append(f"- planning route provider: `{selected.get('planner_resolved_provider', 'n/a')}`")
+        lines.append(f"- planning route model: `{selected.get('planner_resolved_model', 'n/a')}`")
         if current_pipeline == "agent":
-            lines.append(f"- evaluator model: `{selected.get('evaluator_model_id', '')}`")
+            lines.append(f"- evaluator model input: `{evaluator_display_input}`")
+            lines.append(f"- evaluator route provider: `{selected.get('evaluator_resolved_provider', 'n/a')}`")
+            lines.append(f"- evaluator route model: `{selected.get('evaluator_resolved_model', 'n/a')}`")
             lines.append(f"- execution window after LLM response (seconds): `{self.llm_controller.heartbeat_interval_seconds}`")
         elif current_pipeline == "baseline2":
             lines.append(f"- execution window after LLM response (seconds): `{self.llm_controller.heartbeat_interval_seconds}`")
@@ -773,12 +781,16 @@ class TypeFly:
             f"- LM Studio base_url: `{lm.get('base_url', 'n/a')}`",
             f"- LM Studio api key: `{lm.get('api_key_masked', '(n/a)')}`",
             f"- LM Studio connected: `{bool(lm.get('connected'))}`",
+            f"- OPENAI_API_KEY present: `{bool(lm.get('openai_api_key_present'))}`",
             f"- visible model ids: {model_preview_text}",
             warning_block,
         ])
         return "\n".join(lines)
 
     def set_agent_models(self, planning_agent_model: str, evaluator_model: str, heartbeat_seconds=None):
+        print_debug(
+            f"[UI-MODEL] set_agent_models received planning={planning_agent_model!r} evaluator={evaluator_model!r}"
+        )
         selected = self.llm_controller.set_manual_agent_models(planning_agent_model, evaluator_model)
         self.llm_controller.set_manual_heartbeat_interval(heartbeat_seconds)
         self.planning_agent_model_id = selected.get("planner_model_id", "")
@@ -920,6 +932,9 @@ class TypeFly:
             self.mission_collision_count = 0
             framework_mode = MODE_TYPEFLY_ONESHOT
             self.llm_controller.set_selected_pipeline(self.selected_baseline_id)
+            print_debug(
+                f"[UI-MODEL] process_message using cached planning={self.planning_agent_model_id!r} evaluator={self.evaluator_model_id!r}"
+            )
             self.llm_controller.set_manual_agent_models(
                 self.planning_agent_model_id,
                 self.evaluator_model_id,

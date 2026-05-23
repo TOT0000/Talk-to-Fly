@@ -195,12 +195,8 @@ class LLMController():
         self.framework_mode = MODE_TYPEFLY_ONESHOT
         self.selected_pipeline_id = normalize_pipeline_id(os.getenv("TYPEFLY_BASELINE_ID", "baseline1"))
         self.archive_enabled = True
-        self.manual_planner_model_id = str(
-            os.getenv("TYPEFLY_MANUAL_PLANNER_MODEL", "") or self.planner.model_name
-        ).strip()
-        self.manual_evaluator_model_id = str(
-            os.getenv("TYPEFLY_MANUAL_EVALUATOR_MODEL", "") or self.planner.evaluator_model_name
-        ).strip()
+        self.manual_planner_model_id = str(os.getenv("TYPEFLY_MANUAL_PLANNER_MODEL", "") or "").strip()
+        self.manual_evaluator_model_id = str(os.getenv("TYPEFLY_MANUAL_EVALUATOR_MODEL", "") or "").strip()
         self._run_model_lock_active = False
         self._run_locked_models: Optional[dict] = None
         self.near_miss_count = 0
@@ -2977,6 +2973,10 @@ class LLMController():
                 "results_only": False,
                 "planner_model_id": selected_models.get("planner_model_id", ""),
                 "evaluator_model_id": selected_models.get("evaluator_model_id", ""),
+                "planner_resolved_provider": selected_models.get("planner_resolved_provider", ""),
+                "planner_resolved_model": selected_models.get("planner_resolved_model", ""),
+                "evaluator_resolved_provider": selected_models.get("evaluator_resolved_provider", ""),
+                "evaluator_resolved_model": selected_models.get("evaluator_resolved_model", ""),
                 "lmstudio_base_url": str(lmstudio_status.get("base_url") or ""),
                 "lmstudio_connected": bool(lmstudio_status.get("connected")),
                 "heartbeat_seconds": run_heartbeat_seconds,
@@ -2990,6 +2990,10 @@ class LLMController():
                 "planner_model_id": selected_models.get("planner_model_id", ""),
                 "heartbeat_model_id": selected_models.get("planner_model_id", ""),
                 "evaluator_model_id": selected_models.get("evaluator_model_id", ""),
+                "planner_resolved_provider": selected_models.get("planner_resolved_provider", ""),
+                "planner_resolved_model": selected_models.get("planner_resolved_model", ""),
+                "evaluator_resolved_provider": selected_models.get("evaluator_resolved_provider", ""),
+                "evaluator_resolved_model": selected_models.get("evaluator_resolved_model", ""),
             }
         )
         self.append_message('[TASK]: ' + task_description)
@@ -3458,6 +3462,10 @@ class LLMController():
         selected_models = self.get_selected_manual_agent_models()
         planner_model = str(selected_models.get("planner_model_id") or "")
         evaluator_model = str(selected_models.get("evaluator_model_id") or "")
+        planner_provider = str(selected_models.get("planner_resolved_provider") or "")
+        evaluator_provider = str(selected_models.get("evaluator_resolved_provider") or "")
+        planner_resolved_model = str(selected_models.get("planner_resolved_model") or "")
+        evaluator_resolved_model = str(selected_models.get("evaluator_resolved_model") or "")
         status = {
             "provider": provider,
             "base_url": base_url,
@@ -3468,10 +3476,22 @@ class LLMController():
             "error": "",
             "planner_model_id": planner_model,
             "evaluator_model_id": evaluator_model,
+            "planner_resolved_provider": planner_provider,
+            "evaluator_resolved_provider": evaluator_provider,
+            "planner_resolved_model": planner_resolved_model,
+            "evaluator_resolved_model": evaluator_resolved_model,
+            "openai_api_key_present": bool(str(os.getenv("OPENAI_API_KEY", "")).strip()),
             "planner_visible": None,
             "evaluator_visible": None,
             "warnings": [],
         }
+        if planner_provider == "openai" and not status["openai_api_key_present"]:
+            status["warnings"].append("planning_openai_key_missing(OPENAI_API_KEY)")
+        if evaluator_provider == "openai" and not status["openai_api_key_present"]:
+            status["warnings"].append("evaluator_openai_key_missing(OPENAI_API_KEY)")
+        needs_lmstudio_probe = (planner_provider == "lmstudio") or (evaluator_provider == "lmstudio")
+        if not needs_lmstudio_probe:
+            return status
         if provider != "lmstudio":
             status["error"] = f"provider_not_lmstudio(provider={provider or 'unknown'})"
             return status
@@ -3511,12 +3531,14 @@ class LLMController():
             if not status["connected"]:
                 status["error"] = "no_models_in_/v1/models"
             visible = set(model_ids)
-            status["planner_visible"] = planner_model in visible
-            status["evaluator_visible"] = evaluator_model in visible
-            if planner_model and (planner_model not in visible):
-                status["warnings"].append(f"planning_agent_model_not_visible({planner_model})")
-            if evaluator_model and (evaluator_model not in visible):
-                status["warnings"].append(f"evaluator_model_not_visible({evaluator_model})")
+            if planner_provider == "lmstudio":
+                status["planner_visible"] = planner_resolved_model in visible
+                if planner_resolved_model and (planner_resolved_model not in visible):
+                    status["warnings"].append(f"planning_agent_model_not_visible({planner_resolved_model})")
+            if evaluator_provider == "lmstudio":
+                status["evaluator_visible"] = evaluator_resolved_model in visible
+                if evaluator_resolved_model and (evaluator_resolved_model not in visible):
+                    status["warnings"].append(f"evaluator_model_not_visible({evaluator_resolved_model})")
         except urllib_error.URLError as exc:
             status["error"] = f"url_error:{exc}"
         except Exception as exc:
@@ -3524,16 +3546,27 @@ class LLMController():
         return status
 
     def get_selected_manual_agent_models(self) -> dict:
+        planner_raw = str(self.manual_planner_model_id or "")
+        evaluator_raw = str(self.manual_evaluator_model_id or "")
         return {
-            "planner_model_id": str(self.manual_planner_model_id or ""),
-            "evaluator_model_id": str(self.manual_evaluator_model_id or ""),
+            "planner_model_id": planner_raw,
+            "evaluator_model_id": evaluator_raw,
+            "planner_resolved_provider": ("openai" if planner_raw.strip() == "" else "lmstudio"),
+            "planner_resolved_model": (os.getenv("OPENAI_DEFAULT_MODEL", "gpt-4o") if planner_raw.strip() == "" else planner_raw.strip()),
+            "evaluator_resolved_provider": ("openai" if evaluator_raw.strip() == "" else "lmstudio"),
+            "evaluator_resolved_model": (os.getenv("OPENAI_DEFAULT_MODEL", "gpt-4o") if evaluator_raw.strip() == "" else evaluator_raw.strip()),
         }
 
     def set_manual_agent_models(self, planner_model_id: str, evaluator_model_id: str) -> dict:
         if bool(self._run_model_lock_active) and self._run_locked_models:
             return dict(self._run_locked_models)
-        planner_model = str(planner_model_id or "gpt-4o").strip() or "gpt-4o"
-        evaluator_model = str(evaluator_model_id or "gpt-4o").strip() or "gpt-4o"
+        planner_model = str(planner_model_id or "").strip()
+        evaluator_model = str(evaluator_model_id or "").strip()
+        print_debug(
+            "[MODEL-SET] "
+            f"planner_input={planner_model_id!r} evaluator_input={evaluator_model_id!r} "
+            f"planner_trimmed={planner_model!r} evaluator_trimmed={evaluator_model!r}"
+        )
         self.manual_planner_model_id = planner_model
         self.manual_evaluator_model_id = evaluator_model
         self.planner.set_model(planner_model)
@@ -3541,10 +3574,14 @@ class LLMController():
             heartbeat_model_name=planner_model,
             evaluator_model_name=evaluator_model,
         )
-        return {
-            "planner_model_id": planner_model,
-            "evaluator_model_id": evaluator_model,
-        }
+        print_debug(
+            "[MODEL-SET] "
+            f"manual_planner={self.manual_planner_model_id!r} manual_evaluator={self.manual_evaluator_model_id!r} "
+            f"planner.model_name={self.planner.model_name!r} "
+            f"planner.heartbeat_model_name={self.planner.heartbeat_model_name!r} "
+            f"planner.evaluator_model_name={self.planner.evaluator_model_name!r}"
+        )
+        return self.get_selected_manual_agent_models()
 
 
     def set_manual_heartbeat_interval(self, heartbeat_seconds) -> float:
