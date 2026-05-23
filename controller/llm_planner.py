@@ -17,13 +17,13 @@ COLLISION_PROBABILITY_REPLAN_THRESHOLD = 0.70
 class LLMPlanner():
     def __init__(self, robot_type: RobotType):
         self.llm = LLMWrapper()
-        self.model_name = GPT4
+        self.model_name = ""
         heartbeat_model_env = str(os.getenv("TYPEFLY_HEARTBEAT_MODEL", "") or "").strip()
         evaluator_model_env = str(os.getenv("TYPEFLY_EVALUATOR_MODEL", "") or "").strip()
         self._heartbeat_model_explicit = bool(heartbeat_model_env)
         self._evaluator_model_explicit = bool(evaluator_model_env)
-        self.heartbeat_model_name = (heartbeat_model_env if heartbeat_model_env else self.model_name)
-        self.evaluator_model_name = (evaluator_model_env if evaluator_model_env else self.model_name)
+        self.heartbeat_model_name = heartbeat_model_env
+        self.evaluator_model_name = evaluator_model_env
         self.controller = None  # 後續由 controller.llm_controller 綁定
 
         type_folder_name = 'tello'
@@ -85,7 +85,7 @@ class LLMPlanner():
         self.example_variant_assets = self._build_example_variant_assets(type_folder_name)
     def set_model(self, model_name):
         old_default = self.model_name
-        self.model_name = model_name
+        self.model_name = str(model_name or "").strip()
         if not self._heartbeat_model_explicit and self.heartbeat_model_name == old_default:
             self.heartbeat_model_name = self.model_name
         if not self._evaluator_model_explicit and self.evaluator_model_name == old_default:
@@ -102,13 +102,13 @@ class LLMPlanner():
             self.heartbeat_model_name = hb
             self._heartbeat_model_explicit = True
         else:
-            self.heartbeat_model_name = self.model_name
+            self.heartbeat_model_name = ""
             self._heartbeat_model_explicit = False
         if ev:
             self.evaluator_model_name = ev
             self._evaluator_model_explicit = True
         else:
-            self.evaluator_model_name = self.model_name
+            self.evaluator_model_name = ""
             self._evaluator_model_explicit = False
 
     @staticmethod

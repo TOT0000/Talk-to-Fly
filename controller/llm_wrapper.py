@@ -127,38 +127,57 @@ class LLMWrapper:
             f"default_model={_provider_default_model(self.provider)}"
         )
 
+    def _resolve_request_route(self, model_name) -> dict:
+        raw = "" if model_name is None else str(model_name).strip()
+        if raw == "":
+            return {
+                "provider": "openai",
+                "model": os.getenv("OPENAI_DEFAULT_MODEL", "gpt-4o"),
+                "base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+                "api_key": os.getenv("OPENAI_API_KEY", "").strip(),
+                "key_source": "OPENAI_API_KEY",
+                "model_source": "empty_ui_default_openai",
+            }
+        return {
+            "provider": "lmstudio",
+            "model": raw,
+            "base_url": os.getenv("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1"),
+            "api_key": os.getenv("LMSTUDIO_API_KEY", "lmstudio").strip(),
+            "key_source": "LMSTUDIO_API_KEY",
+            "model_source": "ui_input_lmstudio",
+        }
+
     def request(self, prompt, model_name=GEMINI_MODEL, stream=False) -> str | Stream[ChatCompletion.ChatCompletionChunk]:
-        selected_model = str(model_name or _provider_default_model(self.provider))
-        # Provider/model safety guard to avoid mismatches.
-        if self.provider == "gemini" and selected_model.lower().startswith("gpt-"):
-            selected_model = GEMINI_DEFAULT_MODEL
-        elif self.provider == "openai" and selected_model.lower().startswith("gemini-"):
-            selected_model = OPENAI_DEFAULT_MODEL
-        print_debug(
-            f"[LLM] provider={self.provider}"
-        )
-        print_debug(
-            f"[LLM] base_url={self.base_url}"
-        )
-        print_debug(
-            f"[LLM] model_name={selected_model}"
-        )
-        print_debug(
-            f"[LLM] key_source={self.key_source}"
-        )
+        route = self._resolve_request_route(model_name)
+        provider = str(route["provider"])
+        selected_model = str(route["model"])
+        base_url = str(route["base_url"])
+        api_key = str(route["api_key"])
+        key_source = str(route["key_source"])
+        model_source = str(route["model_source"])
+        if provider == "openai" and not api_key:
+            raise RuntimeError("missing_openai_api_key_for_default_gpt4o")
+        client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        print_debug(f"[LLM] route_provider={provider}")
+        print_debug(f"[LLM] route_model={selected_model}")
+        print_debug(f"[LLM] route_base_url={base_url}")
+        print_debug(f"[LLM] route_key_source={key_source}")
+        print_debug(f"[LLM] model_source={model_source}")
 
         with open(chat_log_path, "a") as f:
             f.write(prompt + "\n---\n")
         print_debug(f"[LLM] Prompt written to {chat_log_path}")
         
         try:
-            response = self.client.chat.completions.create(
+            response = client.chat.completions.create(
                 model=selected_model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=self.temperature,
                 stream=stream,
             )
         except Exception as exc:
+            if provider == "lmstudio":
+                print_debug(f"[LLM-ERROR] provider=lmstudio base_url={base_url} model={selected_model} error={exc}")
             message = str(exc or "")
             if "Missing or invalid Authorization header." in message:
                 raise RuntimeError("invalid_authorization_header") from exc
