@@ -1180,6 +1180,13 @@ class TypeFly:
             return "(n/a)"
         return f"({value[0]:.3f}, {value[1]:.3f}, {value[2]:.3f})"
 
+    @staticmethod
+    def _display_obstacle_id(value) -> str:
+        text = str(value or "")
+        if text.startswith("worker_"):
+            return "obstacle_" + text.split("worker_", 1)[1]
+        return text
+
     def _fmt_float(self, value, suffix=""):
         if value is None:
             return "n/a"
@@ -1374,7 +1381,7 @@ class TypeFly:
             f"- active zones: {', '.join(sorted(z.replace('zone_', '') for z in self.objective_state.get('active_zone_ids', set())))}",
             f"- active checkpoints: {len(active_ids)}",
             f"- predicted_collision_probability: {self._fmt_prob(getattr(safety_context, 'predicted_collision_probability', 0.0))}",
-            f"- dominant risky obstacle: {getattr(safety_context, 'dominant_threat_id', 'n/a')}",
+            f"- dominant risky obstacle: {self._display_obstacle_id(getattr(safety_context, 'dominant_threat_id', 'n/a'))}",
             f"- current target checkpoint: {target}",
             f"- checkpoint progress: {completed_active}/{total}",
             f"- zone progress: {', '.join(zone_parts) if zone_parts else 'n/a'}",
@@ -1411,8 +1418,9 @@ class TypeFly:
         ]
         for obstacle_id in ("obstacle_1", "obstacle_2", "obstacle_3"):
             obstacle = obstacle_map.get(obstacle_id)
-            lines.append(f"- {obstacle_id} true: {_fmt_xy(None if obstacle is None else obstacle.get('gt_xy'))}")
-            lines.append(f"- {obstacle_id} est: {_fmt_xy(None if obstacle is None else obstacle.get('est_xy_bias_corrected'))}")
+            label = self._display_obstacle_id(obstacle_id)
+            lines.append(f"- {label} true: {_fmt_xy(None if obstacle is None else obstacle.get('gt_xy'))}")
+            lines.append(f"- {label} est: {_fmt_xy(None if obstacle is None else obstacle.get('est_xy_bias_corrected'))}")
         return "\n".join(lines)
 
     def _estimate_heading_from_history(self, primary_key: str, fallback_key: str = None):
@@ -1518,7 +1526,7 @@ class TypeFly:
             gt_xy = obstacle.get("gt_xy")
             est_xy = obstacle.get("est_xy_bias_corrected")
             ui_xy = obstacle.get("ui_xy") or est_xy or gt_xy
-            wid = obstacle.get("id")
+            wid = self._display_obstacle_id(obstacle.get("id"))
             if gt_xy is not None:
                 ax_xy.add_patch(Circle((gt_xy[0], gt_xy[1]), OBSTACLE_RADIUS_M, fill=False, edgecolor="#7B1FA2", linewidth=1.8))
             if ui_xy is not None:
