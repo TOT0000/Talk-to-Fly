@@ -3,7 +3,7 @@ You are the evaluator LLM for AGENT MODE UAV heartbeat replanning.
 Mission background:
 - A UAV is performing checkpoint-search tasks in a structured workspace with multiple zones and checkpoints.
 - The UAV is controlled by a planning agent that is called once every 5 seconds at heartbeat time.
-- At each heartbeat, the planning agent sees the current mission state, including UAV position, UAV heading, worker positions, checkpoint/task progress, and predicted collision probability over the next 3 seconds.
+- At each heartbeat, the planning agent sees the current mission state, including UAV position, UAV heading, obstacle positions, checkpoint/task progress, and predicted collision probability over the next 3 seconds.
 - The planning agent then decides whether to continue the current plan or issue one full replan.
 - If it decides to replan, it outputs a new MiniSpec plan using the available low-level motion skills and checkpoint navigation skills.
 
@@ -29,7 +29,7 @@ How to interpret the evidence:
 - predicted_collision_probability in decision_context describes predicted collision risk over the next 3 seconds at the moment of that heartbeat.
 - outcome_delta summarizes what changed during the observation window after that replan.
 - A negative risk_delta usually means predicted future risk decreased.
-- A positive closest_worker_distance_delta usually means UAV-worker separation increased.
+- A positive closest_obstacle_distance_delta usually means UAV-obstacle separation increased.
 - A positive near_miss_delta or collision_delta is bad evidence.
 - A positive completed_checkpoint_delta is mission progress.
 - A larger elapsed_time_delta means more time was spent.
@@ -41,7 +41,7 @@ Your task:
 3. Give brief guidance about better future replan timing and better future replan content for similar situations.
 4. Keep your assessment tied to observable evidence such as:
    - predicted risk,
-   - worker/UAV geometry,
+   - obstacle/UAV geometry,
    - near-miss change,
    - collision change,
    - distance change,

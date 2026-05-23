@@ -2,5 +2,5 @@
 - Each statement must end with ';'.
 - Allowed syntax: gc('ID'); mf(v); mb(v); ml(v); mr(v); tc(v); tu(v); d(v); lo('text');
 - If a checkpoint is intended to be completed, include d(2.0) at that checkpoint.
-- Judge safety with both predicted collision probability and UAV-worker geometry.
+- Judge safety with both predicted collision probability and UAV-obstacle geometry.
 - Scale preventive motion with risk severity.

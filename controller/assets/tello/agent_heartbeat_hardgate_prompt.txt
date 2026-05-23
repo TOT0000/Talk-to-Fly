@@ -14,7 +14,7 @@ Therefore, you must carefully balance both the timing of a replan and the conten
 
 The main risk signal is predicted_collision_probability, which means the collision probability over the next 3 seconds.
 If predicted_collision_probability > 0.7, you must output full_replan_plan.
-Even below 0.7, still evaluate UAV-worker geometry and heading to decide whether a proactive replan is safer than continuing.
+Even below 0.7, still evaluate UAV-obstacle geometry and heading to decide whether a proactive replan is safer than continuing.
 If a collision may happen, you must use preventive low-level avoidance actions such as ml/mr/mf/mb/tc/tu before continuing checkpoint progress.
 Avoidance amplitude must match severity.
 
@@ -30,9 +30,9 @@ Completed checkpoints: {completed_checkpoints}
 Unfinished checkpoints: {unfinished_checkpoints}
 UAV position: {uav_position}
 UAV heading: {uav_heading}
-Worker positions: {worker_positions}
+Obstacle positions: {obstacle_positions}
 predicted_collision_probability: {predicted_collision_probability}
-dominant risky worker: {dominant_worker}
+dominant risky obstacle: {dominant_obstacle}
 Current executing plan: {current_executing_plan}
 Queue progress: {queue_progress}
 Execution history: {execution_history}
