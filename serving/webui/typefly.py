@@ -42,8 +42,20 @@ from controller.benchmark_layout import (
 from gradio import Timer
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+ICON_DIR = os.path.join(CURRENT_DIR, "assets")
+DRONE_ICON_PATH = os.path.join(ICON_DIR, "drone.png")
+OBSTACLE_ICON_PATH = os.path.join(ICON_DIR, "obstacle.png")
 UI_TRAJECTORY_REFRESH_SECONDS = 0.25
 TRAJECTORY_HISTORY_MAX_POINTS = int(os.getenv("TYPEFLY_TRAJECTORY_HISTORY_MAX_POINTS", "100000"))
+
+
+def _load_icon(path):
+    try:
+        if os.path.exists(path):
+            return Image.open(path).convert("RGBA")
+    except Exception:
+        return None
+    return None
 
 
 class TypeFly:
@@ -154,6 +166,8 @@ class TypeFly:
             "user": {"main": "#C5221F", "light": "#F28B82"},
         }
         self.anchor_provider = AnchorGeometryProvider()
+        self._drone_icon_image = _load_icon(DRONE_ICON_PATH)
+        self._obstacle_icon_image = _load_icon(OBSTACLE_ICON_PATH)
         self.benchmark_progress = {
             "order": list(BENCHMARK_CHECKPOINT_ORDER),
             "completed": set(),
@@ -1464,6 +1478,26 @@ class TypeFly:
         pad = 0.5
         return (min(xs) - pad, max(xs) + pad), (min(ys) - pad, max(ys) + pad)
 
+    def _add_icon_extent(self, ax, xy, image, radius_m, zorder=6, rotation_deg=None):
+        if xy is None or image is None:
+            return False
+        x, y = float(xy[0]), float(xy[1])
+        r = float(radius_m)
+        img = image
+        if rotation_deg is not None:
+            try:
+                img = image.rotate(-float(rotation_deg), expand=True, resample=Image.BICUBIC)
+            except Exception:
+                img = image
+        ax.imshow(
+            img,
+            extent=(x - r, x + r, y - r, y + r),
+            zorder=zorder,
+            interpolation="bilinear",
+            aspect="auto",
+        )
+        return True
+
 
     def _render_xy_view(self, snapshot, xlim, ylim, title, figsize=(5, 4), show_legend=True, show_error_ellipse=False, show_raw_estimate=False):
         positions = self._extract_ui_positions(snapshot)
@@ -1515,9 +1549,18 @@ class TypeFly:
                 label="UAV est trajectory",
             )
         if drone_gt is not None:
-            ax_xy.add_patch(Circle((drone_gt[0], drone_gt[1]), UAV_RADIUS_M, fill=False, edgecolor="#0B57D0", linewidth=2.0, label="UAV true"))
+            added = self._add_icon_extent(
+                ax_xy,
+                drone_gt,
+                self._drone_icon_image,
+                UAV_RADIUS_M,
+                zorder=6,
+                rotation_deg=math.degrees(float(snapshot.get("drone_yaw_rad", 0.0) or 0.0)),
+            )
+            if not added:
+                ax_xy.scatter([drone_gt[0]], [drone_gt[1]], c="#0B57D0", s=42, label="UAV true")
         if drone_est is not None:
-            ax_xy.add_patch(Circle((drone_est[0], drone_est[1]), UAV_RADIUS_M, fill=False, edgecolor="#8AB4F8", linewidth=1.6, linestyle="--", label="UAV bias-corrected"))
+            ax_xy.scatter([drone_est[0]], [drone_est[1]], marker="x", c="#8AB4F8", s=24, label="UAV bias-corrected")
         if drone_gt is not None and drone_est is not None:
             ax_xy.plot([drone_gt[0], drone_est[0]], [drone_gt[1], drone_est[1]], color="#0B57D0", linewidth=0.8, alpha=0.8)
 
@@ -1527,10 +1570,10 @@ class TypeFly:
             est_xy = obstacle.get("est_xy_bias_corrected")
             ui_xy = obstacle.get("ui_xy") or est_xy or gt_xy
             wid = self._display_obstacle_id(obstacle.get("id"))
-            if gt_xy is not None:
-                ax_xy.add_patch(Circle((gt_xy[0], gt_xy[1]), OBSTACLE_RADIUS_M, fill=False, edgecolor="#7B1FA2", linewidth=1.8))
             if ui_xy is not None:
-                ax_xy.add_patch(Circle((ui_xy[0], ui_xy[1]), OBSTACLE_RADIUS_M, fill=False, edgecolor="#CE93D8", linewidth=1.3, linestyle="--"))
+                added = self._add_icon_extent(ax_xy, ui_xy, self._obstacle_icon_image, OBSTACLE_RADIUS_M, zorder=5)
+                if not added:
+                    ax_xy.scatter([ui_xy[0]], [ui_xy[1]], c="#7B1FA2", s=30)
                 ax_xy.text(ui_xy[0] + 0.08, ui_xy[1] + 0.08, str(wid), fontsize=8, color="#4A148C")
                 heading = float(obstacle.get("heading_yaw_rad", 0.0))
                 arrow_len = 0.45
