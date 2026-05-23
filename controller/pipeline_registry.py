@@ -37,7 +37,7 @@ PIPELINE_REGISTRY: Dict[str, PipelineConfig] = {
             "task_progress",
         ],
         use_output_example=True,
-        replan_cap=8,
+        replan_cap=15,
         archive_enabled_default=True,
     ),
     "baseline2": PipelineConfig(
@@ -58,7 +58,7 @@ PIPELINE_REGISTRY: Dict[str, PipelineConfig] = {
             "risk_summary",
         ],
         use_output_example=True,
-        replan_cap=8,
+        replan_cap=15,
         archive_enabled_default=True,
     ),
     "agent": PipelineConfig(
@@ -79,7 +79,7 @@ PIPELINE_REGISTRY: Dict[str, PipelineConfig] = {
             "risk_summary",
         ],
         use_output_example=True,
-        replan_cap=8,
+        replan_cap=15,
         archive_enabled_default=True,
     ),
     "baseline3": PipelineConfig(
@@ -100,7 +100,7 @@ PIPELINE_REGISTRY: Dict[str, PipelineConfig] = {
             "risk_summary",
         ],
         use_output_example=True,
-        replan_cap=8,
+        replan_cap=15,
         archive_enabled_default=True,
     ),
 }

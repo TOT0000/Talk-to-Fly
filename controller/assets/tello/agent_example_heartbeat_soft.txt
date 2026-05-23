@@ -3,7 +3,7 @@ Task: Complete zone_A search.
 Mission original plan: lo('agent initial low-risk efficient route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
 Current active plan: lo('agent initial low-risk efficient route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
 Latest full replan response (if any): none
-Full replans already used: 0 / 8
+Full replans already used: 0 / 15
 Completed checkpoints: ["A4"]
 Unfinished checkpoints: ["A1","A2","A3"]
 UAV position: (4.5, 8.3, 1.2)
@@ -22,7 +22,7 @@ Task: Complete zone_A search.
 Mission original plan: lo('agent initial route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
 Current active plan: lo('agent initial route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
 Latest full replan response (if any): lo('agent mild-risk shift');ml(0.3);tu(8);gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
-Full replans already used: 1 / 8
+Full replans already used: 1 / 15
 Completed checkpoints: ["A4"]
 Unfinished checkpoints: ["A1","A2","A3"]
 UAV position: (4.4, 8.5, 1.2)
@@ -49,7 +49,7 @@ Task: Complete zone_C search.
 Mission original plan: lo('agent initial route');gc('C1');d(2.0);gc('C3');d(2.0);gc('C4');d(2.0);gc('C5');d(2.0);
 Current active plan: lo('agent initial route');gc('C1');d(2.0);gc('C3');d(2.0);gc('C4');d(2.0);gc('C5');d(2.0);
 Latest full replan response (if any): lo('agent previous mild detour');ml(0.3);tu(8);gc('C1');d(2.0);gc('C3');d(2.0);gc('C4');d(2.0);gc('C5');d(2.0);
-Full replans already used: 2 / 8
+Full replans already used: 2 / 15
 Completed checkpoints: ["C6","C2"]
 Unfinished checkpoints: ["C1","C3","C4","C5"]
 UAV position: (4.0, 8.9, 1.2)
