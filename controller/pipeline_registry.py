@@ -32,7 +32,7 @@ PIPELINE_REGISTRY: Dict[str, PipelineConfig] = {
         example_variant="baseline1_example",
         state_fields=[
             "uav_pose_heading",
-            "worker_positions",
+            "obstacle_positions",
             "remaining_checkpoints",
             "task_progress",
         ],
@@ -51,7 +51,7 @@ PIPELINE_REGISTRY: Dict[str, PipelineConfig] = {
         example_variant="baseline2_example",
         state_fields=[
             "uav_pose_heading",
-            "worker_positions",
+            "obstacle_positions",
             "remaining_checkpoints",
             "task_progress",
             "predicted_collision_probability",
@@ -72,7 +72,7 @@ PIPELINE_REGISTRY: Dict[str, PipelineConfig] = {
         example_variant="agent_example",
         state_fields=[
             "uav_pose_heading",
-            "worker_positions",
+            "obstacle_positions",
             "remaining_checkpoints",
             "task_progress",
             "predicted_collision_probability",
@@ -93,7 +93,7 @@ PIPELINE_REGISTRY: Dict[str, PipelineConfig] = {
         example_variant="baseline3_example",
         state_fields=[
             "uav_pose_heading",
-            "worker_positions",
+            "obstacle_positions",
             "remaining_checkpoints",
             "task_progress",
             "predicted_collision_probability",

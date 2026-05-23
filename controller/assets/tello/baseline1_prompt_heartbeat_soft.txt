@@ -26,7 +26,7 @@ Completed checkpoints: {completed_checkpoints}
 Unfinished checkpoints: {unfinished_checkpoints}
 UAV position: {uav_position}
 UAV heading: {uav_heading}
-Worker positions: {worker_positions}
+Obstacle positions: {obstacle_positions}
 Current executing plan: {current_executing_plan}
 Queue progress: {queue_progress}
 Execution history: {execution_history}

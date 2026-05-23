@@ -21,7 +21,7 @@ Continuation context:
 TypeFly replan requirements:
 - Explicit replan threshold = 0.7.
 - The predicted collision probability refers to the collision risk over the next 3 seconds, not only the current instant.
-- Since replan has already been triggered, first determine what preventive avoidance behavior is needed from the predicted collision probability and the current UAV-worker geometry.
+- Since replan has already been triggered, first determine what preventive avoidance behavior is needed from the predicted collision probability and the current UAV-obstacle geometry.
 - Choose avoidance amplitude according to severity.
 - If the predicted collision probability is only mildly above threshold, a small preventive detour may be enough.
 - If the predicted collision probability is much higher or the geometry is clearly unsafe, use a larger and more conservative detour.
