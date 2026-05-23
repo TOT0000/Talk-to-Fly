@@ -1207,8 +1207,8 @@ class TypeFly:
     @staticmethod
     def _display_obstacle_id(value) -> str:
         text = str(value or "")
-        if text.startswith("worker_"):
-            return "obstacle_" + text.split("worker_", 1)[1]
+        if text.startswith("obstacle_"):
+            return "obstacle_" + text.split("obstacle_", 1)[1]
         return text
 
     def _fmt_float(self, value, suffix=""):

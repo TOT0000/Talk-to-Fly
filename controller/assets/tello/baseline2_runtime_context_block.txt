@@ -1,5 +1,5 @@
 Periodic risk-aware runtime context:
 - Use only MiniSpec actions: gc, mf, mb, ml, mr, tc, tu, d, lo.
 - Treat predicted_collision_probability as a 3-second future-risk signal.
-- Judge safety with both collision probability and UAV-worker geometry.
-- Use per-worker probabilities and dominant risky worker only to refine avoidance direction and size.
+- Judge safety with both collision probability and UAV-obstacle geometry.
+- Use per-obstacle probabilities and dominant risky obstacle only to refine avoidance direction and size.

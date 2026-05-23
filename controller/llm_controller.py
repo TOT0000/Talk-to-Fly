@@ -3681,8 +3681,8 @@ class LLMController():
         self.manual_obstacle_selection_id = candidate
         return self.manual_obstacle_selection_id
 
-    def set_manual_worker_selection(self, worker_id: str) -> str:
-        return self.set_manual_obstacle_selection(worker_id)
+    def set_manual_obstacle_selection(self, obstacle_id: str) -> str:
+        return self.set_manual_obstacle_selection(obstacle_id)
 
     def _reset_manual_obstacle_poses_from_scene(self, scene: BaselineScene):
         self.manual_obstacle_poses = {}
@@ -3720,7 +3720,7 @@ class LLMController():
             "yaw_deg": float(math.degrees(pose["yaw_rad"])),
         }
 
-    def move_selected_worker_relative(self, local_forward: float, local_right: float, step_m: float):
+    def move_selected_obstacle_relative(self, local_forward: float, local_right: float, step_m: float):
         return self.move_selected_obstacle_relative(local_forward=local_forward, local_right=local_right, step_m=step_m)
 
     def turn_selected_obstacle(self, delta_deg: float):
@@ -3738,7 +3738,7 @@ class LLMController():
             "yaw_deg": float(math.degrees(pose["yaw_rad"])),
         }
 
-    def turn_selected_worker(self, delta_deg: float):
+    def turn_selected_obstacle(self, delta_deg: float):
         return self.turn_selected_obstacle(delta_deg)
 
     def set_active_scenario(self, scenario_name: str):

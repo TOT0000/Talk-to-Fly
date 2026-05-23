@@ -14,7 +14,7 @@ from .safety_envelope import build_safety_envelope, SafetyEnvelope2D
 from .benchmark_layout import (
     WORKER_DEFAULT_SPEED_MPS,
     CHECKPOINT_RADIUS_M,
-    WORKER_RADIUS_M,
+    OBSTACLE_RADIUS_M,
     BENCHMARK_CHECKPOINTS,
 )
 
@@ -166,12 +166,12 @@ _BASELINE_LOCALIZATION_ESTIMATOR = IterativeLeastSquaresEstimator3D()
 _SCENARIO_WORKER_MODE_SUMMARY = "[SCENARIO] zoneA=patrol zoneB=bottleneck zoneC=cross_traffic speed=0.4"
 
 
-def worker_mode_summary_log() -> str:
+def obstacle_mode_summary_log() -> str:
     return _SCENARIO_WORKER_MODE_SUMMARY
 
 
 def obstacle_mode_summary_log() -> str:
-    return worker_mode_summary_log()
+    return obstacle_mode_summary_log()
 
 
 def _build_localized_packet_from_anchor_pipeline(
@@ -236,19 +236,19 @@ def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float) -> List
         if scene.id == "SCENE_MANUAL_WORKER_CONTROL":
             gt_x, gt_y = (float(obstacle.gt_x), float(obstacle.gt_y))
         elif scene.id == "SCENE_FIXED_W13_MANUAL_W2":
-            if str(obstacle.id) == "worker_1":
+            if str(obstacle.id) == "obstacle_1":
                 gt_x, gt_y = (3.0, 4.0)
-            elif str(obstacle.id) == "worker_3":
+            elif str(obstacle.id) == "obstacle_3":
                 gt_x, gt_y = (7.0, 3.7)
             else:
-                # Keep worker_2 exactly at the manual-control scene default/static location.
+                # Keep obstacle_2 exactly at the manual-control scene default/static location.
                 gt_x, gt_y = (float(obstacle.gt_x), float(obstacle.gt_y))
         elif scene.id in {"SCENE3", "SCENE4"}:
             gt_x, gt_y = (float(obstacle.gt_x), float(obstacle.gt_y))
         else:
-            gt_x, gt_y = _scripted_worker_gt_xy(obstacle.id, now_s, fallback_xy=(obstacle.gt_x, obstacle.gt_y))
+            gt_x, gt_y = _scripted_obstacle_gt_xy(obstacle.id, now_s, fallback_xy=(obstacle.gt_x, obstacle.gt_y))
         gt = np.asarray([float(gt_x), float(gt_y), 0.0], dtype=float)
-        # deterministic seed per worker and 10Hz simulation tick.
+        # deterministic seed per obstacle and 10Hz simulation tick.
         seed = (hash(obstacle.id) & 0xFFFFFFFF) ^ int(max(0.0, now_s) * 10.0)
         rng = np.random.default_rng(seed)
         packet = _build_localized_packet_from_anchor_pipeline(
@@ -278,23 +278,23 @@ def compute_obstacle_envelope_states(scene: BaselineScene, now_s: float) -> List
     return states
 
 
-def _scripted_worker_gt_xy(worker_id: str, now_s: float, fallback_xy: Tuple[float, float]) -> Tuple[float, float]:
+def _scripted_obstacle_gt_xy(obstacle_id: str, now_s: float, fallback_xy: Tuple[float, float]) -> Tuple[float, float]:
     t = max(0.0, float(now_s))
-    if worker_id == "worker_3" and _debug_force_close_worker_enabled():
-        # Debug-only mode: force worker_3 near UAV start region to validate
+    if obstacle_id == "obstacle_3" and _debug_force_close_obstacle_enabled():
+        # Debug-only mode: force obstacle_3 near UAV start region to validate
         # collision-probability pipeline end-to-end.
         return (1.35, 1.0)
-    if worker_id == "worker_1":
+    if obstacle_id == "obstacle_1":
         # zone_A patrol loop that repeatedly traverses link corridors between checkpoints.
         waypoints = [(2.2, 10.0), (3.2, 10.8), (4.4, 9.2), (3.4, 8.0), (2.0, 8.8), (1.8, 9.8)]
         pt = _sample_polyline_loop(waypoints, speed_mps=WORKER_DEFAULT_SPEED_MPS, t=t, smooth_turn=True)
         return _avoid_checkpoint_overlap(pt)
-    if worker_id == "worker_2":
+    if obstacle_id == "obstacle_2":
         # zone_B bottleneck shuttle that repeatedly blocks inter-cluster channel.
         waypoints = [(6.7, 9.0), (8.5, 9.3), (10.9, 9.2), (8.5, 8.7), (6.7, 8.8)]
         pt = _sample_polyline_pingpong(waypoints, speed_mps=WORKER_DEFAULT_SPEED_MPS, t=t, smooth_turn=True)
         return _avoid_checkpoint_overlap(pt)
-    if worker_id == "worker_3":
+    if obstacle_id == "obstacle_3":
         # zone_C cross-traffic weaving route that cuts through common shortest paths.
         waypoints = [(0.8, 2.3), (3.2, 5.2), (6.1, 2.4), (8.9, 5.0), (11.4, 2.8), (8.7, 0.9), (5.4, 3.1), (2.3, 0.9)]
         pt = _sample_polyline_loop(waypoints, speed_mps=WORKER_DEFAULT_SPEED_MPS, t=t, smooth_turn=True)
@@ -338,8 +338,8 @@ def _sample_polyline_pingpong(waypoints: List[Tuple[float, float]], speed_mps: f
 
 def _avoid_checkpoint_overlap(point_xy: Tuple[float, float]) -> Tuple[float, float]:
     x, y = float(point_xy[0]), float(point_xy[1])
-    # Keep worker circle fully outside checkpoint circles.
-    hard_clearance = float(CHECKPOINT_RADIUS_M + WORKER_RADIUS_M + 0.02)
+    # Keep obstacle circle fully outside checkpoint circles.
+    hard_clearance = float(CHECKPOINT_RADIUS_M + OBSTACLE_RADIUS_M + 0.02)
     influence_radius = hard_clearance + 0.55
     for _ in range(3):
         push_x = 0.0
@@ -368,7 +368,7 @@ def _avoid_checkpoint_overlap(point_xy: Tuple[float, float]) -> Tuple[float, flo
     return (x, y)
 
 
-def _debug_force_close_worker_enabled() -> bool:
+def _debug_force_close_obstacle_enabled() -> bool:
     value = str(os.getenv("DEBUG_FORCE_CLOSE_WORKER", "false")).strip().lower()
     return value in {"1", "true", "yes", "on"}
 
@@ -501,11 +501,11 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
             TaskPoint("C", 1.7, 4.2, -1.5),
         ),
         obstacles=(
-            StaticObstacle("worker_1", 1.5, 10.5, cov_xy=((0.010, 0.000), (0.000, 0.008))),
-            StaticObstacle("worker_2", 8.5, 7.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
-            StaticObstacle("worker_3", 2.0, 3.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_1", 1.5, 10.5, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_2", 8.5, 7.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_3", 2.0, 3.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
         ),
-        notes="Deterministic benchmark demo scene with fixed workers and fixed checkpoint order.",
+        notes="Deterministic benchmark demo scene with fixed obstacles and fixed checkpoint order.",
     ),
     "SCENE_MANUAL_WORKER_CONTROL": BaselineScene(
         id="SCENE_MANUAL_WORKER_CONTROL",
@@ -519,11 +519,11 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
             TaskPoint("C", 1.7, 4.2, -1.5),
         ),
         obstacles=(
-            StaticObstacle("worker_1", 1.5, 10.5, cov_xy=((0.010, 0.000), (0.000, 0.008))),
-            StaticObstacle("worker_2", 8.5, 7.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
-            StaticObstacle("worker_3", 2.0, 3.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_1", 1.5, 10.5, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_2", 8.5, 7.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_3", 2.0, 3.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
         ),
-        notes="Manual worker-control scene: worker scripted motion is disabled and UI controls drive worker poses.",
+        notes="Manual obstacle-control scene: obstacle scripted motion is disabled and UI controls drive obstacle poses.",
     ),
     "SCENE_FIXED_W13_MANUAL_W2": BaselineScene(
         id="SCENE_FIXED_W13_MANUAL_W2",
@@ -537,11 +537,11 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
             TaskPoint("C", 1.7, 4.2, -1.5),
         ),
         obstacles=(
-            StaticObstacle("worker_1", 3.0, 4.0, cov_xy=((0.010, 0.000), (0.000, 0.008))),
-            StaticObstacle("worker_2", 8.5, 7.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
-            StaticObstacle("worker_3", 7.0, 3.7, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_1", 3.0, 4.0, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_2", 8.5, 7.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_3", 7.0, 3.7, cov_xy=((0.010, 0.000), (0.000, 0.008))),
         ),
-        notes="worker_1 fixed at (3,4), worker_3 fixed at (7,3.7); worker_2 stays at manual-control default location.",
+        notes="obstacle_1 fixed at (3,4), obstacle_3 fixed at (7,3.7); obstacle_2 stays at manual-control default location.",
     ),
     "SCENE1": BaselineScene(
         id="SCENE1",
@@ -555,9 +555,9 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
             TaskPoint("C", 1.7, 4.2, -1.5),
         ),
         obstacles=(
-            StaticObstacle("worker_1", 1.5, 10.5, cov_xy=((0.010, 0.000), (0.000, 0.008))),
-            StaticObstacle("worker_2", 8.5, 7.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
-            StaticObstacle("worker_3", 2.0, 3.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_1", 1.5, 10.5, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_2", 8.5, 7.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_3", 2.0, 3.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
         ),
         notes="scene1 based on SCENE_BENCHMARK_DEMO with UAV true start changed to (4,6).",
     ),
@@ -573,9 +573,9 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
             TaskPoint("C", 1.7, 4.2, -1.5),
         ),
         obstacles=(
-            StaticObstacle("worker_1", 1.5, 10.5, cov_xy=((0.010, 0.000), (0.000, 0.008))),
-            StaticObstacle("worker_2", 8.5, 7.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
-            StaticObstacle("worker_3", 2.0, 3.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_1", 1.5, 10.5, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_2", 8.5, 7.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_3", 2.0, 3.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
         ),
         notes="scene2 based on SCENE_BENCHMARK_DEMO with UAV true start changed to (6,6).",
     ),
@@ -591,11 +591,11 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
             TaskPoint("C", 1.7, 4.2, -1.5),
         ),
         obstacles=(
-            StaticObstacle("worker_1", 3.5, 3.0, cov_xy=((0.010, 0.000), (0.000, 0.008))),
-            StaticObstacle("worker_2", 9.5, 3.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
-            StaticObstacle("worker_3", 7.0, 2.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_1", 3.5, 3.0, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_2", 9.5, 3.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_3", 7.0, 2.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
         ),
-        notes="scene3 based on SCENE_FIXED_W13_MANUAL_W2 with worker true positions overridden.",
+        notes="scene3 based on SCENE_FIXED_W13_MANUAL_W2 with obstacle true positions overridden.",
     ),
     "SCENE4": BaselineScene(
         id="SCENE4",
@@ -612,11 +612,11 @@ BASELINE_SCENES: Dict[str, BaselineScene] = {
             TaskPoint("C6", 9.0, 5.0, -1.5),
         ),
         obstacles=(
-            StaticObstacle("worker_1", 3.5, 3.0, cov_xy=((0.010, 0.000), (0.000, 0.008))),
-            StaticObstacle("worker_2", 9.5, 3.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
-            StaticObstacle("worker_3", 7.0, 2.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_1", 3.5, 3.0, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_2", 9.5, 3.8, cov_xy=((0.010, 0.000), (0.000, 0.008))),
+            StaticObstacle("obstacle_3", 7.0, 2.2, cov_xy=((0.010, 0.000), (0.000, 0.008))),
         ),
-        notes="scene4 zone_C-focused visualization scene; reuses SCENE3 worker placement.",
+        notes="scene4 zone_C-focused visualization scene; reuses SCENE3 obstacle placement.",
     ),
     "SCENE_1_CLEAR_PATH": BaselineScene(
         id="SCENE_1_CLEAR_PATH",
