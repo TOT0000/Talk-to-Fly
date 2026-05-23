@@ -24,12 +24,25 @@ def test_wrapper_nonempty_model_routes_lmstudio(monkeypatch):
     assert route["provider"] == "lmstudio"
     assert route["model"] == "google/gemma-4-e4b"
 
+def test_wrapper_gpt_model_routes_openai(monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    route = LLMWrapper()._resolve_request_route("gpt-4o")
+    assert route["provider"] == "openai"
+    assert route["model"] == "gpt-4o"
+
 
 def test_wrapper_ignores_llm_provider_env(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "lmstudio")
     assert LLMWrapper()._resolve_request_route("")["provider"] == "openai"
     monkeypatch.setenv("LLM_PROVIDER", "openai")
     assert LLMWrapper()._resolve_request_route("google/gemma-4-e4b")["provider"] == "lmstudio"
+
+
+def test_wrapper_openai_base_url_local_kept_visible(monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:1234/v1")
+    route = LLMWrapper()._resolve_request_route("")
+    assert route["provider"] == "openai"
+    assert route["base_url"] == "http://127.0.0.1:1234/v1"
 
 
 def test_manual_agent_mixed_routing_resolution(monkeypatch):

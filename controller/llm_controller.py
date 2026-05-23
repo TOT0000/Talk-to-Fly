@@ -3562,12 +3562,24 @@ class LLMController():
             return dict(self._run_locked_models)
         planner_model = str(planner_model_id or "").strip()
         evaluator_model = str(evaluator_model_id or "").strip()
+        print_debug(
+            "[MODEL-SET] "
+            f"planner_input={planner_model_id!r} evaluator_input={evaluator_model_id!r} "
+            f"planner_trimmed={planner_model!r} evaluator_trimmed={evaluator_model!r}"
+        )
         self.manual_planner_model_id = planner_model
         self.manual_evaluator_model_id = evaluator_model
         self.planner.set_model(planner_model)
         self.planner.set_agent_model_names(
             heartbeat_model_name=planner_model,
             evaluator_model_name=evaluator_model,
+        )
+        print_debug(
+            "[MODEL-SET] "
+            f"manual_planner={self.manual_planner_model_id!r} manual_evaluator={self.manual_evaluator_model_id!r} "
+            f"planner.model_name={self.planner.model_name!r} "
+            f"planner.heartbeat_model_name={self.planner.heartbeat_model_name!r} "
+            f"planner.evaluator_model_name={self.planner.evaluator_model_name!r}"
         )
         return self.get_selected_manual_agent_models()
 

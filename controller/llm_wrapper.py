@@ -126,17 +126,33 @@ class LLMWrapper:
             f"base_url={self.base_url} "
             f"default_model={_provider_default_model(self.provider)}"
         )
+        self._last_route_info = {}
 
     def _resolve_request_route(self, model_name) -> dict:
         raw = "" if model_name is None else str(model_name).strip()
+        raw_lower = raw.lower()
+        openai_base_url = str(os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1") or "").strip() or "https://api.openai.com/v1"
+        if ("127.0.0.1" in openai_base_url) or ("localhost" in openai_base_url) or ("172." in openai_base_url):
+            print_debug("[LLM-ROUTE-WARN] OPENAI_BASE_URL appears to point to local/LM Studio; gpt model may be sent to local server")
         if raw == "":
             return {
                 "provider": "openai",
                 "model": os.getenv("OPENAI_DEFAULT_MODEL", "gpt-4o"),
-                "base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+                "base_url": openai_base_url,
                 "api_key": os.getenv("OPENAI_API_KEY", "").strip(),
                 "key_source": "OPENAI_API_KEY",
                 "model_source": "empty_ui_default_openai",
+                "raw": raw,
+            }
+        if raw_lower.startswith("gpt-"):
+            return {
+                "provider": "openai",
+                "model": raw,
+                "base_url": openai_base_url,
+                "api_key": os.getenv("OPENAI_API_KEY", "").strip(),
+                "key_source": "OPENAI_API_KEY",
+                "model_source": "gpt_prefix_openai",
+                "raw": raw,
             }
         return {
             "provider": "lmstudio",
@@ -145,9 +161,13 @@ class LLMWrapper:
             "api_key": os.getenv("LMSTUDIO_API_KEY", "lmstudio").strip(),
             "key_source": "LMSTUDIO_API_KEY",
             "model_source": "ui_input_lmstudio",
+            "raw": raw,
         }
 
-    def request(self, prompt, model_name=GEMINI_MODEL, stream=False) -> str | Stream[ChatCompletion.ChatCompletionChunk]:
+    def get_last_route_info(self) -> dict:
+        return dict(self._last_route_info or {})
+
+    def request(self, prompt, model_name=None, stream=False) -> str | Stream[ChatCompletion.ChatCompletionChunk]:
         route = self._resolve_request_route(model_name)
         provider = str(route["provider"])
         selected_model = str(route["model"])
@@ -155,9 +175,29 @@ class LLMWrapper:
         api_key = str(route["api_key"])
         key_source = str(route["key_source"])
         model_source = str(route["model_source"])
+        raw = str(route.get("raw", ""))
         if provider == "openai" and not api_key:
             raise RuntimeError("missing_openai_api_key_for_default_gpt4o")
         client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        self._last_route_info = {
+            "input_model_name": (None if model_name is None else str(model_name)),
+            "raw": raw,
+            "provider": provider,
+            "model": selected_model,
+            "base_url": base_url,
+            "key_source": key_source,
+            "model_source": model_source,
+        }
+        print_debug(f"[LLM-ROUTE] input_model_name={repr(model_name)}")
+        print_debug(f"[LLM-ROUTE] raw={repr(raw)}")
+        print_debug(f"[LLM-ROUTE] provider={provider}")
+        print_debug(f"[LLM-ROUTE] selected_model={selected_model}")
+        print_debug(f"[LLM-ROUTE] base_url={base_url}")
+        print_debug(f"[LLM-ROUTE] key_source={key_source}")
+        print_debug(f"[LLM-ROUTE] model_source={model_source}")
+        print_debug(f"[LLM-ROUTE] env_OPENAI_BASE_URL={os.getenv('OPENAI_BASE_URL')!r}")
+        print_debug(f"[LLM-ROUTE] env_LMSTUDIO_BASE_URL={os.getenv('LMSTUDIO_BASE_URL')!r}")
+        print_debug(f"[LLM-ROUTE] env_LLM_PROVIDER={os.getenv('LLM_PROVIDER')!r}")
         print_debug(f"[LLM] route_provider={provider}")
         print_debug(f"[LLM] route_model={selected_model}")
         print_debug(f"[LLM] route_base_url={base_url}")
@@ -176,8 +216,11 @@ class LLMWrapper:
                 stream=stream,
             )
         except Exception as exc:
-            if provider == "lmstudio":
-                print_debug(f"[LLM-ERROR] provider=lmstudio base_url={base_url} model={selected_model} error={exc}")
+            print_debug(
+                "[LLM-ERROR] "
+                f"provider={provider} model={selected_model} base_url={base_url} "
+                f"model_source={model_source} input_model_name={repr(model_name)} error={exc}"
+            )
             message = str(exc or "")
             if "Missing or invalid Authorization header." in message:
                 raise RuntimeError("invalid_authorization_header") from exc

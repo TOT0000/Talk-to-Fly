@@ -651,6 +651,7 @@ class LLMPlanner():
         print_debug(f"[P] Full prompt debug log: {chat_log_path}")
         request_start_ts = float(time.time())
         raw_response = self.llm.request(prompt, self.model_name, stream=False)
+        route_info = self.llm.get_last_route_info() if hasattr(self.llm, "get_last_route_info") else {}
         response_end_ts = float(time.time())
         latency_sec = max(0.0, response_end_ts - request_start_ts)
         llm_call_role = "replan" if is_replan_call else "initial_plan"
@@ -678,6 +679,11 @@ class LLMPlanner():
             "true_remaining_checkpoints": list(true_remaining_checkpoints),
             "current_target_checkpoint": current_target_checkpoint,
             "completion_state_source": "benchmark_progress/dwell_tracker",
+            "model_id_raw_input": str(self.model_name or ""),
+            "resolved_provider": str(route_info.get("provider", "")),
+            "resolved_model": str(route_info.get("model", "")),
+            "resolved_base_url": str(route_info.get("base_url", "")),
+            "model_source": str(route_info.get("model_source", "")),
         }
         return raw_response
 
@@ -791,6 +797,7 @@ class LLMPlanner():
             f"hard_gate={hard_gate}"
         )
         raw = str(self.llm.request(prompt, self.heartbeat_model_name, stream=False) or "").strip()
+        route_info = self.llm.get_last_route_info() if hasattr(self.llm, "get_last_route_info") else {}
         parsed, parsed_ok = self._parse_heartbeat_response_json(raw)
         if not parsed_ok:
             parsed = {"response": "continue", "reason": f"non_json_response:{raw[:120]}", "plan": ""}
@@ -814,6 +821,11 @@ class LLMPlanner():
             "use_output_example": bool(self.runtime_use_output_example),
             "source": "agent_heartbeat",
             "used_model_name": self.heartbeat_model_name,
+            "model_id_raw_input": str(self.heartbeat_model_name or ""),
+            "resolved_provider": str(route_info.get("provider", "")),
+            "resolved_model": str(route_info.get("model", "")),
+            "resolved_base_url": str(route_info.get("base_url", "")),
+            "model_source": str(route_info.get("model_source", "")),
         }
         return result
 
@@ -832,6 +844,7 @@ class LLMPlanner():
             f"outcome_delta:\n{json.dumps(replan_record.get('outcome_delta', {}), ensure_ascii=False, indent=2)}\n"
         )
         raw = str(self.llm.request(prompt, self.evaluator_model_name, stream=False) or "").strip()
+        route_info = self.llm.get_last_route_info() if hasattr(self.llm, "get_last_route_info") else {}
         parsed, parsed_ok = self._parse_agent_evaluator_json(raw)
         if not parsed_ok:
             parsed = {
@@ -849,6 +862,11 @@ class LLMPlanner():
             "parsed": parsed,
             "parsed_ok": bool(parsed_ok),
             "used_model_name": self.evaluator_model_name,
+            "model_id_raw_input": str(self.evaluator_model_name or ""),
+            "resolved_provider": str(route_info.get("provider", "")),
+            "resolved_model": str(route_info.get("model", "")),
+            "resolved_base_url": str(route_info.get("base_url", "")),
+            "model_source": str(route_info.get("model_source", "")),
         }
 
     @staticmethod

@@ -788,6 +788,9 @@ class TypeFly:
         return "\n".join(lines)
 
     def set_agent_models(self, planning_agent_model: str, evaluator_model: str, heartbeat_seconds=None):
+        print_debug(
+            f"[UI-MODEL] set_agent_models received planning={planning_agent_model!r} evaluator={evaluator_model!r}"
+        )
         selected = self.llm_controller.set_manual_agent_models(planning_agent_model, evaluator_model)
         self.llm_controller.set_manual_heartbeat_interval(heartbeat_seconds)
         self.planning_agent_model_id = selected.get("planner_model_id", "")
@@ -929,6 +932,9 @@ class TypeFly:
             self.mission_collision_count = 0
             framework_mode = MODE_TYPEFLY_ONESHOT
             self.llm_controller.set_selected_pipeline(self.selected_baseline_id)
+            print_debug(
+                f"[UI-MODEL] process_message using cached planning={self.planning_agent_model_id!r} evaluator={self.evaluator_model_id!r}"
+            )
             self.llm_controller.set_manual_agent_models(
                 self.planning_agent_model_id,
                 self.evaluator_model_id,
