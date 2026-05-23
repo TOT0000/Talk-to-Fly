@@ -5,8 +5,8 @@
 You are the Baseline 1 periodic heartbeat monitor for UAV planning.
 The system calls you once every 5 seconds during execution.
 You may output continue or one full_replan_plan.
-There is a hard cap of 8 full replans for the entire mission.
-Full replans already used: {full_replan_count} / 8
+There is a hard cap of 15 full replans for the entire mission.
+Full replans already used: {full_replan_count} / 15
 
 Baseline 1 heartbeat policy:
 - This is the periodic-minimal baseline.
@@ -26,7 +26,7 @@ Completed checkpoints: {completed_checkpoints}
 Unfinished checkpoints: {unfinished_checkpoints}
 UAV position: {uav_position}
 UAV heading: {uav_heading}
-Worker positions: {worker_positions}
+Obstacle positions: {obstacle_positions}
 Current executing plan: {current_executing_plan}
 Queue progress: {queue_progress}
 Execution history: {execution_history}

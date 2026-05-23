@@ -25,7 +25,7 @@ EVENTS_SHEET = "events"
 DEBUG_SHEET = "debug"
 DEFAULT_ARCHIVE_ROOT = "/home/jiafenli/typefly_logs_archive/archive/manual_runs"
 
-from .benchmark_layout import UAV_RADIUS_M, WORKER_RADIUS_M
+from .benchmark_layout import UAV_RADIUS_M, OBSTACLE_RADIUS_M
 
 NEAR_MISS_ENTER_DISTANCE_M = 1.0
 NEAR_MISS_EXIT_DISTANCE_M = 1.05
@@ -86,7 +86,7 @@ RUN_COLUMNS = [
     "json_parse_success_rate",
     "collision_count",
     "near_miss_count",
-    "min_uav_worker_distance_m",
+    "min_uav_obstacle_distance_m",
     "completed_checkpoints",
     "completion_ratio",
     "planner_model_id",
@@ -210,7 +210,7 @@ class _RunRecord:
     planning_trace: List[Dict] = field(default_factory=list)
     llm_call_count: int = 0
     near_miss_count: int = 0
-    min_uav_worker_distance_m: Optional[float] = None
+    min_uav_obstacle_distance_m: Optional[float] = None
     mission_success: Optional[bool] = None
     termination_reason: str = ""
     queue_exhausted_with_unfinished: bool = False
@@ -254,31 +254,31 @@ class TaskRunLogger:
 
     @classmethod
     def _recompute_proximity_metrics(cls, runtime_trace: List[Dict]) -> Dict:
-        collision_radius = float(UAV_RADIUS_M + WORKER_RADIUS_M)
+        collision_radius = float(UAV_RADIUS_M + OBSTACLE_RADIUS_M)
         collision_count = 0
         near_miss_count = 0
         min_distance = None
         collision_active: Dict[str, bool] = {}
         near_miss_active: Dict[str, bool] = {}
         prev_uav = None
-        prev_workers: Dict[str, Tuple[float, float]] = {}
+        prev_obstacles: Dict[str, Tuple[float, float]] = {}
         for row in list(runtime_trace or []):
             uav = row.get("drone_gt")
             if not (isinstance(uav, (list, tuple)) and len(uav) >= 2):
                 continue
             ux, uy = float(uav[0]), float(uav[1])
-            workers = {}
-            for worker in list(row.get("workers") or []):
-                wid = str(worker.get("id"))
-                gt_xy = worker.get("gt_xy")
+            obstacles = {}
+            for obstacle in list(row.get("obstacles") or []):
+                wid = str(obstacle.get("id"))
+                gt_xy = obstacle.get("gt_xy")
                 if wid and isinstance(gt_xy, (list, tuple)) and len(gt_xy) >= 2:
-                    workers[wid] = (float(gt_xy[0]), float(gt_xy[1]))
-            for wid, (wx, wy) in workers.items():
+                    obstacles[wid] = (float(gt_xy[0]), float(gt_xy[1]))
+            for wid, (wx, wy) in obstacles.items():
                 d_now = float(((ux - wx) ** 2 + (uy - wy) ** 2) ** 0.5)
                 d_step = d_now
-                if prev_uav is not None and wid in prev_workers:
+                if prev_uav is not None and wid in prev_obstacles:
                     pux, puy = prev_uav
-                    pwx, pwy = prev_workers[wid]
+                    pwx, pwy = prev_obstacles[wid]
                     d_step = min(
                         d_step,
                         cls._distance_point_to_segment(wx, wy, pux, puy, ux, uy),
@@ -299,11 +299,11 @@ class TaskRunLogger:
                 elif near_active and (d_step > NEAR_MISS_EXIT_DISTANCE_M):
                     near_miss_active[wid] = False
             prev_uav = (ux, uy)
-            prev_workers = workers
+            prev_obstacles = obstacles
         return {
             "collision_count": int(collision_count),
             "near_miss_count": int(near_miss_count),
-            "min_uav_worker_distance_m": (None if min_distance is None else float(min_distance)),
+            "min_uav_obstacle_distance_m": (None if min_distance is None else float(min_distance)),
         }
 
     def __init__(self, excel_path: Optional[str] = None):
@@ -607,11 +607,11 @@ class TaskRunLogger:
         near_miss_count = int(snapshot.get("near_miss_count", 0) or 0)
         if near_miss_count > self._active.near_miss_count:
             self._active.near_miss_count = near_miss_count
-        min_dist = snapshot.get("min_uav_worker_distance_m")
+        min_dist = snapshot.get("min_uav_obstacle_distance_m")
         if min_dist is not None:
             min_dist = float(min_dist)
-            if self._active.min_uav_worker_distance_m is None or min_dist < self._active.min_uav_worker_distance_m:
-                self._active.min_uav_worker_distance_m = min_dist
+            if self._active.min_uav_obstacle_distance_m is None or min_dist < self._active.min_uav_obstacle_distance_m:
+                self._active.min_uav_obstacle_distance_m = min_dist
         collision_now = self._detect_collision(snapshot)
         self._active._last_collision_state = collision_now
         self._active.any_collision_during_run = self._active.any_collision_during_run or collision_now
@@ -638,7 +638,7 @@ class TaskRunLogger:
             "timestamp": self._to_iso(now),
             "drone_gt": snapshot.get("drone_gt"),
             "drone_yaw_rad": snapshot.get("drone_yaw_rad"),
-            "workers": snapshot.get("workers"),
+            "obstacles": snapshot.get("obstacles"),
             "benchmark_progress": benchmark_progress,
             "completed_checkpoints": completed_checkpoints,
             "remaining_checkpoints": remaining_checkpoints,
@@ -650,12 +650,12 @@ class TaskRunLogger:
             "replan_count": int(snapshot.get("replan_count", 0) or 0),
             "trigger_reason": snapshot.get("trigger_reason"),
             "predicted_collision_probability": None if safety_context is None else float(getattr(safety_context, "predicted_collision_probability", 0.0)),
-            "per_worker_predicted_collision_probability": [] if safety_context is None else list(getattr(safety_context, "per_worker_collision_probabilities", []) or []),
-            "dominant_risky_worker": None if safety_context is None else str(getattr(safety_context, "dominant_threat_id", "")),
+            "per_obstacle_predicted_collision_probability": [] if safety_context is None else list(getattr(safety_context, "per_obstacle_collision_probabilities", []) or []),
+            "dominant_risky_obstacle": None if safety_context is None else str(getattr(safety_context, "dominant_threat_id", "")),
             "near_miss_count": int(snapshot.get("near_miss_count", 0) or 0),
             "near_miss_events": list(snapshot.get("near_miss_events") or []),
             "collision_count": int(snapshot.get("collision_count", 0) or 0),
-            "min_uav_worker_distance_m": snapshot.get("min_uav_worker_distance_m"),
+            "min_uav_obstacle_distance_m": snapshot.get("min_uav_obstacle_distance_m"),
             "scene_id": snapshot.get("baseline_scene_id"),
             "selected_baseline_id": snapshot.get("selected_baseline_id"),
             "completion_state_source": "benchmark_progress/dwell_tracker",
@@ -995,7 +995,7 @@ class TaskRunLogger:
             "json_parse_success_rate": llm_latency_summary["json_parse_success_rate"],
             "collision_count": int(final_mission_summary.get("collision_count", (final or {}).get("collision_count", 0)) or 0),
             "near_miss_count": int(final_mission_summary.get("near_miss_count", (final or {}).get("near_miss_count", 0)) or 0),
-            "min_uav_worker_distance_m": proximity_metrics.get("min_uav_worker_distance_m"),
+            "min_uav_obstacle_distance_m": proximity_metrics.get("min_uav_obstacle_distance_m"),
             "completed_checkpoints": self._json_text(true_completed),
             "completion_ratio": completion_ratio,
             "planner_model_id": active.run_context.get("planner_model_id", planner_info.get("planner_model_id", "")),
@@ -1062,7 +1062,7 @@ class TaskRunLogger:
             **llm_latency_summary,
             "collision_count": int(final_mission_summary.get("collision_count", (final or {}).get("collision_count", 0)) or 0),
             "near_miss_count": int(final_mission_summary.get("near_miss_count", (final or {}).get("near_miss_count", 0)) or 0),
-            "min_uav_worker_distance_m": proximity_metrics.get("min_uav_worker_distance_m"),
+            "min_uav_obstacle_distance_m": proximity_metrics.get("min_uav_obstacle_distance_m"),
             "completed_checkpoints": list(true_completed),
             "completion_ratio": completion_ratio,
             "true_completed_checkpoints": list(true_completed),
@@ -1119,7 +1119,7 @@ class TaskRunLogger:
             "run_summary": run_summary,
             "metrics": {
                 "near_miss_count": int(active.near_miss_count),
-                "min_uav_worker_distance_m": proximity_metrics.get("min_uav_worker_distance_m"),
+                "min_uav_obstacle_distance_m": proximity_metrics.get("min_uav_obstacle_distance_m"),
                 "collision_count": int(final_mission_summary.get("collision_count", (final or {}).get("collision_count", 0)) or 0),
                 "replan_count": int(final_mission_summary.get("replan_count", (final or {}).get("replan_count", 0)) or 0),
             },

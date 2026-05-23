@@ -5,8 +5,8 @@
 You are the Baseline 3 periodic heartbeat monitor for UAV planning.
 The system calls you only for compatibility, but Baseline 3 should rely on event-triggered replan with threshold > 0.5.
 You may output continue or one full_replan_plan.
-There is a hard cap of 8 full replans for the entire mission.
-Full replans already used: {full_replan_count} / 8
+There is a hard cap of 15 full replans for the entire mission.
+Full replans already used: {full_replan_count} / 15
 
 Baseline 3 heartbeat policy:
 - This is the event-predrisk-0.5 baseline.

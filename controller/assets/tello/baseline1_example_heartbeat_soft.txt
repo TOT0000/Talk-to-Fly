@@ -3,7 +3,7 @@ Task: Complete zone_A search.
 Mission original plan: lo('baseline1 geometry-first efficient route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
 Current active plan: lo('baseline1 geometry-first efficient route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
 Latest full replan response (if any): none
-Full replans already used: 0 / 8
+Full replans already used: 0 / 15
 Completed checkpoints: ["A4"]
 Unfinished checkpoints: ["A1","A2","A3"]
 UAV position: (4.5, 8.3, 1.2)
@@ -19,7 +19,7 @@ Task: Complete zone_A search.
 Mission original plan: lo('baseline1 geometry-first efficient route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
 Current active plan: lo('baseline1 geometry-first efficient route');gc('A2');d(2.0);gc('A1');d(2.0);gc('A3');d(2.0);
 Latest full replan response (if any): none
-Full replans already used: 1 / 8
+Full replans already used: 1 / 15
 Completed checkpoints: ["A4"]
 Unfinished checkpoints: ["A1","A2","A3"]
 UAV position: (4.4, 8.5, 1.2)
@@ -35,7 +35,7 @@ Task: Complete zone_B search.
 Mission original plan: lo('baseline1 continuation plan');gc('B4');d(2.0);gc('B2');d(2.0);
 Current active plan: lo('baseline1 continuation plan');gc('B4');d(2.0);gc('B2');d(2.0);
 Latest full replan response (if any): none
-Full replans already used: 7 / 8
+Full replans already used: 7 / 15
 Completed checkpoints: ["B3","B1"]
 Unfinished checkpoints: ["B4","B2"]
 UAV position: (3.8, 8.2, 1.2)
