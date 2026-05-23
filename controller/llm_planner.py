@@ -8,7 +8,7 @@ from .vision_skill_wrapper import VisionSkillWrapper
 from .utils import print_debug, print_t
 from .minispec_interpreter import MiniSpecValueType, evaluate_value
 from .abs.robot_wrapper import RobotType
-from .benchmark_layout import CHECKPOINT_DWELL_SECONDS, CHECKPOINT_RADIUS_M, UAV_RADIUS_M, WORKER_RADIUS_M
+from .benchmark_layout import CHECKPOINT_DWELL_SECONDS, CHECKPOINT_RADIUS_M, UAV_RADIUS_M, OBSTACLE_RADIUS_M
 from .task_run_logger import resolve_archive_root_and_excel_path
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -263,17 +263,17 @@ class LLMPlanner():
         return (
             "You are an autonomous UAV mission planning and control agent operating in a structured benchmark scene that may be divided into multiple zones such as zone_A, zone_B, and zone_C. "
             "Each zone contains multiple checkpoints that define the search coverage required in that zone. "
-            "The environment contains one UAV and three workers, and workers may be static or moving. "
+            "The environment contains one UAV and three obstacles, and obstacles may be static or moving. "
             "Your job is to use only the provided skills to control the UAV and complete one or more zone-search tasks.\n\n"
             "A checkpoint is not completed merely because the UAV passes nearby. "
             f"A checkpoint is completed only when the UAV true position stays continuously inside that checkpoint radius for {float(CHECKPOINT_DWELL_SECONDS):.1f} seconds. "
             f"If the UAV leaves the checkpoint region before the full {float(CHECKPOINT_DWELL_SECONDS):.1f} seconds are accumulated, the dwell timer resets. "
             "A zone is completed only when all active checkpoints in that zone are completed. "
             "Completed checkpoints must never be redone.\n\n"
-            "Your planning must always balance safety and efficiency. Safety means that the UAV must not collide with any worker. "
-            "To help you reason about safety, you are given UAV position, UAV heading, worker positions, geometry sizes, and collision probability information. "
+            "Your planning must always balance safety and efficiency. Safety means that the UAV must not collide with any obstacle. "
+            "To help you reason about safety, you are given UAV position, UAV heading, obstacle positions, geometry sizes, and collision probability information. "
             "You must use geometry and collision probability jointly. Do not rely on probability alone. "
-            "Even when collision probability is low, if the UAV is geometrically too close to a worker after considering both sizes, you must still treat the situation as risky.\n\n"
+            "Even when collision probability is low, if the UAV is geometrically too close to a obstacle after considering both sizes, you must still treat the situation as risky.\n\n"
             "Efficiency means minimizing unnecessary detours and mission completion time while maintaining zero collisions. "
             "You can improve efficiency by choosing a smoother and shorter checkpoint order from the current UAV position and heading. "
             "You must not mechanically follow a fixed lexical order such as A1 -> A2 -> A3 -> A4. "
@@ -283,10 +283,10 @@ class LLMPlanner():
             "You may also use them proactively to shape a safer and more controllable approach corridor toward a checkpoint. "
             "This matters because gc() is convenient but does not expose detailed path control. "
             "In practice, gc() usually aligns toward the target checkpoint and moves approximately straight. "
-            "Therefore, if direct gc() appears risky because of worker geometry, you may first use heading-aware low-level motion and turning to create a safer approach, and then continue toward the checkpoint.\n\n"
+            "Therefore, if direct gc() appears risky because of obstacle geometry, you may first use heading-aware low-level motion and turning to create a safer approach, and then continue toward the checkpoint.\n\n"
             "When choosing an avoidance maneuver, always consider UAV heading explicitly. "
             "The body-frame motions mf, mb, ml, and mr are all defined relative to the current UAV heading. "
-            "Therefore, the correct way to detour around a worker depends not only on positions, but also on current heading. "
+            "Therefore, the correct way to detour around a obstacle depends not only on positions, but also on current heading. "
             "If the risk appears mild but suspicious, a small preventive detour may be enough. "
             "If the risk appears severe or geometry is very close, you should prefer a larger and more conservative detour. "
             "The overall goal is to complete the mission with no collisions while keeping mission time as low as possible."
@@ -327,31 +327,31 @@ class LLMPlanner():
                     snapshot = {}
         drone_pos = snapshot.get("drone_est_bias_corrected") or snapshot.get("drone_est") or snapshot.get("drone_gt")
         drone_yaw_deg = math.degrees(float(snapshot.get("drone_yaw_rad") or 0.0))
-        workers = list(snapshot.get("workers") or [])
-        workers_sorted = sorted(workers, key=lambda row: str(row.get("id", "")))
-        worker_lines = []
+        obstacles = list(snapshot.get("obstacles") or [])
+        obstacles_sorted = sorted(obstacles, key=lambda row: str(row.get("id", "")))
+        obstacle_lines = []
         for idx in range(3):
-            label = f"worker_{idx + 1}"
-            if idx < len(workers_sorted):
-                row = workers_sorted[idx]
+            label = f"obstacle_{idx + 1}"
+            if idx < len(obstacles_sorted):
+                row = obstacles_sorted[idx]
                 est_xy = row.get("est_xy_bias_corrected") or row.get("est_xy_raw")
                 if est_xy is None:
-                    worker_lines.append(f"- {label} bias-corrected estimated position: (n/a)")
+                    obstacle_lines.append(f"- {label} bias-corrected estimated position: (n/a)")
                 else:
-                    worker_lines.append(f"- {label} bias-corrected estimated position: ({float(est_xy[0]):.2f}, {float(est_xy[1]):.2f}, 0.00)")
+                    obstacle_lines.append(f"- {label} bias-corrected estimated position: ({float(est_xy[0]):.2f}, {float(est_xy[1]):.2f}, 0.00)")
             else:
-                worker_lines.append(f"- {label} bias-corrected estimated position: (n/a)")
+                obstacle_lines.append(f"- {label} bias-corrected estimated position: (n/a)")
 
         predicted_collision_probability = 0.0 if safety_context is None else float(safety_context.predicted_collision_probability)
-        per_worker_probs = []
+        per_obstacle_probs = []
         if safety_context is not None:
-            for row in (getattr(safety_context, "per_worker_collision_probabilities", []) or []):
-                worker_id = str(row.get("id", "unknown"))
+            for row in (getattr(safety_context, "per_obstacle_collision_probabilities", []) or []):
+                obstacle_id = str(row.get("id", "unknown"))
                 p_val = float(row.get("collision_probability", 0.0))
-                per_worker_probs.append((worker_id, p_val))
-        dominant_worker = "n/a"
+                per_obstacle_probs.append((obstacle_id, p_val))
+        dominant_obstacle = "n/a"
         if safety_context is not None:
-            dominant_worker = str(getattr(safety_context, "dominant_threat_id", "n/a") or "n/a")
+            dominant_obstacle = str(getattr(safety_context, "dominant_threat_id", "n/a") or "n/a")
 
         objective = dict(snapshot.get("active_objective_set") or {})
         active_zone_ids = [str(v) for v in objective.get("active_zone_ids", [])]
@@ -371,12 +371,12 @@ class LLMPlanner():
         if not checkpoint_lines:
             checkpoint_lines.append("- (n/a)")
 
-        worker_radii_block = "\n".join(
-            [f"- worker_{idx + 1}: {float(WORKER_RADIUS_M):.2f} m" for idx in range(3)]
+        obstacle_radii_block = "\n".join(
+            [f"- obstacle_{idx + 1}: {float(OBSTACLE_RADIUS_M):.2f} m" for idx in range(3)]
         )
-        per_worker_collision_probabilities_block = "\n".join(
-            [f"- {wid}: {prob:.6f}" for wid, prob in per_worker_probs]
-        ) if per_worker_probs else "- (n/a)"
+        per_obstacle_collision_probabilities_block = "\n".join(
+            [f"- {wid}: {prob:.6f}" for wid, prob in per_obstacle_probs]
+        ) if per_obstacle_probs else "- (n/a)"
 
         return (
             "Shared runtime context (identical skill availability for TypeFly mode and Agent mode):\n"
@@ -397,8 +397,8 @@ class LLMPlanner():
             "UAV state:\n"
             f"- UAV bias-corrected estimated position: {self._fmt_xyz(drone_pos)}\n"
             f"- UAV heading / yaw (deg): {drone_yaw_deg:.2f}\n"
-            "Workers state:\n"
-            + "\n".join(worker_lines)
+            "Obstacles state:\n"
+            + "\n".join(obstacle_lines)
             + "\n"
             "\n"
             "Mission structure:\n"
@@ -409,15 +409,15 @@ class LLMPlanner():
             + "\n"
             "Geometry information:\n"
             f"- UAV radius: {float(UAV_RADIUS_M):.2f} m\n"
-            "- worker radii:\n"
-            f"{worker_radii_block}\n"
+            "- obstacle radii:\n"
+            f"{obstacle_radii_block}\n"
             f"- checkpoint radius: {float(CHECKPOINT_RADIUS_M):.2f} m\n"
             "\n"
             "Risk context:\n"
             f"- predicted collision probability: {predicted_collision_probability:.6f}\n"
-            "- per-worker collision probabilities:\n"
-            f"{per_worker_collision_probabilities_block}\n"
-            f"- dominant risky worker: {dominant_worker}\n"
+            "- per-obstacle collision probabilities:\n"
+            f"{per_obstacle_collision_probabilities_block}\n"
+            f"- dominant risky obstacle: {dominant_obstacle}\n"
         )
 
     def _build_runtime_context_block(
@@ -488,9 +488,9 @@ class LLMPlanner():
             "dwell_satisfied": progress.get("dwell_satisfied"),
             "completed": completed,
         }
-        dominant_worker = "n/a"
+        dominant_obstacle = "n/a"
         if safety_context is not None:
-            dominant_worker = str(getattr(safety_context, "dominant_threat_id", "n/a") or "n/a")
+            dominant_obstacle = str(getattr(safety_context, "dominant_threat_id", "n/a") or "n/a")
 
         previous_plan_text = str(previous_plan or "").strip()
         if not previous_plan_text:
@@ -509,7 +509,7 @@ class LLMPlanner():
             "- replan trigger reason:\n"
             f"  - predicted collision probability > {threshold:.2f} "
             f"(current={predicted_collision_probability:.6f})\n"
-            f"  - dominant risky worker = {dominant_worker}"
+            f"  - dominant risky obstacle = {dominant_obstacle}"
         )
 
     def plan(self, task_description: str, scene_description: Optional[str] = None, location_info: Optional[str] = None, error_message: Optional[str] = None, execution_history: Optional[str] = None, safety_context: Optional[SafetyContext] = None, previous_plan: Optional[str] = None, planning_stage: str = "initial"):
@@ -703,15 +703,15 @@ class LLMPlanner():
     ) -> dict:
         safety_context = snapshot.get("safety_context") if isinstance(snapshot, dict) else None
         collision_probability = 0.0 if safety_context is None else float(getattr(safety_context, "predicted_collision_probability", 0.0))
-        dominant_worker = "n/a" if safety_context is None else str(getattr(safety_context, "dominant_threat_id", "n/a"))
+        dominant_obstacle = "n/a" if safety_context is None else str(getattr(safety_context, "dominant_threat_id", "n/a"))
         benchmark_progress = dict(snapshot.get("benchmark_progress") or {})
         completed = list(benchmark_progress.get("completed") or [])
         active = list((snapshot.get("active_objective_set") or {}).get("active_checkpoint_ids", []))
-        workers = []
-        for worker in list(snapshot.get("workers") or []):
-            workers.append({
-                "id": str(worker.get("id")),
-                "xy": tuple(worker.get("ui_xy") or worker.get("gt_xy") or (None, None)),
+        obstacles = []
+        for obstacle in list(snapshot.get("obstacles") or []):
+            obstacles.append({
+                "id": str(obstacle.get("id")),
+                "xy": tuple(obstacle.get("ui_xy") or obstacle.get("gt_xy") or (None, None)),
             })
         hard_gate_rule = (
             "If predicted_collision_probability > 0.7, you MUST output response=full_replan_plan with a new complete MiniSpec plan."
@@ -763,9 +763,9 @@ class LLMPlanner():
             unfinished_checkpoints=[cid for cid in active if cid not in completed],
             uav_position=(snapshot.get('drone_est_bias_corrected') or snapshot.get('drone_est') or snapshot.get('drone_gt')),
             uav_heading=snapshot.get('drone_yaw_rad'),
-            worker_positions=workers,
+            obstacle_positions=obstacles,
             predicted_collision_probability=f"{collision_probability:.6f}",
-            dominant_worker=dominant_worker,
+            dominant_obstacle=dominant_obstacle,
             current_executing_plan=current_plan,
             queue_progress=benchmark_progress,
             execution_history=execution_history,
