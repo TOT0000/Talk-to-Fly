@@ -43,7 +43,7 @@ from .baseline_scenes import (
     evaluate_path_clear,
     get_task_point,
     normalize_baseline_scene_id,
-    worker_mode_summary_log,
+    obstacle_mode_summary_log,
 )
 from .safety_envelope import build_safety_envelope
 from .benchmark_layout import (
@@ -58,7 +58,7 @@ from .benchmark_layout import (
     BENCHMARK_CHECKPOINTS,
     BENCHMARK_ZONES,
     UAV_RADIUS_M,
-    WORKER_RADIUS_M,
+    OBSTACLE_RADIUS_M,
 )
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -66,7 +66,7 @@ PREDICTED_COLLISION_PROBABILITY_HIGH_RISK_THRESHOLD = TYPEFLY_REPLAN_THRESHOLD
 PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD = TYPEFLY_REPLAN_THRESHOLD
 PREDICTED_COLLISION_PROBABILITY_REARM_THRESHOLD = TYPEFLY_REPLAN_THRESHOLD
 AUTO_REPLAN_PROTECTION_STATEMENTS = 2
-COLLISION_RISK_WORKER_IDS = ("worker_1", "worker_2", "worker_3")
+COLLISION_RISK_OBSTACLE_IDS = ("obstacle_1", "obstacle_2", "obstacle_3")
 NEAR_MISS_ENTER_DISTANCE_M = 1.0
 NEAR_MISS_EXIT_DISTANCE_M = 1.05
 
@@ -195,19 +195,15 @@ class LLMController():
         self.framework_mode = MODE_TYPEFLY_ONESHOT
         self.selected_pipeline_id = normalize_pipeline_id(os.getenv("TYPEFLY_BASELINE_ID", "baseline1"))
         self.archive_enabled = True
-        self.manual_planner_model_id = str(
-            os.getenv("TYPEFLY_MANUAL_PLANNER_MODEL", "") or self.planner.model_name
-        ).strip()
-        self.manual_evaluator_model_id = str(
-            os.getenv("TYPEFLY_MANUAL_EVALUATOR_MODEL", "") or self.planner.evaluator_model_name
-        ).strip()
+        self.manual_planner_model_id = str(os.getenv("TYPEFLY_MANUAL_PLANNER_MODEL", "") or "").strip()
+        self.manual_evaluator_model_id = str(os.getenv("TYPEFLY_MANUAL_EVALUATOR_MODEL", "") or "").strip()
         self._run_model_lock_active = False
         self._run_locked_models: Optional[dict] = None
         self.near_miss_count = 0
         self.collision_count = 0
-        self.min_uav_worker_distance_m: Optional[float] = None
-        self._near_miss_active_by_worker = {wid: False for wid in COLLISION_RISK_WORKER_IDS}
-        self._collision_active_by_worker = {wid: False for wid in COLLISION_RISK_WORKER_IDS}
+        self.min_uav_obstacle_distance_m: Optional[float] = None
+        self._near_miss_active_by_obstacle = {wid: False for wid in COLLISION_RISK_OBSTACLE_IDS}
+        self._collision_active_by_obstacle = {wid: False for wid in COLLISION_RISK_OBSTACLE_IDS}
         self._latest_near_miss_events = []
         self.predicted_collision_replan_threshold = float(PREDICTED_COLLISION_PROBABILITY_REPLAN_THRESHOLD)
         self.predicted_collision_rearm_threshold = float(PREDICTED_COLLISION_PROBABILITY_REARM_THRESHOLD)
@@ -242,9 +238,9 @@ class LLMController():
         if self.planner_mode not in {"llm_baseline", "rule_baseline"}:
             self.planner_mode = "llm_baseline"
         self.user_heading_yaw_rad = 0.0
-        self.manual_worker_selection_id = "worker_1"
-        self.manual_worker_poses: dict[str, dict] = {}
-        self.manual_worker_localization_state: dict[str, dict] = {}
+        self.manual_obstacle_selection_id = "obstacle_1"
+        self.manual_obstacle_poses: dict[str, dict] = {}
+        self.manual_obstacle_localization_state: dict[str, dict] = {}
         self.auto_replan_armed = True
         self.auto_replan_protection_remaining = 0
         self.replan_limit = int(FULL_REPLAN_LIMIT)
@@ -280,8 +276,8 @@ class LLMController():
         self._agent_eval_thread: Optional[threading.Thread] = None
         self._agent_eval_inflight = False
         self._agent_eval_generation = 0
-        self._planning_worker_lock = threading.Lock()
-        self._planning_worker_thread: Optional[threading.Thread] = None
+        self._planning_obstacle_lock = threading.Lock()
+        self._planning_obstacle_thread: Optional[threading.Thread] = None
         self._planning_inflight = False
         self._planning_generation = 0
         self._planning_response_queue: queue.Queue = queue.Queue()
@@ -401,31 +397,31 @@ class LLMController():
 
     @classmethod
     def _compute_proximity_metrics_from_trajectory(cls, trajectory_points: list[dict]) -> dict:
-        collision_radius = float(UAV_RADIUS_M + WORKER_RADIUS_M)
+        collision_radius = float(UAV_RADIUS_M + OBSTACLE_RADIUS_M)
         collision_count = 0
         near_miss_count = 0
         min_distance = None
-        collision_active_by_worker: dict[str, bool] = {}
-        near_miss_active_by_worker: dict[str, bool] = {}
+        collision_active_by_obstacle: dict[str, bool] = {}
+        near_miss_active_by_obstacle: dict[str, bool] = {}
         prev_uav = None
-        prev_workers: dict[str, tuple[float, float]] = {}
+        prev_obstacles: dict[str, tuple[float, float]] = {}
         for point in list(trajectory_points or []):
             if not isinstance(point, dict):
                 continue
             if point.get("x") is None or point.get("y") is None:
                 continue
             ux, uy = float(point.get("x")), float(point.get("y"))
-            workers = {}
-            for worker in list(point.get("workers") or []):
-                wid = str(worker.get("id"))
-                gt_xy = worker.get("gt_xy")
+            obstacles = {}
+            for obstacle in list(point.get("obstacles") or []):
+                wid = str(obstacle.get("id"))
+                gt_xy = obstacle.get("gt_xy")
                 if wid and isinstance(gt_xy, (list, tuple)) and len(gt_xy) >= 2:
-                    workers[wid] = (float(gt_xy[0]), float(gt_xy[1]))
-            for wid, (wx, wy) in workers.items():
+                    obstacles[wid] = (float(gt_xy[0]), float(gt_xy[1]))
+            for wid, (wx, wy) in obstacles.items():
                 d_step = float(math.hypot(ux - wx, uy - wy))
-                if prev_uav is not None and wid in prev_workers:
+                if prev_uav is not None and wid in prev_obstacles:
                     pux, puy = prev_uav
-                    pwx, pwy = prev_workers[wid]
+                    pwx, pwy = prev_obstacles[wid]
                     d_step = min(
                         d_step,
                         cls._distance_point_to_segment(wx, wy, pux, puy, ux, uy),
@@ -436,23 +432,23 @@ class LLMController():
                 if min_distance is None or d_step < min_distance:
                     min_distance = d_step
                 colliding = bool(d_step <= collision_radius)
-                if colliding and not bool(collision_active_by_worker.get(wid, False)):
+                if colliding and not bool(collision_active_by_obstacle.get(wid, False)):
                     collision_count += 1
-                collision_active_by_worker[wid] = colliding
-                near_active = bool(near_miss_active_by_worker.get(wid, False))
+                collision_active_by_obstacle[wid] = colliding
+                near_active = bool(near_miss_active_by_obstacle.get(wid, False))
                 if (not colliding) and (d_step <= NEAR_MISS_ENTER_DISTANCE_M) and (not near_active):
                     near_miss_count += 1
-                    near_miss_active_by_worker[wid] = True
+                    near_miss_active_by_obstacle[wid] = True
                 elif near_active and (d_step > NEAR_MISS_EXIT_DISTANCE_M):
-                    near_miss_active_by_worker[wid] = False
+                    near_miss_active_by_obstacle[wid] = False
             prev_uav = (ux, uy)
-            prev_workers = workers
+            prev_obstacles = obstacles
         return {
             "collision_count": int(collision_count),
             "near_miss_count": int(near_miss_count),
-            "min_uav_worker_distance_m": (None if min_distance is None else float(min_distance)),
-            "collision_active_by_worker": collision_active_by_worker,
-            "near_miss_active_by_worker": near_miss_active_by_worker,
+            "min_uav_obstacle_distance_m": (None if min_distance is None else float(min_distance)),
+            "collision_active_by_obstacle": collision_active_by_obstacle,
+            "near_miss_active_by_obstacle": near_miss_active_by_obstacle,
         }
 
     def clear_uav_trajectory(self, stop_sampler: bool = True):
@@ -510,23 +506,23 @@ class LLMController():
             while not stop_event.is_set():
                 pos = self._read_uav_position_for_sampler()
                 if pos is not None:
-                    workers_for_sample = []
+                    obstacles_for_sample = []
                     try:
-                        now_for_workers = time.time()
-                        elapsed_scene_s = max(0.0, now_for_workers - float((self.baseline_scene_state or {}).get("captured_at", now_for_workers)))
+                        now_for_obstacles = time.time()
+                        elapsed_scene_s = max(0.0, now_for_obstacles - float((self.baseline_scene_state or {}).get("captured_at", now_for_obstacles)))
                         obstacle_states = compute_obstacle_envelope_states(self.get_baseline_scene(), now_s=elapsed_scene_s)
-                        workers_for_sample = [
+                        obstacles_for_sample = [
                             {"id": str(obs.id), "gt_xy": (float(obs.gt_xy[0]), float(obs.gt_xy[1]))}
                             for obs in list(obstacle_states or [])
                         ]
                     except Exception:
-                        workers_for_sample = []
+                        obstacles_for_sample = []
                     point = {
                         "ts": float(time.time()),
                         "x": float(pos[0]),
                         "y": float(pos[1]),
                         "z": float(pos[2]),
-                        "workers": workers_for_sample,
+                        "obstacles": obstacles_for_sample,
                         "source": "backend_trajectory_sampler",
                         "execution_mode": self.execution_mode,
                         "current_target_checkpoint": (self.latest_benchmark_progress or {}).get("current_target"),
@@ -1817,7 +1813,7 @@ class LLMController():
         except Exception:
             return None
 
-    def _compute_closest_worker_distance(self, snapshot: dict) -> Optional[float]:
+    def _compute_closest_obstacle_distance(self, snapshot: dict) -> Optional[float]:
         drone = snapshot.get("drone_est_bias_corrected") or snapshot.get("drone_est") or snapshot.get("drone_gt")
         if drone is None:
             return None
@@ -1826,8 +1822,8 @@ class LLMController():
         except Exception:
             return None
         min_dist = None
-        for worker in list(snapshot.get("workers") or []):
-            wxy = worker.get("ui_xy") or worker.get("est_xy_bias_corrected") or worker.get("gt_xy")
+        for obstacle in list(snapshot.get("obstacles") or []):
+            wxy = obstacle.get("ui_xy") or obstacle.get("est_xy_bias_corrected") or obstacle.get("gt_xy")
             if not wxy:
                 continue
             try:
@@ -1844,12 +1840,12 @@ class LLMController():
         completed = [str(v).upper() for v in list(benchmark_progress.get("completed") or [])]
         active_ids = [str(v).upper() for v in list((snapshot.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])]
         remaining = [cid for cid in active_ids if cid not in set(completed)]
-        workers_summary = []
-        for worker in list(snapshot.get("workers") or []):
-            workers_summary.append(
+        obstacles_summary = []
+        for obstacle in list(snapshot.get("obstacles") or []):
+            obstacles_summary.append(
                 {
-                    "id": str(worker.get("id", "")),
-                    "xy": self._safe_vec2(worker.get("ui_xy") or worker.get("est_xy_bias_corrected") or worker.get("gt_xy")),
+                    "id": str(obstacle.get("id", "")),
+                    "xy": self._safe_vec2(obstacle.get("ui_xy") or obstacle.get("est_xy_bias_corrected") or obstacle.get("gt_xy")),
                 }
             )
         active_run = getattr(self.task_run_logger, "_active", None)
@@ -1861,7 +1857,7 @@ class LLMController():
             "run_id": (None if active_run is None else str(getattr(active_run, "run_id", ""))),
             "uav_estimated_position": self._safe_vec3(snapshot.get("drone_est_bias_corrected") or snapshot.get("drone_est") or snapshot.get("drone_gt")),
             "uav_heading": self._safe_float(snapshot.get("drone_yaw_rad")),
-            "worker_positions_summary": workers_summary,
+            "obstacle_positions_summary": obstacles_summary,
             "remaining_checkpoints": list(remaining),
             "current_target_checkpoint": benchmark_progress.get("current_target"),
             "task_progress_summary": {
@@ -1871,8 +1867,8 @@ class LLMController():
                 "completed_checkpoints": list(completed),
             },
             "predicted_collision_probability": (None if safety_context is None else float(getattr(safety_context, "predicted_collision_probability", 0.0))),
-            "per_worker_collision_probabilities": ([] if safety_context is None else list(getattr(safety_context, "per_worker_collision_probabilities", []) or [])),
-            "dominant_risky_worker": (None if safety_context is None else str(getattr(safety_context, "dominant_threat_id", "") or "")),
+            "per_obstacle_collision_probabilities": ([] if safety_context is None else list(getattr(safety_context, "per_obstacle_collision_probabilities", []) or [])),
+            "dominant_risky_obstacle": (None if safety_context is None else str(getattr(safety_context, "dominant_threat_id", "") or "")),
             "active_objective_set": dict(snapshot.get("active_objective_set") or {}),
         }
 
@@ -1884,7 +1880,7 @@ class LLMController():
         return {
             "timestamp": float(now_ts),
             "risk": (None if safety_context is None else float(getattr(safety_context, "predicted_collision_probability", 0.0))),
-            "closest_worker_distance": self._compute_closest_worker_distance(snapshot),
+            "closest_obstacle_distance": self._compute_closest_obstacle_distance(snapshot),
             "near_miss_count": int(snapshot.get("near_miss_count", 0) or 0),
             "collision_count": int(snapshot.get("collision_count", 0) or 0),
             "completed_checkpoint_count": int(len(completed)),
@@ -1911,7 +1907,7 @@ class LLMController():
                 "observation_window_seconds": (None if start.get("timestamp") is None else float(now_ts - float(start.get("timestamp")))),
                 "execution_progress_observed": bool((current_metrics.get("completed_checkpoint_count", 0) - start.get("completed_checkpoint_count", 0)) != 0),
                 "risk_delta": (None if start.get("risk") is None or current_metrics.get("risk") is None else float(current_metrics["risk"] - start["risk"])),
-                "closest_worker_distance_delta": (None if start.get("closest_worker_distance") is None or current_metrics.get("closest_worker_distance") is None else float(current_metrics["closest_worker_distance"] - start["closest_worker_distance"])),
+                "closest_obstacle_distance_delta": (None if start.get("closest_obstacle_distance") is None or current_metrics.get("closest_obstacle_distance") is None else float(current_metrics["closest_obstacle_distance"] - start["closest_obstacle_distance"])),
                 "near_miss_delta": int(current_metrics.get("near_miss_count", 0) - int(start.get("near_miss_count", 0) or 0)),
                 "collision_delta": int(current_metrics.get("collision_count", 0) - int(start.get("collision_count", 0) or 0)),
                 "completed_checkpoint_delta": int(current_metrics.get("completed_checkpoint_count", 0) - int(start.get("completed_checkpoint_count", 0) or 0)),
@@ -1941,9 +1937,9 @@ class LLMController():
                 )
         self._agent_pending_replan_records = remaining
 
-    def _ensure_llm_worker_state(self):
-        if not hasattr(self, "_planning_worker_lock"):
-            self._planning_worker_lock = threading.Lock()
+    def _ensure_llm_obstacle_state(self):
+        if not hasattr(self, "_planning_obstacle_lock"):
+            self._planning_obstacle_lock = threading.Lock()
         if not hasattr(self, "_agent_eval_lock"):
             self._agent_eval_lock = threading.Lock()
         if not hasattr(self, "_planning_response_queue"):
@@ -1958,8 +1954,8 @@ class LLMController():
             self._planning_generation = 0
         if not hasattr(self, "_agent_eval_generation"):
             self._agent_eval_generation = 0
-        if not hasattr(self, "_planning_worker_thread"):
-            self._planning_worker_thread = None
+        if not hasattr(self, "_planning_obstacle_thread"):
+            self._planning_obstacle_thread = None
         if not hasattr(self, "_agent_eval_thread"):
             self._agent_eval_thread = None
         if not hasattr(self, "_agent_ready_for_eval_records"):
@@ -1988,7 +1984,7 @@ class LLMController():
             {
                 "planning_stage": "heartbeat" if role != "evaluator" else "evaluator",
                 "llm_call_purpose": f"{role}_skipped_due_to_inflight",
-                "plan_source": "llm_worker_skip",
+                "plan_source": "llm_obstacle_skip",
                 "llm_call_role": "evaluator" if role == "evaluator" else "heartbeat",
                 "model_id": str(model_id or ""),
                 "success": False,
@@ -2006,8 +2002,8 @@ class LLMController():
             }
         )
 
-    def _start_agent_eval_worker_if_needed(self):
-        self._ensure_llm_worker_state()
+    def _start_agent_eval_obstacle_if_needed(self):
+        self._ensure_llm_obstacle_state()
         if not self._is_agent_feedback_pipeline():
             return
         with self._agent_eval_lock:
@@ -2021,13 +2017,13 @@ class LLMController():
             record = self._agent_ready_for_eval_records.pop(0)
             self._agent_eval_inflight = True
             self._agent_eval_thread = threading.Thread(
-                target=self._agent_eval_worker_loop,
+                target=self._agent_eval_obstacle_loop,
                 args=(generation, record),
                 daemon=True,
             )
             self._agent_eval_thread.start()
 
-    def _agent_eval_worker_loop(self, generation: int, record: dict):
+    def _agent_eval_obstacle_loop(self, generation: int, record: dict):
         call_id = self._new_llm_call_id("evaluator")
         start_ts = float(time.time())
         eval_result = {}
@@ -2126,7 +2122,7 @@ class LLMController():
                 self.task_run_logger.append_planning_trace(trace=trace)
 
     def _consume_evaluator_response_queue(self):
-        self._ensure_llm_worker_state()
+        self._ensure_llm_obstacle_state()
         while True:
             try:
                 item = self._evaluator_response_queue.get_nowait()
@@ -2199,7 +2195,7 @@ class LLMController():
         return True
 
     def _consume_planning_response_queue(self) -> bool:
-        self._ensure_llm_worker_state()
+        self._ensure_llm_obstacle_state()
         triggered = False
         while True:
             try:
@@ -2207,7 +2203,7 @@ class LLMController():
             except queue.Empty:
                 break
             generation = int(item.get("generation", -1))
-            with self._planning_worker_lock:
+            with self._planning_obstacle_lock:
                 if generation != int(self._planning_generation):
                     continue
             response = dict(item.get("response") or {})
@@ -2286,7 +2282,7 @@ class LLMController():
                     self.append_message(f"[AGENT-HEARTBEAT-REPLAN] reason={reason if reason else 'n/a'}")
                     self.append_message(f"[AGENT-HEARTBEAT-REPLAN-PLAN] {plan_text}")
                     triggered = True
-                    self._start_agent_eval_worker_if_needed()
+                    self._start_agent_eval_obstacle_if_needed()
                     continue
                 self.replan_discarded_count = int(getattr(self, "replan_discarded_count", 0)) + 1
                 counts = dict(getattr(self, "replan_discard_reason_counts", {}) or {})
@@ -2303,7 +2299,7 @@ class LLMController():
             print_t(f"[AGENT-HEARTBEAT] response=continue reason={reason}")
         return triggered
 
-    def _planning_worker_loop(self, request: dict):
+    def _planning_obstacle_loop(self, request: dict):
         start_ts = float(time.time())
         response = {}
         success = False
@@ -2363,10 +2359,10 @@ class LLMController():
         )
         self._planning_response_queue.put({**request, "response": response, "llm_trace": trace, "request_start_ts": start_ts, "response_end_ts": end_ts})
         self._finish_llm_wait(reason="planning_response")
-        with self._planning_worker_lock:
+        with self._planning_obstacle_lock:
             if int(request.get("generation", -1)) == int(self._planning_generation):
                 self._planning_inflight = False
-                self._planning_worker_thread = None
+                self._planning_obstacle_thread = None
 
     def _pause_gc_for_llm_wait(self, checkpoint_id: Optional[str] = None) -> bool:
         if not (self.awaiting_llm_response or self.llm_wait_hover_active or self._planning_inflight):
@@ -2418,7 +2414,7 @@ class LLMController():
         return "none"
 
     def _maybe_run_agent_heartbeat(self, force: bool = False) -> str:
-        self._ensure_llm_worker_state()
+        self._ensure_llm_obstacle_state()
         now = time.time()
         self.heartbeat_check_count = int(getattr(self, "heartbeat_check_count", 0)) + 1
         self.last_heartbeat_check_ts = now
@@ -2445,13 +2441,13 @@ class LLMController():
             return self._record_heartbeat_skip("active_objective_completed")
         if self._is_response_driven_heartbeat_pipeline():
             if self._planning_inflight or self.awaiting_llm_response:
-                self._start_agent_eval_worker_if_needed()
+                self._start_agent_eval_obstacle_if_needed()
                 return self._record_heartbeat_skip("planning_inflight" if self._planning_inflight else "awaiting_llm_response")
             if (not force) and now < float(getattr(self, "next_planning_allowed_ts", 0.0)):
-                self._start_agent_eval_worker_if_needed()
+                self._start_agent_eval_obstacle_if_needed()
                 return self._record_heartbeat_skip("not_due_yet")
         elif (not force) and (now - float(self.last_heartbeat_ts) < float(self.heartbeat_interval_seconds)):
-            self._start_agent_eval_worker_if_needed()
+            self._start_agent_eval_obstacle_if_needed()
             return self._record_heartbeat_skip("not_response_driven_pipeline")
         self.last_heartbeat_ts = now
         if int(getattr(self, "accepted_replan_count", 0)) >= int(self.replan_limit):
@@ -2467,11 +2463,11 @@ class LLMController():
         completed = [str(v).upper() for v in list(benchmark_progress.get("completed") or [])]
         active_ids = [str(v).upper() for v in list((snapshot.get("active_objective_set") or {}).get("active_checkpoint_ids") or [])]
         remaining = [cid for cid in active_ids if cid not in set(completed)]
-        with self._planning_worker_lock:
+        with self._planning_obstacle_lock:
             if self._planning_inflight:
                 if not self._is_response_driven_heartbeat_pipeline():
                     self._log_llm_inflight_skip("planning", heartbeat_index=heartbeat_index, target_checkpoint=benchmark_progress.get("current_target"))
-                self._start_agent_eval_worker_if_needed()
+                self._start_agent_eval_obstacle_if_needed()
                 return self._record_heartbeat_skip("planning_inflight")
             generation = int(self._planning_generation)
             request_payload = {
@@ -2500,12 +2496,12 @@ class LLMController():
             }
             self._planning_inflight = True
             self._start_llm_wait(reason="heartbeat")
-            self._planning_worker_thread = threading.Thread(
-                target=self._planning_worker_loop,
+            self._planning_obstacle_thread = threading.Thread(
+                target=self._planning_obstacle_loop,
                 args=(request_payload,),
                 daemon=True,
             )
-            self._planning_worker_thread.start()
+            self._planning_obstacle_thread.start()
 
         self._agent_heartbeat_index = heartbeat_index
         self.heartbeat_request_started_count = int(getattr(self, "heartbeat_request_started_count", 0)) + 1
@@ -2514,7 +2510,7 @@ class LLMController():
             f"[HEARTBEAT-REQUEST-STARTED] heartbeat_index={heartbeat_index} target={benchmark_progress.get('current_target')}",
             env_var="TYPEFLY_VERBOSE_DEBUG",
         )
-        self._start_agent_eval_worker_if_needed()
+        self._start_agent_eval_obstacle_if_needed()
         return "request_started"
 
     def _start_llm_wait(self, reason: str):
@@ -2916,9 +2912,9 @@ class LLMController():
         self.set_selected_pipeline(pipeline.id)
         self.near_miss_count = 0
         self.collision_count = 0
-        self.min_uav_worker_distance_m = None
-        self._near_miss_active_by_worker = {wid: False for wid in COLLISION_RISK_WORKER_IDS}
-        self._collision_active_by_worker = {wid: False for wid in COLLISION_RISK_WORKER_IDS}
+        self.min_uav_obstacle_distance_m = None
+        self._near_miss_active_by_obstacle = {wid: False for wid in COLLISION_RISK_OBSTACLE_IDS}
+        self._collision_active_by_obstacle = {wid: False for wid in COLLISION_RISK_OBSTACLE_IDS}
         self._latest_near_miss_events = []
         self.current_task_description = str(task_description or "")
         print_t(f"[MODE] selected={selected_framework}")
@@ -2977,6 +2973,10 @@ class LLMController():
                 "results_only": False,
                 "planner_model_id": selected_models.get("planner_model_id", ""),
                 "evaluator_model_id": selected_models.get("evaluator_model_id", ""),
+                "planner_resolved_provider": selected_models.get("planner_resolved_provider", ""),
+                "planner_resolved_model": selected_models.get("planner_resolved_model", ""),
+                "evaluator_resolved_provider": selected_models.get("evaluator_resolved_provider", ""),
+                "evaluator_resolved_model": selected_models.get("evaluator_resolved_model", ""),
                 "lmstudio_base_url": str(lmstudio_status.get("base_url") or ""),
                 "lmstudio_connected": bool(lmstudio_status.get("connected")),
                 "heartbeat_seconds": run_heartbeat_seconds,
@@ -2990,6 +2990,10 @@ class LLMController():
                 "planner_model_id": selected_models.get("planner_model_id", ""),
                 "heartbeat_model_id": selected_models.get("planner_model_id", ""),
                 "evaluator_model_id": selected_models.get("evaluator_model_id", ""),
+                "planner_resolved_provider": selected_models.get("planner_resolved_provider", ""),
+                "planner_resolved_model": selected_models.get("planner_resolved_model", ""),
+                "evaluator_resolved_provider": selected_models.get("evaluator_resolved_provider", ""),
+                "evaluator_resolved_model": selected_models.get("evaluator_resolved_model", ""),
             }
         )
         self.append_message('[TASK]: ' + task_description)
@@ -3037,10 +3041,10 @@ class LLMController():
             self._agent_eval_results_pending_commit = []
             self._agent_eval_inflight = False
             self._agent_eval_thread = None
-        with self._planning_worker_lock:
+        with self._planning_obstacle_lock:
             self._planning_generation += 1
             self._planning_inflight = False
-            self._planning_worker_thread = None
+            self._planning_obstacle_thread = None
         self._planning_response_queue = queue.Queue()
         self._evaluator_response_queue = queue.Queue()
         self.mission_start_ts = time.time()
@@ -3458,6 +3462,10 @@ class LLMController():
         selected_models = self.get_selected_manual_agent_models()
         planner_model = str(selected_models.get("planner_model_id") or "")
         evaluator_model = str(selected_models.get("evaluator_model_id") or "")
+        planner_provider = str(selected_models.get("planner_resolved_provider") or "")
+        evaluator_provider = str(selected_models.get("evaluator_resolved_provider") or "")
+        planner_resolved_model = str(selected_models.get("planner_resolved_model") or "")
+        evaluator_resolved_model = str(selected_models.get("evaluator_resolved_model") or "")
         status = {
             "provider": provider,
             "base_url": base_url,
@@ -3468,10 +3476,22 @@ class LLMController():
             "error": "",
             "planner_model_id": planner_model,
             "evaluator_model_id": evaluator_model,
+            "planner_resolved_provider": planner_provider,
+            "evaluator_resolved_provider": evaluator_provider,
+            "planner_resolved_model": planner_resolved_model,
+            "evaluator_resolved_model": evaluator_resolved_model,
+            "openai_api_key_present": bool(str(os.getenv("OPENAI_API_KEY", "")).strip()),
             "planner_visible": None,
             "evaluator_visible": None,
             "warnings": [],
         }
+        if planner_provider == "openai" and not status["openai_api_key_present"]:
+            status["warnings"].append("planning_openai_key_missing(OPENAI_API_KEY)")
+        if evaluator_provider == "openai" and not status["openai_api_key_present"]:
+            status["warnings"].append("evaluator_openai_key_missing(OPENAI_API_KEY)")
+        needs_lmstudio_probe = (planner_provider == "lmstudio") or (evaluator_provider == "lmstudio")
+        if not needs_lmstudio_probe:
+            return status
         if provider != "lmstudio":
             status["error"] = f"provider_not_lmstudio(provider={provider or 'unknown'})"
             return status
@@ -3511,12 +3531,14 @@ class LLMController():
             if not status["connected"]:
                 status["error"] = "no_models_in_/v1/models"
             visible = set(model_ids)
-            status["planner_visible"] = planner_model in visible
-            status["evaluator_visible"] = evaluator_model in visible
-            if planner_model and (planner_model not in visible):
-                status["warnings"].append(f"planning_agent_model_not_visible({planner_model})")
-            if evaluator_model and (evaluator_model not in visible):
-                status["warnings"].append(f"evaluator_model_not_visible({evaluator_model})")
+            if planner_provider == "lmstudio":
+                status["planner_visible"] = planner_resolved_model in visible
+                if planner_resolved_model and (planner_resolved_model not in visible):
+                    status["warnings"].append(f"planning_agent_model_not_visible({planner_resolved_model})")
+            if evaluator_provider == "lmstudio":
+                status["evaluator_visible"] = evaluator_resolved_model in visible
+                if evaluator_resolved_model and (evaluator_resolved_model not in visible):
+                    status["warnings"].append(f"evaluator_model_not_visible({evaluator_resolved_model})")
         except urllib_error.URLError as exc:
             status["error"] = f"url_error:{exc}"
         except Exception as exc:
@@ -3524,16 +3546,27 @@ class LLMController():
         return status
 
     def get_selected_manual_agent_models(self) -> dict:
+        planner_raw = str(self.manual_planner_model_id or "")
+        evaluator_raw = str(self.manual_evaluator_model_id or "")
         return {
-            "planner_model_id": str(self.manual_planner_model_id or ""),
-            "evaluator_model_id": str(self.manual_evaluator_model_id or ""),
+            "planner_model_id": planner_raw,
+            "evaluator_model_id": evaluator_raw,
+            "planner_resolved_provider": ("openai" if planner_raw.strip() == "" else "lmstudio"),
+            "planner_resolved_model": (os.getenv("OPENAI_DEFAULT_MODEL", "gpt-4o") if planner_raw.strip() == "" else planner_raw.strip()),
+            "evaluator_resolved_provider": ("openai" if evaluator_raw.strip() == "" else "lmstudio"),
+            "evaluator_resolved_model": (os.getenv("OPENAI_DEFAULT_MODEL", "gpt-4o") if evaluator_raw.strip() == "" else evaluator_raw.strip()),
         }
 
     def set_manual_agent_models(self, planner_model_id: str, evaluator_model_id: str) -> dict:
         if bool(self._run_model_lock_active) and self._run_locked_models:
             return dict(self._run_locked_models)
-        planner_model = str(planner_model_id or "gpt-4o").strip() or "gpt-4o"
-        evaluator_model = str(evaluator_model_id or "gpt-4o").strip() or "gpt-4o"
+        planner_model = str(planner_model_id or "").strip()
+        evaluator_model = str(evaluator_model_id or "").strip()
+        print_debug(
+            "[MODEL-SET] "
+            f"planner_input={planner_model_id!r} evaluator_input={evaluator_model_id!r} "
+            f"planner_trimmed={planner_model!r} evaluator_trimmed={evaluator_model!r}"
+        )
         self.manual_planner_model_id = planner_model
         self.manual_evaluator_model_id = evaluator_model
         self.planner.set_model(planner_model)
@@ -3541,10 +3574,14 @@ class LLMController():
             heartbeat_model_name=planner_model,
             evaluator_model_name=evaluator_model,
         )
-        return {
-            "planner_model_id": planner_model,
-            "evaluator_model_id": evaluator_model,
-        }
+        print_debug(
+            "[MODEL-SET] "
+            f"manual_planner={self.manual_planner_model_id!r} manual_evaluator={self.manual_evaluator_model_id!r} "
+            f"planner.model_name={self.planner.model_name!r} "
+            f"planner.heartbeat_model_name={self.planner.heartbeat_model_name!r} "
+            f"planner.evaluator_model_name={self.planner.evaluator_model_name!r}"
+        )
+        return self.get_selected_manual_agent_models()
 
 
     def set_manual_heartbeat_interval(self, heartbeat_seconds) -> float:
@@ -3599,7 +3636,7 @@ class LLMController():
 
     def apply_baseline_scene(self):
         scene = self.get_baseline_scene()
-        print_t(worker_mode_summary_log())
+        print_t(obstacle_mode_summary_log())
         provider = getattr(self, "state_provider", None)
         drone = getattr(self, "drone", None)
         repositioned = False
@@ -3620,7 +3657,7 @@ class LLMController():
             "captured_at": time.time(),
         }
         self.user_heading_yaw_rad = float(scene.user_initial_yaw_rad)
-        self._reset_manual_worker_poses_from_scene(scene)
+        self._reset_manual_obstacle_poses_from_scene(scene)
         return self.baseline_scene_state
 
     def get_baseline_scene_state(self):
@@ -3637,32 +3674,35 @@ class LLMController():
         self.user_heading_yaw_rad = float(self.user_heading_yaw_rad + math.radians(float(delta_deg)))
         return self.user_heading_yaw_rad
 
-    def set_manual_worker_selection(self, worker_id: str) -> str:
-        candidate = str(worker_id or "").strip()
-        if candidate not in {"worker_1", "worker_2", "worker_3"}:
-            candidate = "worker_1"
-        self.manual_worker_selection_id = candidate
-        return self.manual_worker_selection_id
+    def set_manual_obstacle_selection(self, obstacle_id: str) -> str:
+        candidate = str(obstacle_id or "").strip()
+        if candidate not in {"obstacle_1", "obstacle_2", "obstacle_3"}:
+            candidate = "obstacle_1"
+        self.manual_obstacle_selection_id = candidate
+        return self.manual_obstacle_selection_id
 
-    def _reset_manual_worker_poses_from_scene(self, scene: BaselineScene):
-        self.manual_worker_poses = {}
-        self.manual_worker_localization_state = {}
+    def set_manual_worker_selection(self, worker_id: str) -> str:
+        return self.set_manual_obstacle_selection(worker_id)
+
+    def _reset_manual_obstacle_poses_from_scene(self, scene: BaselineScene):
+        self.manual_obstacle_poses = {}
+        self.manual_obstacle_localization_state = {}
         for obstacle in scene.obstacles:
-            worker_id = str(obstacle.id)
-            if worker_id not in {"worker_1", "worker_2", "worker_3"}:
+            obstacle_id = str(obstacle.id)
+            if obstacle_id not in {"obstacle_1", "obstacle_2", "obstacle_3"}:
                 continue
-            self.manual_worker_poses[worker_id] = {
+            self.manual_obstacle_poses[obstacle_id] = {
                 "x": float(obstacle.gt_x),
                 "y": float(obstacle.gt_y),
                 "z": 0.0,
                 "yaw_rad": 0.0,
             }
 
-    def move_selected_worker_relative(self, local_forward: float, local_right: float, step_m: float):
-        if self.get_baseline_scene().id != "SCENE_MANUAL_WORKER_CONTROL":
+    def move_selected_obstacle_relative(self, local_forward: float, local_right: float, step_m: float):
+        if self.get_baseline_scene().id not in {"SCENE_MANUAL_OBSTACLE_CONTROL", "SCENE_MANUAL_WORKER_CONTROL"}:
             return None
-        worker_id = str(self.manual_worker_selection_id or "worker_1")
-        pose = self.manual_worker_poses.get(worker_id)
+        obstacle_id = str(self.manual_obstacle_selection_id or "obstacle_1")
+        pose = self.manual_obstacle_poses.get(obstacle_id)
         if pose is None:
             return None
         step = max(0.0, float(step_m))
@@ -3674,26 +3714,32 @@ class LLMController():
         pose["x"] = float(pose["x"] + dx)
         pose["y"] = float(pose["y"] + dy)
         return {
-            "worker_id": worker_id,
+            "obstacle_id": obstacle_id,
+            "x": float(pose["x"]),
+            "y": float(pose["y"]),
+            "yaw_deg": float(math.degrees(pose["yaw_rad"])),
+        }
+
+    def move_selected_worker_relative(self, local_forward: float, local_right: float, step_m: float):
+        return self.move_selected_obstacle_relative(local_forward=local_forward, local_right=local_right, step_m=step_m)
+
+    def turn_selected_obstacle(self, delta_deg: float):
+        if self.get_baseline_scene().id not in {"SCENE_MANUAL_OBSTACLE_CONTROL", "SCENE_MANUAL_WORKER_CONTROL"}:
+            return None
+        obstacle_id = str(self.manual_obstacle_selection_id or "obstacle_1")
+        pose = self.manual_obstacle_poses.get(obstacle_id)
+        if pose is None:
+            return None
+        pose["yaw_rad"] = float(pose.get("yaw_rad", 0.0) + math.radians(float(delta_deg)))
+        return {
+            "obstacle_id": obstacle_id,
             "x": float(pose["x"]),
             "y": float(pose["y"]),
             "yaw_deg": float(math.degrees(pose["yaw_rad"])),
         }
 
     def turn_selected_worker(self, delta_deg: float):
-        if self.get_baseline_scene().id != "SCENE_MANUAL_WORKER_CONTROL":
-            return None
-        worker_id = str(self.manual_worker_selection_id or "worker_1")
-        pose = self.manual_worker_poses.get(worker_id)
-        if pose is None:
-            return None
-        pose["yaw_rad"] = float(pose.get("yaw_rad", 0.0) + math.radians(float(delta_deg)))
-        return {
-            "worker_id": worker_id,
-            "x": float(pose["x"]),
-            "y": float(pose["y"]),
-            "yaw_deg": float(math.degrees(pose["yaw_rad"])),
-        }
+        return self.turn_selected_obstacle(delta_deg)
 
     def set_active_scenario(self, scenario_name: str):
         scenario = self.scenario_manager.select(scenario_name)
@@ -3786,12 +3832,12 @@ class LLMController():
     def _simulate_obstacle_returns(self, obstacle_states, now: float):
         _ = now
         states = list(obstacle_states or [])
-        if self.get_baseline_scene().id != "SCENE_MANUAL_WORKER_CONTROL":
+        if self.get_baseline_scene().id != "SCENE_MANUAL_OBSTACLE_CONTROL":
             return states
         updated_states = []
         for state in states:
-            worker_id = str(state.id)
-            pose = self.manual_worker_poses.get(worker_id)
+            obstacle_id = str(state.id)
+            pose = self.manual_obstacle_poses.get(obstacle_id)
             if pose is None:
                 updated_states.append(state)
                 continue
@@ -3801,18 +3847,18 @@ class LLMController():
             packet.gt_position_3d[0] = gt_x
             packet.gt_position_3d[1] = gt_y
             # Simulate localization estimate dynamics (instead of snapping est to gt+bias),
-            # so MANUAL_WORKER_CONTROL keeps a realistic est!=gt behavior.
-            loc_state = self.manual_worker_localization_state.get(worker_id)
+            # so MANUAL_OBSTACLE_CONTROL keeps a realistic est!=gt behavior.
+            loc_state = self.manual_obstacle_localization_state.get(obstacle_id)
             bias_x = float(packet.b_xy[0])
             bias_y = float(packet.b_xy[1])
             sigma_x = float(max(np.sqrt(max(float(packet.P_xy[0][0]), 1e-8)), 0.01))
             sigma_y = float(max(np.sqrt(max(float(packet.P_xy[1][1]), 1e-8)), 0.01))
-            noise_rng = np.random.default_rng((hash(worker_id) ^ int(time.time() * 10.0)) & 0xFFFFFFFF)
+            noise_rng = np.random.default_rng((hash(obstacle_id) ^ int(time.time() * 10.0)) & 0xFFFFFFFF)
             measured_x = float(gt_x + bias_x + noise_rng.normal(0.0, sigma_x))
             measured_y = float(gt_y + bias_y + noise_rng.normal(0.0, sigma_y))
             est_x = measured_x
             est_y = measured_y
-            self.manual_worker_localization_state[worker_id] = {
+            self.manual_obstacle_localization_state[obstacle_id] = {
                 "est_x": est_x,
                 "est_y": est_y,
                 "measured_x": measured_x,
@@ -3835,13 +3881,13 @@ class LLMController():
             )
         return updated_states
 
-    def _build_collision_worker_packets_from_obstacles(self, obstacle_states):
+    def _build_collision_obstacle_packets_from_obstacles(self, obstacle_states):
         obstacle_map = {str(obs.id): obs for obs in (obstacle_states or [])}
         packets = []
-        for worker_id in COLLISION_RISK_WORKER_IDS:
-            obs = obstacle_map.get(worker_id)
+        for obstacle_id in COLLISION_RISK_OBSTACLE_IDS:
+            obs = obstacle_map.get(obstacle_id)
             if obs is not None:
-                packets.append((worker_id, obs.localization_packet))
+                packets.append((obstacle_id, obs.localization_packet))
         return packets
 
     def _build_uav_prediction_intent(self, drone_xy, drone_yaw_rad: float) -> dict:
@@ -3913,11 +3959,11 @@ class LLMController():
         if safety_state is None:
             return None
 
-        worker_packets = self._build_collision_worker_packets_from_obstacles(obstacle_states)
+        obstacle_packets = self._build_collision_obstacle_packets_from_obstacles(obstacle_states)
 
         assessed_context = self.safety_assessor.build_from_packets(
             drone_packet=safety_state.drone_packet,
-            worker_packets=worker_packets,
+            obstacle_packets=obstacle_packets,
             now=now,
             safety_state=safety_state,
             uav_velocity_hint_xy=self._build_uav_prediction_velocity_hint(
@@ -4198,7 +4244,7 @@ class LLMController():
         obstacle_states_generated = compute_obstacle_envelope_states(self.get_baseline_scene(), now_s=elapsed_scene_s)
         obstacle_states = self._simulate_obstacle_returns(obstacle_states_generated, now=now)
         if safety_state is not None:
-            worker_packets = self._build_collision_worker_packets_from_obstacles(obstacle_states)
+            obstacle_packets = self._build_collision_obstacle_packets_from_obstacles(obstacle_states)
             uav_hint = self._build_uav_prediction_velocity_hint(
                 drone_xy=np.asarray(safety_state.drone_packet.estimated_position_3d[:2], dtype=float)
                 - np.asarray(safety_state.drone_packet.b_xy[:2], dtype=float),
@@ -4206,7 +4252,7 @@ class LLMController():
             )
             safety_context = self.safety_assessor.build_from_packets(
                 drone_packet=safety_state.drone_packet,
-                worker_packets=worker_packets,
+                obstacle_packets=obstacle_packets,
                 now=now,
                 safety_state=safety_state,
                 uav_velocity_hint_xy=uav_hint,
@@ -4250,12 +4296,12 @@ class LLMController():
             safety_context = dominant_safety_context
         elif drone_packet is not None:
             # Fallback: when provider-level safety_state is unavailable, still
-            # compute collision probability with UAV + canonical worker localization packets.
-            worker_packets = self._build_collision_worker_packets_from_obstacles(obstacle_states)
-            if worker_packets:
+            # compute collision probability with UAV + canonical obstacle localization packets.
+            obstacle_packets = self._build_collision_obstacle_packets_from_obstacles(obstacle_states)
+            if obstacle_packets:
                 safety_context = self.safety_assessor.build_from_packets(
                     drone_packet=drone_packet,
-                    worker_packets=worker_packets,
+                    obstacle_packets=obstacle_packets,
                     now=now,
                     safety_state=None,
                     uav_velocity_hint_xy=self._build_uav_prediction_velocity_hint(
@@ -4291,7 +4337,7 @@ class LLMController():
             "baseline_scene": self.get_baseline_scene(),
             "baseline_scene_state": self.baseline_scene_state,
             "obstacle_envelope_states": obstacle_states,
-            "workers": [
+            "obstacles": [
                 {
                     "id": str(obs.id),
                     "gt_xy": tuple(float(v) for v in obs.gt_xy),
@@ -4306,13 +4352,13 @@ class LLMController():
                     ),
                     "ui_xy": (
                         tuple(float(v) for v in obs.gt_xy)
-                        if self.get_baseline_scene().id == "SCENE_MANUAL_WORKER_CONTROL"
+                        if self.get_baseline_scene().id == "SCENE_MANUAL_OBSTACLE_CONTROL"
                         else (
                             float(obs.localization_packet.estimated_position_3d[0] - obs.localization_packet.b_xy[0]),
                             float(obs.localization_packet.estimated_position_3d[1] - obs.localization_packet.b_xy[1]),
                         )
                     ),
-                    "heading_yaw_rad": float(self.manual_worker_poses.get(str(obs.id), {}).get("yaw_rad", 0.0)),
+                    "heading_yaw_rad": float(self.manual_obstacle_poses.get(str(obs.id), {}).get("yaw_rad", 0.0)),
                     "P_xy": np.asarray(obs.localization_packet.P_xy, dtype=float).copy(),
                 }
                 for obs in obstacle_states
@@ -4386,27 +4432,27 @@ class LLMController():
         metrics = self._compute_proximity_metrics_from_trajectory(self.get_uav_trajectory_points())
         self.collision_count = int(metrics.get("collision_count", 0) or 0)
         self.near_miss_count = int(metrics.get("near_miss_count", 0) or 0)
-        self.min_uav_worker_distance_m = metrics.get("min_uav_worker_distance_m")
-        self._collision_active_by_worker = dict(metrics.get("collision_active_by_worker", {}) or {})
-        self._near_miss_active_by_worker = dict(metrics.get("near_miss_active_by_worker", {}) or {})
+        self.min_uav_obstacle_distance_m = metrics.get("min_uav_obstacle_distance_m")
+        self._collision_active_by_obstacle = dict(metrics.get("collision_active_by_obstacle", {}) or {})
+        self._near_miss_active_by_obstacle = dict(metrics.get("near_miss_active_by_obstacle", {}) or {})
         self._latest_near_miss_events = []
         snapshot["near_miss_count"] = int(self.near_miss_count)
         snapshot["collision_count"] = int(self.collision_count)
         snapshot["near_miss_events"] = []
-        snapshot["min_uav_worker_distance_m"] = self.min_uav_worker_distance_m
+        snapshot["min_uav_obstacle_distance_m"] = self.min_uav_obstacle_distance_m
 
     def _debug_log_collision_probability_pipeline(self, snapshot: dict):
         if not isinstance(snapshot, dict):
             return
         safety_context = snapshot.get("safety_context")
-        workers = snapshot.get("workers") or []
+        obstacles = snapshot.get("obstacles") or []
         if safety_context is None:
             return
-        per_worker = list(getattr(safety_context, "per_worker_collision_probabilities", []) or [])
-        if not per_worker:
+        per_obstacle = list(getattr(safety_context, "per_obstacle_collision_probabilities", []) or [])
+        if not per_obstacle:
             return
-        worker_gt_map = {str(w.get("id")): w.get("gt_xy") for w in workers}
-        worker_est_map = {str(w.get("id")): w.get("est_xy_bias_corrected") for w in workers}
+        obstacle_gt_map = {str(w.get("id")): w.get("gt_xy") for w in obstacles}
+        obstacle_est_map = {str(w.get("id")): w.get("est_xy_bias_corrected") for w in obstacles}
         drone_gt = snapshot.get("drone_gt")
         drone_est_bias = snapshot.get("drone_est_bias_corrected") or snapshot.get("drone_est")
         lines = [
@@ -4414,19 +4460,19 @@ class LLMController():
             f"  drone_true_xy={None if drone_gt is None else (float(drone_gt[0]), float(drone_gt[1]))}",
             f"  drone_bias_corrected_xy={None if drone_est_bias is None else (float(drone_est_bias[0]), float(drone_est_bias[1]))}",
         ]
-        for item in per_worker:
+        for item in per_obstacle:
             wid = str(item.get("id"))
             lines.append(
                 "  "
-                + f"worker={wid} "
-                + f"worker_true_xy={worker_gt_map.get(wid)} "
-                + f"worker_bias_corrected_xy={worker_est_map.get(wid)} "
+                + f"obstacle={wid} "
+                + f"obstacle_true_xy={obstacle_gt_map.get(wid)} "
+                + f"obstacle_bias_corrected_xy={obstacle_est_map.get(wid)} "
                 + f"mu={item.get('mu_xy')} "
                 + f"sigma_rel={item.get('sigma_rel')} "
                 + f"r_u={item.get('r_u')} r_h={item.get('r_h')} r_c={item.get('r_c')} "
                 + f"p_exact={item.get('exact_series_probability')} "
                 + f"p_mc={item.get('monte_carlo_probability')} "
-                + f"p_worker={item.get('collision_probability')}"
+                + f"p_obstacle={item.get('collision_probability')}"
             )
         lines.append(
             "  "
@@ -4846,11 +4892,11 @@ class LLMController():
             self._agent_ready_for_eval_records = []
             self._agent_eval_results_pending_commit = []
             self._agent_pending_replan_records = []
-        with self._planning_worker_lock:
+        with self._planning_obstacle_lock:
             self._planning_generation += 1
-            planning_thread = self._planning_worker_thread
+            planning_thread = self._planning_obstacle_thread
             self._planning_inflight = False
-            self._planning_worker_thread = None
+            self._planning_obstacle_thread = None
         self._planning_response_queue = queue.Queue()
         self._evaluator_response_queue = queue.Queue()
         if eval_thread is not None and eval_thread.is_alive():
@@ -4864,8 +4910,8 @@ class LLMController():
             issues.append("virtual_position_thread_alive")
         if self._agent_eval_thread is not None and self._agent_eval_thread.is_alive():
             issues.append("agent_eval_thread_alive")
-        if self._planning_worker_thread is not None and self._planning_worker_thread.is_alive():
-            issues.append("planning_worker_thread_alive")
+        if self._planning_obstacle_thread is not None and self._planning_obstacle_thread.is_alive():
+            issues.append("planning_obstacle_thread_alive")
         if getattr(self.state_provider, "_spin_thread", None) is not None:
             spin_thread = getattr(self.state_provider, "_spin_thread")
             if spin_thread is not None and spin_thread.is_alive():
