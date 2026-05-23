@@ -170,6 +170,10 @@ def worker_mode_summary_log() -> str:
     return _SCENARIO_WORKER_MODE_SUMMARY
 
 
+def obstacle_mode_summary_log() -> str:
+    return worker_mode_summary_log()
+
+
 def _build_localized_packet_from_anchor_pipeline(
     *,
     entity_type: str,

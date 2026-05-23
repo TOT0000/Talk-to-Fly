@@ -10,14 +10,14 @@ Baseline 1 profile:
 - Trigger family: periodic heartbeat replanning.
 - Heartbeat interval: 5 seconds.
 - Planning style: periodic-minimal.
-- Main decision signals: UAV position, UAV heading, worker positions, checkpoint geometry, remaining checkpoints, and mission progress.
+- Main decision signals: UAV position, UAV heading, obstacle positions, checkpoint geometry, remaining checkpoints, and mission progress.
 
 Baseline 1 initial planning requirements:
 - Produce one complete MiniSpec mission plan for the active checkpoints.
 - Select the full checkpoint visit sequence dynamically; never hard-code A1->A2->A3->A4.
 - Prioritize geometry-first reasoning:
   - choose a smoother and shorter checkpoint order from the current UAV position and heading,
-  - avoid obvious close-pass geometry with workers,
+  - avoid obvious close-pass geometry with obstacles,
   - use low-level shaping actions only when geometry makes the direct approach awkward or risky.
 - Do not overreact to weak or ambiguous risk hints. This baseline should be conservative about unnecessary detours and unnecessary complexity.
 - Low-level skills are allowed, but use them mainly when geometry clearly suggests that direct gc() would create a tight or awkward pass.
