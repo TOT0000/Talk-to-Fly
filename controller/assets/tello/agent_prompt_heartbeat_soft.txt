@@ -14,7 +14,7 @@ At each heartbeat, decide whether to:
 - issue one full_replan_plan for the remaining mission.
 
 Full replan budget:
-- Maximum full replans for the mission: 8
+- Maximum full replans for the mission: 15
 - Full replans already used: {full_replan_count} / 15
 
 Heartbeat decision policy:
