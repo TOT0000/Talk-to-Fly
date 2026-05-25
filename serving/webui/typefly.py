@@ -1764,7 +1764,7 @@ class TypeFly:
             global_xy = self._render_c_zone_3d_view(
                 snapshot=snapshot,
                 title="C Zone 3D View",
-                figsize=(12, 9),
+                figsize=(14, 10),
             )
         else:
             global_xy = self._render_xy_view(
