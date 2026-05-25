@@ -1653,11 +1653,27 @@ class TypeFly:
         top_z = np.full_like(top_x, float(height))
         ax.plot_trisurf(top_x, top_y, top_z, color=color, alpha=min(0.95, alpha + 0.15), linewidth=0)
 
+    def _draw_ground_circle(self, ax, center_xy, radius, color, alpha=0.35, edge_alpha=0.95):
+        if center_xy is None:
+            return
+        cx, cy = float(center_xy[0]), float(center_xy[1])
+        theta = np.linspace(0.0, 2.0 * np.pi, 64)
+        rr = np.linspace(0.0, float(radius), 16)
+        theta_grid, r_grid = np.meshgrid(theta, rr)
+        x_grid = cx + r_grid * np.cos(theta_grid)
+        y_grid = cy + r_grid * np.sin(theta_grid)
+        z_grid = np.zeros_like(x_grid)
+        ax.plot_surface(x_grid, y_grid, z_grid, color=color, alpha=alpha, linewidth=0, shade=False)
+        edge_x = cx + float(radius) * np.cos(theta)
+        edge_y = cy + float(radius) * np.sin(theta)
+        edge_z = np.zeros_like(edge_x)
+        ax.plot(edge_x, edge_y, edge_z, color=color, linewidth=1.6, alpha=edge_alpha)
+
     def _render_c_zone_3d_view(self, snapshot, title="C Zone 3D View", figsize=(5, 4)):
         positions = self._extract_ui_positions(snapshot)
         fig = plt.figure(figsize=figsize)
         ax = fig.add_subplot(111, projection="3d")
-        ax.view_init(elev=24, azim=-55)
+        ax.view_init(elev=12, azim=-90)
         xx, yy = np.meshgrid(np.linspace(0.0, 12.0, 2), np.linspace(0.0, 6.0, 2))
         zz = np.zeros_like(xx)
         ax.plot_surface(xx, yy, zz, color="#ECEFF1", alpha=0.25, linewidth=0, shade=False)
@@ -1674,7 +1690,14 @@ class TypeFly:
                 color = "#FB8C00"
             else:
                 color = "#9E9E9E"
-            ax.scatter([cp.x], [cp.y], [0.0], c=color, s=28, depthshade=True)
+            self._draw_ground_circle(
+                ax,
+                center_xy=(cp.x, cp.y),
+                radius=CHECKPOINT_RADIUS_M,
+                color=color,
+                alpha=0.32,
+                edge_alpha=0.95,
+            )
             ax.text(float(cp.x), float(cp.y), 0.2, cid, fontsize=8, color="#37474F")
 
         gt_history = self._trajectory_xy_history()
@@ -1741,7 +1764,7 @@ class TypeFly:
             global_xy = self._render_c_zone_3d_view(
                 snapshot=snapshot,
                 title="C Zone 3D View",
-                figsize=(10, 8),
+                figsize=(14, 10),
             )
         else:
             global_xy = self._render_xy_view(
