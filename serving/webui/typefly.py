@@ -14,6 +14,7 @@ import matplotlib
 matplotlib.use('Agg')  # 非互動後端避免開啟GUI視窗
 import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse, Circle, Arc
+from matplotlib.lines import Line2D
 from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 from mpl_toolkits.mplot3d import proj3d
 from PIL import Image
@@ -59,6 +60,7 @@ C_ZONE_3D_AX_POSITION = [0.00, 0.00, 0.90, 0.92]
 C_ZONE_3D_DPI = 140
 C_ZONE_3D_PAD_INCHES = 0.02
 C_ZONE_3D_CAMERA_DIST = 6
+UAV_3D_ICON_ZOOM = 0.10
 
 
 def _load_icon(path):
@@ -1731,15 +1733,19 @@ class TypeFly:
             ax.text(float(xy[0]), float(xy[1]), OBSTACLE_CYLINDER_HEIGHT_M + 0.1, self._display_obstacle_id(obstacle.get("id")), fontsize=8, color="#263238")
 
         drone_xy = positions.get("drone_gt") or positions.get("drone_est")
+        uav_legend_proxy = None
         if drone_xy is not None:
             ux, uy = float(drone_xy[0]), float(drone_xy[1])
-            ax.scatter([ux], [uy], [UAV_3D_ALTITUDE_M], c="#0B57D0", s=40, label="UAV")
-            ax.text(ux, uy, UAV_3D_ALTITUDE_M + 0.12, "UAV", fontsize=8, color="#0B57D0")
             if self._uav_3d_icon_image is not None:
                 x2d, y2d, _ = proj3d.proj_transform(ux, uy, UAV_3D_ALTITUDE_M, ax.get_proj())
-                icon = OffsetImage(np.asarray(self._uav_3d_icon_image), zoom=0.08)
+                icon = OffsetImage(np.asarray(self._uav_3d_icon_image), zoom=UAV_3D_ICON_ZOOM)
                 ab = AnnotationBbox(icon, (x2d, y2d), xycoords="data", frameon=False)
                 ax.add_artist(ab)
+                ax.text(ux, uy, UAV_3D_ALTITUDE_M + 0.12, "UAV", fontsize=8, color="#0B57D0")
+                uav_legend_proxy = Line2D([0], [0], marker='o', linestyle='None', color="#0B57D0", markersize=6, label="UAV")
+            else:
+                ax.scatter([ux], [uy], [UAV_3D_ALTITUDE_M], c="#0B57D0", s=40, label="UAV")
+                ax.text(ux, uy, UAV_3D_ALTITUDE_M + 0.12, "UAV", fontsize=8, color="#0B57D0")
 
         ax.set_xlim(0.0, 12.0)
         ax.set_ylim(0.0, 6.0)
@@ -1750,6 +1756,9 @@ class TypeFly:
         ax.set_title(title, pad=2)
         ax.grid(True, linestyle="--", linewidth=0.5)
         handles, labels = ax.get_legend_handles_labels()
+        if uav_legend_proxy is not None and "UAV" not in labels:
+            handles.append(uav_legend_proxy)
+            labels.append("UAV")
         if handles:
             dedup = dict(zip(labels, handles))
             ax.legend(
