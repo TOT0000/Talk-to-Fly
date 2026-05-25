@@ -55,6 +55,10 @@ UAV_3D_ICON_HEIGHT_M = 0.5
 UAV_3D_ALTITUDE_M = 3.0
 OBSTACLE_CYLINDER_RADIUS_M = 0.3
 OBSTACLE_CYLINDER_HEIGHT_M = 5.0
+C_ZONE_3D_AX_POSITION = [0.00, 0.00, 0.90, 0.92]
+C_ZONE_3D_DPI = 140
+C_ZONE_3D_PAD_INCHES = 0.02
+C_ZONE_3D_CAMERA_DIST = 6
 
 
 def _load_icon(path):
@@ -1671,9 +1675,15 @@ class TypeFly:
 
     def _render_c_zone_3d_view(self, snapshot, title="C Zone 3D View", figsize=(5, 4)):
         positions = self._extract_ui_positions(snapshot)
-        fig = plt.figure(figsize=figsize)
+        fig = plt.figure(figsize=figsize, constrained_layout=False)
         ax = fig.add_subplot(111, projection="3d")
+        ax.set_position(C_ZONE_3D_AX_POSITION)
         ax.view_init(elev=12, azim=-90)
+        ax.set_box_aspect((12, 6, 5.5))
+        try:
+            ax.dist = C_ZONE_3D_CAMERA_DIST
+        except Exception:
+            pass
         xx, yy = np.meshgrid(np.linspace(0.0, 12.0, 2), np.linspace(0.0, 6.0, 2))
         zz = np.zeros_like(xx)
         ax.plot_surface(xx, yy, zz, color="#ECEFF1", alpha=0.25, linewidth=0, shade=False)
@@ -1737,14 +1747,28 @@ class TypeFly:
         ax.set_xlabel("X (m)")
         ax.set_ylabel("Y (m)")
         ax.set_zlabel("Z (m)")
-        ax.set_title(title)
+        ax.set_title(title, pad=2)
         ax.grid(True, linestyle="--", linewidth=0.5)
         handles, labels = ax.get_legend_handles_labels()
         if handles:
             dedup = dict(zip(labels, handles))
-            ax.legend(dedup.values(), dedup.keys(), fontsize=8, loc="upper right")
+            ax.legend(
+                dedup.values(),
+                dedup.keys(),
+                fontsize=8,
+                loc="upper right",
+                bbox_to_anchor=(1.02, 0.98),
+                borderaxespad=0.0,
+            )
+        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=0.96)
         buf = io.BytesIO()
-        fig.savefig(buf, format='png')
+        fig.savefig(
+            buf,
+            format='png',
+            bbox_inches='tight',
+            pad_inches=C_ZONE_3D_PAD_INCHES,
+            dpi=C_ZONE_3D_DPI,
+        )
         buf.seek(0)
         plt.close(fig)
         return Image.open(buf)
