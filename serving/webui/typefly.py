@@ -61,6 +61,8 @@ C_ZONE_3D_DPI = 140
 C_ZONE_3D_PAD_INCHES = 0.02
 C_ZONE_3D_CAMERA_DIST = 6
 UAV_3D_ICON_ZOOM = 0.10
+C_ZONE_3D_VIEW_ELEV_DEG = 20
+C_ZONE_3D_VIEW_AZIM_DEG = -90
 
 
 def _load_icon(path):
@@ -1680,7 +1682,7 @@ class TypeFly:
         fig = plt.figure(figsize=figsize, constrained_layout=False)
         ax = fig.add_subplot(111, projection="3d")
         ax.set_position(C_ZONE_3D_AX_POSITION)
-        ax.view_init(elev=12, azim=-90)
+        ax.view_init(elev=C_ZONE_3D_VIEW_ELEV_DEG, azim=C_ZONE_3D_VIEW_AZIM_DEG)
         ax.set_box_aspect((12, 6, 5.5))
         try:
             ax.dist = C_ZONE_3D_CAMERA_DIST
