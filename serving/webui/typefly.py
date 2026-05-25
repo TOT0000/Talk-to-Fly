@@ -14,6 +14,7 @@ import matplotlib
 matplotlib.use('Agg')  # 非互動後端避免開啟GUI視窗
 import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse, Circle, Arc
+from matplotlib.lines import Line2D
 from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 from mpl_toolkits.mplot3d import proj3d
 from PIL import Image
@@ -55,6 +56,11 @@ UAV_3D_ICON_HEIGHT_M = 0.5
 UAV_3D_ALTITUDE_M = 3.0
 OBSTACLE_CYLINDER_RADIUS_M = 0.3
 OBSTACLE_CYLINDER_HEIGHT_M = 5.0
+C_ZONE_3D_AX_POSITION = [0.00, 0.00, 0.90, 0.92]
+C_ZONE_3D_DPI = 140
+C_ZONE_3D_PAD_INCHES = 0.02
+C_ZONE_3D_CAMERA_DIST = 6
+UAV_3D_ICON_ZOOM = 0.10
 
 
 def _load_icon(path):
@@ -1653,11 +1659,33 @@ class TypeFly:
         top_z = np.full_like(top_x, float(height))
         ax.plot_trisurf(top_x, top_y, top_z, color=color, alpha=min(0.95, alpha + 0.15), linewidth=0)
 
+    def _draw_ground_circle(self, ax, center_xy, radius, color, alpha=0.35, edge_alpha=0.95):
+        if center_xy is None:
+            return
+        cx, cy = float(center_xy[0]), float(center_xy[1])
+        theta = np.linspace(0.0, 2.0 * np.pi, 64)
+        rr = np.linspace(0.0, float(radius), 16)
+        theta_grid, r_grid = np.meshgrid(theta, rr)
+        x_grid = cx + r_grid * np.cos(theta_grid)
+        y_grid = cy + r_grid * np.sin(theta_grid)
+        z_grid = np.zeros_like(x_grid)
+        ax.plot_surface(x_grid, y_grid, z_grid, color=color, alpha=alpha, linewidth=0, shade=False)
+        edge_x = cx + float(radius) * np.cos(theta)
+        edge_y = cy + float(radius) * np.sin(theta)
+        edge_z = np.zeros_like(edge_x)
+        ax.plot(edge_x, edge_y, edge_z, color=color, linewidth=1.6, alpha=edge_alpha)
+
     def _render_c_zone_3d_view(self, snapshot, title="C Zone 3D View", figsize=(5, 4)):
         positions = self._extract_ui_positions(snapshot)
-        fig = plt.figure(figsize=figsize)
+        fig = plt.figure(figsize=figsize, constrained_layout=False)
         ax = fig.add_subplot(111, projection="3d")
-        ax.view_init(elev=24, azim=-55)
+        ax.set_position(C_ZONE_3D_AX_POSITION)
+        ax.view_init(elev=12, azim=-90)
+        ax.set_box_aspect((12, 6, 5.5))
+        try:
+            ax.dist = C_ZONE_3D_CAMERA_DIST
+        except Exception:
+            pass
         xx, yy = np.meshgrid(np.linspace(0.0, 12.0, 2), np.linspace(0.0, 6.0, 2))
         zz = np.zeros_like(xx)
         ax.plot_surface(xx, yy, zz, color="#ECEFF1", alpha=0.25, linewidth=0, shade=False)
@@ -1674,7 +1702,14 @@ class TypeFly:
                 color = "#FB8C00"
             else:
                 color = "#9E9E9E"
-            ax.scatter([cp.x], [cp.y], [0.0], c=color, s=28, depthshade=True)
+            self._draw_ground_circle(
+                ax,
+                center_xy=(cp.x, cp.y),
+                radius=CHECKPOINT_RADIUS_M,
+                color=color,
+                alpha=0.32,
+                edge_alpha=0.95,
+            )
             ax.text(float(cp.x), float(cp.y), 0.2, cid, fontsize=8, color="#37474F")
 
         gt_history = self._trajectory_xy_history()
@@ -1698,15 +1733,19 @@ class TypeFly:
             ax.text(float(xy[0]), float(xy[1]), OBSTACLE_CYLINDER_HEIGHT_M + 0.1, self._display_obstacle_id(obstacle.get("id")), fontsize=8, color="#263238")
 
         drone_xy = positions.get("drone_gt") or positions.get("drone_est")
+        uav_legend_proxy = None
         if drone_xy is not None:
             ux, uy = float(drone_xy[0]), float(drone_xy[1])
-            ax.scatter([ux], [uy], [UAV_3D_ALTITUDE_M], c="#0B57D0", s=40, label="UAV")
-            ax.text(ux, uy, UAV_3D_ALTITUDE_M + 0.12, "UAV", fontsize=8, color="#0B57D0")
             if self._uav_3d_icon_image is not None:
                 x2d, y2d, _ = proj3d.proj_transform(ux, uy, UAV_3D_ALTITUDE_M, ax.get_proj())
-                icon = OffsetImage(np.asarray(self._uav_3d_icon_image), zoom=0.08)
+                icon = OffsetImage(np.asarray(self._uav_3d_icon_image), zoom=UAV_3D_ICON_ZOOM)
                 ab = AnnotationBbox(icon, (x2d, y2d), xycoords="data", frameon=False)
                 ax.add_artist(ab)
+                ax.text(ux, uy, UAV_3D_ALTITUDE_M + 0.12, "UAV", fontsize=8, color="#0B57D0")
+                uav_legend_proxy = Line2D([0], [0], marker='o', linestyle='None', color="#0B57D0", markersize=6, label="UAV")
+            else:
+                ax.scatter([ux], [uy], [UAV_3D_ALTITUDE_M], c="#0B57D0", s=40, label="UAV")
+                ax.text(ux, uy, UAV_3D_ALTITUDE_M + 0.12, "UAV", fontsize=8, color="#0B57D0")
 
         ax.set_xlim(0.0, 12.0)
         ax.set_ylim(0.0, 6.0)
@@ -1714,14 +1753,31 @@ class TypeFly:
         ax.set_xlabel("X (m)")
         ax.set_ylabel("Y (m)")
         ax.set_zlabel("Z (m)")
-        ax.set_title(title)
+        ax.set_title(title, pad=2)
         ax.grid(True, linestyle="--", linewidth=0.5)
         handles, labels = ax.get_legend_handles_labels()
+        if uav_legend_proxy is not None and "UAV" not in labels:
+            handles.append(uav_legend_proxy)
+            labels.append("UAV")
         if handles:
             dedup = dict(zip(labels, handles))
-            ax.legend(dedup.values(), dedup.keys(), fontsize=8, loc="upper right")
+            ax.legend(
+                dedup.values(),
+                dedup.keys(),
+                fontsize=8,
+                loc="upper right",
+                bbox_to_anchor=(1.02, 0.98),
+                borderaxespad=0.0,
+            )
+        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=0.96)
         buf = io.BytesIO()
-        fig.savefig(buf, format='png')
+        fig.savefig(
+            buf,
+            format='png',
+            bbox_inches='tight',
+            pad_inches=C_ZONE_3D_PAD_INCHES,
+            dpi=C_ZONE_3D_DPI,
+        )
         buf.seek(0)
         plt.close(fig)
         return Image.open(buf)
@@ -1741,7 +1797,7 @@ class TypeFly:
             global_xy = self._render_c_zone_3d_view(
                 snapshot=snapshot,
                 title="C Zone 3D View",
-                figsize=(10, 8),
+                figsize=(14, 10),
             )
         else:
             global_xy = self._render_xy_view(
