@@ -49,6 +49,8 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._last_logged_setpoint: Optional[Tuple[float, float, float, Optional[float]]] = None
         self._last_logged_command: Optional[str] = None
         self._last_logged_source: Optional[str] = None
+        self._last_offboard_publish_ts: Optional[float] = None
+        self._last_traj_publish_ts: Optional[float] = None
         self._active_command_name: Optional[str] = None
         self._active_command_value: Optional[float] = None
         self._active_command_start_time: Optional[float] = None
@@ -61,12 +63,22 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._offboard_warmup_s = max(0.0, float(os.getenv("TYPEFLY_PX4_OFFBOARD_WARMUP_S", "0.25")))
         self._offboard_confirm_timeout_s = max(0.1, float(os.getenv("TYPEFLY_PX4_OFFBOARD_CONFIRM_TIMEOUT_S", "1.0")))
         self._offboard_max_attempts = max(1, int(os.getenv("TYPEFLY_PX4_OFFBOARD_MAX_ATTEMPTS", "2")))
+        self._offboard_stream_stable_duration_s = max(0.5, float(os.getenv("TYPEFLY_PX4_OFFBOARD_STABLE_S", "2.0")))
+        self._offboard_stream_start_ts: Optional[float] = None
+        self._startup_completed = False
+        self._manual_recover_required = False
 
     def set_state_provider(self, state_provider):
         self._state_provider = state_provider
 
     def _ensure_ros_publishers(self) -> bool:
         if self._node is not None:
+            if self._setpoint_thread is None or not self._setpoint_thread.is_alive():
+                print("[PX4-THREAD] setpoint thread not alive; restarting setpoint loop")
+                self._offboard_stream_start_ts = None
+                self._last_offboard_publish_ts = None
+                self._last_traj_publish_ts = None
+                self._start_setpoint_loop()
             return True
         try:
             import rclpy
@@ -122,6 +134,12 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
                 if target is not None:
                     tx, ty, tz, tyaw = target
                     self._publish_offboard_setpoint(tx, ty, tz, yaw=tyaw)
+                else:
+                    # Keep offboard stream alive by holding current position when no explicit target yet.
+                    x, y, z = self.get_drone_position()
+                    self._publish_offboard_setpoint(x, y, z, yaw=self.get_drone_yaw())
+                if self._offboard_stream_start_ts is None:
+                    self._offboard_stream_start_ts = time.time()
                 time.sleep(0.05)  # 20 Hz offboard stream
             self._setpoint_thread_running = False
 
@@ -185,7 +203,9 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         ):
             try:
                 self._executor.spin_once(timeout_sec=0.0)
-            except Exception:
+            except Exception as exc:
+                print(f"[PX4-THREAD][ERROR] spin_once exception: {exc}")
+                print("[PX4-THREAD][ERROR] setpoint loop exited")
                 self._setpoint_thread_running = False
 
     def shutdown(self):
@@ -223,34 +243,6 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             or self._context is not None
         )
 
-    def shutdown(self):
-        self._clear_active_target()
-        self._stop_setpoint_loop()
-        if self._node is not None:
-            try:
-                self._node.destroy_node()
-            except Exception:
-                pass
-            self._node = None
-        self._pub_offboard_mode = None
-        self._pub_traj_sp = None
-        self._pub_vehicle_cmd = None
-        if self._context is not None:
-            try:
-                if self._context.ok():
-                    self._context.shutdown()
-            except Exception:
-                pass
-        self._context = None
-        self._rclpy = None
-
-    def has_active_runtime(self) -> bool:
-        return bool(
-            (self._setpoint_thread is not None and self._setpoint_thread.is_alive())
-            or self._node is not None
-            or self._context is not None
-        )
-
     def _publish_vehicle_command(self, command: int, param1: float = 0.0, param2: float = 0.0, param7: float = 0.0):
         msg = self._msg_VehicleCommand()
         msg.timestamp = self._now_us()
@@ -264,9 +256,50 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         msg.source_component = 1
         msg.from_external = True
         self._pub_vehicle_cmd.publish(msg)
+        self._log_vehicle_command_debug(command=command, source="_publish_vehicle_command", timestamp_us=msg.timestamp)
         print_debug(
             f"[PX4-CMD] vehicle_command={int(command)} param1={param1:.2f} "
             f"param2={param2:.2f} param7={param7:.2f} timestamp_us={msg.timestamp}"
+        )
+
+    def _command_name(self, command: int) -> str:
+        names = {176: "VEHICLE_CMD_DO_SET_MODE", 400: "VEHICLE_CMD_COMPONENT_ARM_DISARM", 21: "VEHICLE_CMD_NAV_LAND", 20: "VEHICLE_CMD_NAV_RETURN_TO_LAUNCH", 22: "VEHICLE_CMD_NAV_TAKEOFF"}
+        return names.get(int(command), f"CMD_{int(command)}")
+
+    def _is_failsafe_active(self) -> bool:
+        if self._state_provider is not None and hasattr(self._state_provider, "is_failsafe"):
+            return bool(self._state_provider.is_failsafe())
+        return False
+
+    def _preflight_checks_pass(self) -> bool:
+        if self._state_provider is not None and hasattr(self._state_provider, "pre_flight_checks_pass"):
+            return bool(self._state_provider.pre_flight_checks_pass())
+        return True
+
+    def _has_local_position(self) -> bool:
+        if self._state_provider is not None and hasattr(self._state_provider, "has_valid_position"):
+            return bool(self._state_provider.has_valid_position())
+        return True
+
+    def _is_nav_state_blocked_for_rearm(self) -> bool:
+        return int(self.get_navigation_state()) in {4, 5, 12}
+
+    def _offboard_stream_stable(self) -> bool:
+        if self._offboard_stream_start_ts is None:
+            return False
+        now_ts = time.time()
+        if (now_ts - self._offboard_stream_start_ts) < self._offboard_stream_stable_duration_s:
+            return False
+        if self._last_offboard_publish_ts is None or self._last_traj_publish_ts is None:
+            return False
+        return (now_ts - self._last_offboard_publish_ts) <= 0.2 and (now_ts - self._last_traj_publish_ts) <= 0.2
+
+    def _log_vehicle_command_debug(self, command: int, source: str, timestamp_us: int):
+        print_debug(
+            "[PX4-CMD-DEBUG] "
+            f"command={int(command)} command_name={self._command_name(command)} source={source} timestamp_us={int(timestamp_us)} "
+            f"nav_state={self.get_navigation_state()} arming_state={self.get_arming_state()} "
+            f"failsafe={self._is_failsafe_active()} pre_flight_checks_pass={self._preflight_checks_pass()}"
         )
 
     def _is_offboard_ready(self) -> bool:
@@ -293,13 +326,6 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         confirm_timeout_s: Optional[float] = None,
         max_attempts: Optional[int] = None,
     ) -> bool:
-        """Warm the position-setpoint stream, then request OFFBOARD + arm.
-
-        PX4 simulator motion commands rely on the offboard stream being active before
-        mode switching. Re-issuing the commands here keeps movement/rotation skills from
-        depending on takeoff() having been the only code path that armed and entered
-        offboard mode.
-        """
         cmd_mode = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_DO_SET_MODE", 176)
         cmd_arm = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_COMPONENT_ARM_DISARM", 400)
         if warmup_s is None:
@@ -309,44 +335,104 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         if max_attempts is None:
             max_attempts = self._offboard_max_attempts
 
-        # Fast path: during normal px4_sim operation we are already OFFBOARD+ARMED.
         self._set_active_target(x, y, z, yaw, writer="_ensure_offboard_control")
-        if self._is_offboard_ready():
+        if self._startup_completed and self._is_offboard_ready():
             return True
+        if self._manual_recover_required:
+            print_debug("[PX4-OFFBOARD] manual recovery required; auto OFFBOARD/ARM blocked")
+            return False
+
+        if self._is_failsafe_active() or self._is_nav_state_blocked_for_rearm():
+            if self._state_provider is not None and hasattr(self._state_provider, "debug_log_px4_failure_snapshot"):
+                self._state_provider.debug_log_px4_failure_snapshot(reason="offboard_arm_gate_blocked")
+            self._manual_recover_required = True
+            return False
+
+        if not self._preflight_checks_pass() or not self._has_local_position() or not self._offboard_stream_stable():
+            print_debug(
+                "[PX4-OFFBOARD] arm gate blocked "
+                f"preflight={self._preflight_checks_pass()} local_position={self._has_local_position()} stream_stable={self._offboard_stream_stable()}"
+            )
+            return False
+
+        if int(self.get_arming_state()) == int(self._arming_state_armed):
+            if int(self.get_navigation_state()) != int(self._nav_state_offboard):
+                self._publish_vehicle_command(cmd_mode, param1=1.0, param2=6.0)
+                if self._wait_for_offboard_ready(timeout_s=confirm_timeout_s):
+                    self._startup_completed = True
+                    return True
+            else:
+                self._startup_completed = True
+                return True
 
         for attempt in range(1, max_attempts + 1):
             time.sleep(warmup_s)
+            if self._is_failsafe_active():
+                self._manual_recover_required = True
+                print_debug("[PX4-OFFBOARD] failsafe during offboard attempt; block auto re-arm")
+                return False
+            if (
+                not self._preflight_checks_pass()
+                or not self._has_local_position()
+                or not self._offboard_stream_stable()
+                or self._is_nav_state_blocked_for_rearm()
+            ):
+                print_debug("[PX4-OFFBOARD] command 176 blocked by gate re-check")
+                return False
             self._publish_vehicle_command(cmd_mode, param1=1.0, param2=6.0)
-            self._publish_vehicle_command(cmd_arm, param1=1.0)
+            time.sleep(0.1)
+            if self._is_failsafe_active():
+                self._manual_recover_required = True
+                print_debug("[PX4-OFFBOARD] failsafe after mode command; block auto re-arm")
+                return False
+            if (
+                self._preflight_checks_pass()
+                and self._has_local_position()
+                and self._offboard_stream_stable()
+                and (not self._is_nav_state_blocked_for_rearm())
+                and int(self.get_navigation_state()) == int(self._nav_state_offboard)
+                and int(self.get_arming_state()) != int(self._arming_state_armed)
+            ):
+                self._publish_vehicle_command(cmd_arm, param1=1.0)
             if self._wait_for_offboard_ready(timeout_s=confirm_timeout_s):
-                print_debug(
-                    f"[PX4-OFFBOARD] ready attempt={attempt} "
-                    f"nav_state={self.get_navigation_state()} arming_state={self.get_arming_state()}"
-                )
+                self._startup_completed = True
                 return True
-            print_debug(
-                f"[PX4-OFFBOARD] retry attempt={attempt} "
-                f"nav_state={self.get_navigation_state()} arming_state={self.get_arming_state()}"
-            )
         return False
+
+    def _watchdog_publish_timing(self, stream_name: str, now_ts: float, last_ts: Optional[float]):
+        if last_ts is None:
+            return
+        dt = now_ts - float(last_ts)
+        if dt > 0.5:
+            print(f"[PX4-WATCHDOG][ERROR] {stream_name}_publish_gap={dt:.3f}s active_function={self._active_command_name or 'hold'}")
+        elif dt > 0.2:
+            print_debug(f"[PX4-WATCHDOG][WARN] {stream_name}_publish_gap={dt:.3f}s active_function={self._active_command_name or 'hold'}")
 
     def _publish_offboard_setpoint(self, x: float, y: float, z: float, yaw: Optional[float] = None):
         mode = self._msg_OffboardControlMode()
         mode.timestamp = self._now_us()
+        mode_publish_ts = time.time()
+        self._watchdog_publish_timing("offboard_control_mode", mode_publish_ts, self._last_offboard_publish_ts)
         mode.position = True
         mode.velocity = False
         mode.acceleration = False
         mode.attitude = False
         mode.body_rate = False
         self._pub_offboard_mode.publish(mode)
+        self._last_offboard_publish_ts = mode_publish_ts
+        print_debug(f"[PX4-PUB] offboard_control_mode ts={mode_publish_ts:.6f}", env_var="TYPEFLY_VERBOSE_DEBUG")
 
         sp = self._msg_TrajectorySetpoint()
         sp.timestamp = self._now_us()
         sp.position = [float(x), float(y), float(z)]
         if yaw is not None:
             sp.yaw = float(yaw)
+        traj_publish_ts = time.time()
+        self._watchdog_publish_timing("trajectory_setpoint", traj_publish_ts, self._last_traj_publish_ts)
         self._pub_traj_sp.publish(sp)
-        publish_ts = time.time()
+        self._last_traj_publish_ts = traj_publish_ts
+        print_debug(f"[PX4-PUB] trajectory_setpoint ts={traj_publish_ts:.6f}", env_var="TYPEFLY_VERBOSE_DEBUG")
+        publish_ts = traj_publish_ts
         current_setpoint = (float(x), float(y), float(z), None if yaw is None else float(yaw))
         current_command = self._active_command_name or "hold"
         current_source = self._active_target_source or "unspecified"
@@ -847,11 +933,7 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         target_yaw = float(target_yaw)
         (x, y, z), yaw = self._get_state()
 
-        # If scenario wants airborne state but current vehicle is on/near ground, lift first.
-        if tz < -0.2 and z > -0.3:
-            if not self.takeoff():
-                return False
-            (x, y, z), yaw = self._get_state()
+        # Auto takeoff intentionally disabled during scenario init to prevent implicit ARM loops.
 
         if not self._ensure_offboard_control(x, y, z, yaw):
             return False
