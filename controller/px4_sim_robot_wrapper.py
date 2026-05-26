@@ -49,6 +49,8 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._last_logged_setpoint: Optional[Tuple[float, float, float, Optional[float]]] = None
         self._last_logged_command: Optional[str] = None
         self._last_logged_source: Optional[str] = None
+        self._last_offboard_publish_ts: Optional[float] = None
+        self._last_traj_publish_ts: Optional[float] = None
         self._active_command_name: Optional[str] = None
         self._active_command_value: Optional[float] = None
         self._active_command_start_time: Optional[float] = None
@@ -122,6 +124,10 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
                 if target is not None:
                     tx, ty, tz, tyaw = target
                     self._publish_offboard_setpoint(tx, ty, tz, yaw=tyaw)
+                else:
+                    # Keep offboard stream alive by holding current position when no explicit target yet.
+                    x, y, z = self.get_drone_position()
+                    self._publish_offboard_setpoint(x, y, z, yaw=self.get_drone_yaw())
                 time.sleep(0.05)  # 20 Hz offboard stream
             self._setpoint_thread_running = False
 
@@ -330,23 +336,40 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
             )
         return False
 
+    def _watchdog_publish_timing(self, stream_name: str, now_ts: float, last_ts: Optional[float]):
+        if last_ts is None:
+            return
+        dt = now_ts - float(last_ts)
+        if dt > 0.5:
+            print(f"[PX4-WATCHDOG][ERROR] {stream_name}_publish_gap={dt:.3f}s active_function={self._active_command_name or 'hold'}")
+        elif dt > 0.2:
+            print_debug(f"[PX4-WATCHDOG][WARN] {stream_name}_publish_gap={dt:.3f}s active_function={self._active_command_name or 'hold'}")
+
     def _publish_offboard_setpoint(self, x: float, y: float, z: float, yaw: Optional[float] = None):
         mode = self._msg_OffboardControlMode()
         mode.timestamp = self._now_us()
+        mode_publish_ts = time.time()
+        self._watchdog_publish_timing("offboard_control_mode", mode_publish_ts, self._last_offboard_publish_ts)
         mode.position = True
         mode.velocity = False
         mode.acceleration = False
         mode.attitude = False
         mode.body_rate = False
         self._pub_offboard_mode.publish(mode)
+        self._last_offboard_publish_ts = mode_publish_ts
+        print_debug(f"[PX4-PUB] offboard_control_mode ts={mode_publish_ts:.6f}", env_var="TYPEFLY_VERBOSE_DEBUG")
 
         sp = self._msg_TrajectorySetpoint()
         sp.timestamp = self._now_us()
         sp.position = [float(x), float(y), float(z)]
         if yaw is not None:
             sp.yaw = float(yaw)
+        traj_publish_ts = time.time()
+        self._watchdog_publish_timing("trajectory_setpoint", traj_publish_ts, self._last_traj_publish_ts)
         self._pub_traj_sp.publish(sp)
-        publish_ts = time.time()
+        self._last_traj_publish_ts = traj_publish_ts
+        print_debug(f"[PX4-PUB] trajectory_setpoint ts={traj_publish_ts:.6f}", env_var="TYPEFLY_VERBOSE_DEBUG")
+        publish_ts = traj_publish_ts
         current_setpoint = (float(x), float(y), float(z), None if yaw is None else float(yaw))
         current_command = self._active_command_name or "hold"
         current_source = self._active_target_source or "unspecified"

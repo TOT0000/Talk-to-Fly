@@ -96,6 +96,13 @@ class SimStateProvider(StateProvider):
             "/fmu/out/vehicle_status_v2",
             "/fmu/out/vehicle_status",
         )
+        self._failsafe_flags_topics = ("/fmu/out/failsafe_flags",)
+        self._vehicle_land_detected_topics = ("/fmu/out/vehicle_land_detected",)
+        self._vehicle_attitude_topics = ("/fmu/out/vehicle_attitude",)
+        self._vehicle_local_position_echo_topics = ("/fmu/out/vehicle_local_position",)
+        self._last_failsafe_flags = {}
+        self._last_land_detected = {}
+        self._last_attitude = {}
         self._anchor_provider = AnchorGeometryProvider()
         self._localization_error_model = LocalizationErrorModel()
         self._localization_estimator = IterativeLeastSquaresEstimator3D()
@@ -246,6 +253,49 @@ class SimStateProvider(StateProvider):
                 f"[PX4_SIM][vehicle_status] nav_state={nav_state} arming_state={arming_state} "
                 f"(prev_nav_state={prev_nav_state} prev_arming_state={prev_arming_state})"
             )
+
+
+    def _on_failsafe_flags(self, msg):
+        fields = {
+            "offboard_control_signal_lost": bool(getattr(msg, "offboard_control_signal_lost", False)),
+            "manual_control_signal_lost": bool(getattr(msg, "manual_control_signal_lost", False)),
+            "gcs_connection_lost": bool(getattr(msg, "gcs_connection_lost", False)),
+            "battery_warning": int(getattr(msg, "battery_warning", 0)),
+            "fd_critical_failure": bool(getattr(msg, "fd_critical_failure", False)),
+        }
+        prev = dict(self._last_failsafe_flags)
+        self._last_failsafe_flags = fields
+        if fields != prev:
+            print_debug(f"[PX4_SIM][failsafe_flags] {fields}")
+        if fields.get("offboard_control_signal_lost") or fields.get("fd_critical_failure"):
+            self.debug_log_px4_failure_snapshot(reason="failsafe_trigger")
+
+    def _on_vehicle_land_detected(self, msg):
+        fields = {
+            "landed": bool(getattr(msg, "landed", False)),
+            "ground_contact": bool(getattr(msg, "ground_contact", False)),
+            "maybe_landed": bool(getattr(msg, "maybe_landed", False)),
+            "freefall": bool(getattr(msg, "freefall", False)),
+        }
+        self._last_land_detected = fields
+
+    def _on_vehicle_attitude(self, msg):
+        q = getattr(msg, "q", [0.0,0.0,0.0,1.0])
+        self._last_attitude = {"q": [float(v) for v in q[:4]]}
+
+    def debug_log_px4_failure_snapshot(self, reason: str = "manual"):
+        with self._lock:
+            position = self._cache.position
+            velocity = self._cache.velocity
+            yaw = self._cache.yaw
+            nav_state = self._cache.nav_state
+            arming_state = self._cache.arming_state
+        print_debug(
+            f"[PX4-FAILSAFE-SNAPSHOT] reason={reason} "
+            f"vehicle_status={{'nav_state': {nav_state}, 'arming_state': {arming_state}}} "
+            f"vehicle_local_position={{'x': {position[0]:.3f}, 'y': {position[1]:.3f}, 'z': {position[2]:.3f}, 'vx': {velocity[0]:.3f}, 'vy': {velocity[1]:.3f}, 'vz': {velocity[2]:.3f}, 'yaw': {yaw:.3f}}} "
+            f"vehicle_land_detected={self._last_land_detected} vehicle_attitude={self._last_attitude} failsafe_flags={self._last_failsafe_flags}"
+        )
 
     def _resolve_user_position_msg_type(self, point_cls, point_stamped_cls) -> Optional[Type]:
         """Resolve a single ROS2 message type for /sim/user_position subscription."""
@@ -563,6 +613,9 @@ class SimStateProvider(StateProvider):
         SingleThreadedExecutor = None
         VehicleLocalPosition = None
         VehicleStatus = None
+        FailsafeFlags = None
+        VehicleLandDetected = None
+        VehicleAttitude = None
         Point = None
         PointStamped = None
         qos_profile_sensor_data = None
@@ -571,7 +624,7 @@ class SimStateProvider(StateProvider):
             from rclpy.node import Node as _Node
             from rclpy.executors import SingleThreadedExecutor as _SingleThreadedExecutor
             from rclpy.qos import qos_profile_sensor_data as _qos_profile_sensor_data
-            from px4_msgs.msg import VehicleLocalPosition as _VehicleLocalPosition, VehicleStatus as _VehicleStatus
+            from px4_msgs.msg import VehicleLocalPosition as _VehicleLocalPosition, VehicleStatus as _VehicleStatus, FailsafeFlags as _FailsafeFlags, VehicleLandDetected as _VehicleLandDetected, VehicleAttitude as _VehicleAttitude
             try:
                 from geometry_msgs.msg import Point as _Point, PointStamped as _PointStamped
             except ImportError:
@@ -583,6 +636,9 @@ class SimStateProvider(StateProvider):
             qos_profile_sensor_data = _qos_profile_sensor_data
             VehicleLocalPosition = _VehicleLocalPosition
             VehicleStatus = _VehicleStatus
+            FailsafeFlags = _FailsafeFlags
+            VehicleLandDetected = _VehicleLandDetected
+            VehicleAttitude = _VehicleAttitude
             Point = _Point
             PointStamped = _PointStamped
         except ImportError as exc:
@@ -624,6 +680,16 @@ class SimStateProvider(StateProvider):
                 self._on_vehicle_status,
                 sensor_qos,
             )
+
+        if FailsafeFlags is not None:
+            for topic in self._failsafe_flags_topics:
+                self._node.create_subscription(FailsafeFlags, topic, self._on_failsafe_flags, sensor_qos)
+        if VehicleLandDetected is not None:
+            for topic in self._vehicle_land_detected_topics:
+                self._node.create_subscription(VehicleLandDetected, topic, self._on_vehicle_land_detected, sensor_qos)
+        if VehicleAttitude is not None:
+            for topic in self._vehicle_attitude_topics:
+                self._node.create_subscription(VehicleAttitude, topic, self._on_vehicle_attitude, sensor_qos)
 
         # User position topic uses exactly one configured message type.
         user_position_msg_type = self._resolve_user_position_msg_type(Point, PointStamped)
