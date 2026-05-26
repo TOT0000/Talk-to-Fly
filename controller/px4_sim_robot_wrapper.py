@@ -823,8 +823,6 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._publish_vehicle_command(cmd_land)
 
     def reposition_for_scenario(self, scenario) -> bool:
-        if not self._ensure_ros_publishers():
-            return False
         if self._state_provider is not None and hasattr(self._state_provider, "wait_for_position"):
             if not self._state_provider.wait_for_position(timeout_s=3.0):
                 return False
@@ -846,6 +844,27 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         tx, ty, tz = [float(v) for v in target_pose]
         target_yaw = float(target_yaw)
         (x, y, z), yaw = self._get_state()
+        motion_enabled = bool(
+            str(os.getenv("TYPEFLY_ENABLE_SCENARIO_REPOSITION_MOTION", "0")).strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        print_t(
+            "[PX4-SCENARIO] "
+            f"target={self._format_position((tx, ty, tz))} yaw={target_yaw:.2f} "
+            f"current={self._format_position((x, y, z))} current_yaw={yaw:.2f} "
+            f"TYPEFLY_ENABLE_SCENARIO_REPOSITION_MOTION={int(motion_enabled)}"
+        )
+        if not motion_enabled:
+            print_t(
+                "[PX4-SCENARIO] scenario reposition motion disabled; "
+                f"deferred target={self._format_position((tx, ty, tz))} yaw={target_yaw:.2f}; "
+                "skip_motion=True skip_takeoff=True skip_offboard=True skip_move=True "
+                "vehicle_command_176_sent=False vehicle_command_400_sent=False"
+            )
+            return True
+
+        if not self._ensure_ros_publishers():
+            return False
 
         # If scenario wants airborne state but current vehicle is on/near ground, lift first.
         if tz < -0.2 and z > -0.3:
