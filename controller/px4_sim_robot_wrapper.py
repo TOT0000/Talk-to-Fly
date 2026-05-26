@@ -63,6 +63,10 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         self._offboard_warmup_s = max(0.0, float(os.getenv("TYPEFLY_PX4_OFFBOARD_WARMUP_S", "0.25")))
         self._offboard_confirm_timeout_s = max(0.1, float(os.getenv("TYPEFLY_PX4_OFFBOARD_CONFIRM_TIMEOUT_S", "1.0")))
         self._offboard_max_attempts = max(1, int(os.getenv("TYPEFLY_PX4_OFFBOARD_MAX_ATTEMPTS", "2")))
+        self._offboard_stream_stable_duration_s = max(0.5, float(os.getenv("TYPEFLY_PX4_OFFBOARD_STABLE_S", "2.0")))
+        self._offboard_stream_start_ts: Optional[float] = None
+        self._startup_completed = False
+        self._manual_recover_required = False
 
     def set_state_provider(self, state_provider):
         self._state_provider = state_provider
@@ -128,6 +132,8 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
                     # Keep offboard stream alive by holding current position when no explicit target yet.
                     x, y, z = self.get_drone_position()
                     self._publish_offboard_setpoint(x, y, z, yaw=self.get_drone_yaw())
+                if self._offboard_stream_start_ts is None:
+                    self._offboard_stream_start_ts = time.time()
                 time.sleep(0.05)  # 20 Hz offboard stream
             self._setpoint_thread_running = False
 
@@ -270,9 +276,43 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         msg.source_component = 1
         msg.from_external = True
         self._pub_vehicle_cmd.publish(msg)
+        self._log_vehicle_command_debug(command=command, source="_publish_vehicle_command", timestamp_us=msg.timestamp)
         print_debug(
             f"[PX4-CMD] vehicle_command={int(command)} param1={param1:.2f} "
             f"param2={param2:.2f} param7={param7:.2f} timestamp_us={msg.timestamp}"
+        )
+
+    def _command_name(self, command: int) -> str:
+        names = {176: "VEHICLE_CMD_DO_SET_MODE", 400: "VEHICLE_CMD_COMPONENT_ARM_DISARM", 21: "VEHICLE_CMD_NAV_LAND", 20: "VEHICLE_CMD_NAV_RETURN_TO_LAUNCH", 22: "VEHICLE_CMD_NAV_TAKEOFF"}
+        return names.get(int(command), f"CMD_{int(command)}")
+
+    def _is_failsafe_active(self) -> bool:
+        if self._state_provider is not None and hasattr(self._state_provider, "is_failsafe"):
+            return bool(self._state_provider.is_failsafe())
+        return False
+
+    def _preflight_checks_pass(self) -> bool:
+        if self._state_provider is not None and hasattr(self._state_provider, "pre_flight_checks_pass"):
+            return bool(self._state_provider.pre_flight_checks_pass())
+        return True
+
+    def _has_local_position(self) -> bool:
+        if self._state_provider is not None and hasattr(self._state_provider, "has_valid_position"):
+            return bool(self._state_provider.has_valid_position())
+        return True
+
+    def _is_nav_state_blocked_for_rearm(self) -> bool:
+        return int(self.get_navigation_state()) in {5, 12}
+
+    def _offboard_stream_stable(self) -> bool:
+        return self._offboard_stream_start_ts is not None and (time.time() - self._offboard_stream_start_ts) >= self._offboard_stream_stable_duration_s
+
+    def _log_vehicle_command_debug(self, command: int, source: str, timestamp_us: int):
+        print_debug(
+            "[PX4-CMD-DEBUG] "
+            f"command={int(command)} command_name={self._command_name(command)} source={source} timestamp_us={int(timestamp_us)} "
+            f"nav_state={self.get_navigation_state()} arming_state={self.get_arming_state()} "
+            f"failsafe={self._is_failsafe_active()} pre_flight_checks_pass={self._preflight_checks_pass()}"
         )
 
     def _is_offboard_ready(self) -> bool:
@@ -299,13 +339,6 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         confirm_timeout_s: Optional[float] = None,
         max_attempts: Optional[int] = None,
     ) -> bool:
-        """Warm the position-setpoint stream, then request OFFBOARD + arm.
-
-        PX4 simulator motion commands rely on the offboard stream being active before
-        mode switching. Re-issuing the commands here keeps movement/rotation skills from
-        depending on takeoff() having been the only code path that armed and entered
-        offboard mode.
-        """
         cmd_mode = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_DO_SET_MODE", 176)
         cmd_arm = getattr(self._msg_VehicleCommand, "VEHICLE_CMD_COMPONENT_ARM_DISARM", 400)
         if warmup_s is None:
@@ -315,25 +348,45 @@ class Px4SimRobotWrapper(VirtualRobotWrapper):
         if max_attempts is None:
             max_attempts = self._offboard_max_attempts
 
-        # Fast path: during normal px4_sim operation we are already OFFBOARD+ARMED.
         self._set_active_target(x, y, z, yaw, writer="_ensure_offboard_control")
-        if self._is_offboard_ready():
+        if self._startup_completed and self._is_offboard_ready():
             return True
+        if self._manual_recover_required:
+            print_debug("[PX4-OFFBOARD] manual recovery required; auto OFFBOARD/ARM blocked")
+            return False
+
+        if self._is_failsafe_active() or self._is_nav_state_blocked_for_rearm():
+            if self._state_provider is not None and hasattr(self._state_provider, "debug_log_px4_failure_snapshot"):
+                self._state_provider.debug_log_px4_failure_snapshot(reason="offboard_arm_gate_blocked")
+            self._manual_recover_required = True
+            return False
+
+        if not self._preflight_checks_pass() or not self._has_local_position() or not self._offboard_stream_stable():
+            print_debug(
+                "[PX4-OFFBOARD] arm gate blocked "
+                f"preflight={self._preflight_checks_pass()} local_position={self._has_local_position()} stream_stable={self._offboard_stream_stable()}"
+            )
+            return False
+
+        if int(self.get_arming_state()) == int(self._arming_state_armed):
+            if int(self.get_navigation_state()) != int(self._nav_state_offboard):
+                self._publish_vehicle_command(cmd_mode, param1=1.0, param2=6.0)
+                if self._wait_for_offboard_ready(timeout_s=confirm_timeout_s):
+                    self._startup_completed = True
+                    return True
+            else:
+                self._startup_completed = True
+                return True
 
         for attempt in range(1, max_attempts + 1):
             time.sleep(warmup_s)
             self._publish_vehicle_command(cmd_mode, param1=1.0, param2=6.0)
-            self._publish_vehicle_command(cmd_arm, param1=1.0)
+            time.sleep(0.1)
+            if int(self.get_navigation_state()) == int(self._nav_state_offboard) and int(self.get_arming_state()) != int(self._arming_state_armed):
+                self._publish_vehicle_command(cmd_arm, param1=1.0)
             if self._wait_for_offboard_ready(timeout_s=confirm_timeout_s):
-                print_debug(
-                    f"[PX4-OFFBOARD] ready attempt={attempt} "
-                    f"nav_state={self.get_navigation_state()} arming_state={self.get_arming_state()}"
-                )
+                self._startup_completed = True
                 return True
-            print_debug(
-                f"[PX4-OFFBOARD] retry attempt={attempt} "
-                f"nav_state={self.get_navigation_state()} arming_state={self.get_arming_state()}"
-            )
         return False
 
     def _watchdog_publish_timing(self, stream_name: str, now_ts: float, last_ts: Optional[float]):

@@ -23,6 +23,12 @@ class _SimStateCache:
     yaw: float = 0.0
     nav_state: int = 0
     arming_state: int = 0
+    failsafe: bool = False
+    pre_flight_checks_pass: bool = False
+    vehicle_type: int = 0
+    failsafe_and_user_took_over: bool = False
+    failsafe_defer_state: int = 0
+    latest_vehicle_status_ts: float = 0.0
 
 
 class _SharedRos2Context:
@@ -103,6 +109,7 @@ class SimStateProvider(StateProvider):
         self._last_failsafe_flags = {}
         self._last_land_detected = {}
         self._last_attitude = {}
+        self._last_vehicle_control_mode = {}
         self._anchor_provider = AnchorGeometryProvider()
         self._localization_error_model = LocalizationErrorModel()
         self._localization_estimator = IterativeLeastSquaresEstimator3D()
@@ -241,16 +248,38 @@ class SimStateProvider(StateProvider):
     def _on_vehicle_status(self, msg):
         nav_state = int(getattr(msg, "nav_state", 0))
         arming_state = int(getattr(msg, "arming_state", 0))
+        failsafe = bool(getattr(msg, "failsafe", False))
+        pre_flight_checks_pass = bool(getattr(msg, "pre_flight_checks_pass", False))
+        vehicle_type = int(getattr(msg, "vehicle_type", 0))
+        failsafe_and_user_took_over = bool(getattr(msg, "failsafe_and_user_took_over", False))
+        failsafe_defer_state = int(getattr(msg, "failsafe_defer_state", 0))
+        accepts_offboard_setpoints = bool(getattr(msg, "in_transition_mode", False))
+        timestamp_now = time.time()
 
         with self._lock:
             prev_nav_state = self._cache.nav_state
             prev_arming_state = self._cache.arming_state
+            prev_failsafe = self._cache.failsafe
+            prev_preflight = self._cache.pre_flight_checks_pass
             self._cache.nav_state = nav_state
             self._cache.arming_state = arming_state
+            self._cache.failsafe = failsafe
+            self._cache.pre_flight_checks_pass = pre_flight_checks_pass
+            self._cache.vehicle_type = vehicle_type
+            self._cache.failsafe_and_user_took_over = failsafe_and_user_took_over
+            self._cache.failsafe_defer_state = failsafe_defer_state
+            self._cache.latest_vehicle_status_ts = timestamp_now
+            self._last_vehicle_control_mode = {"accepts_offboard_setpoints": accepts_offboard_setpoints}
 
-        if nav_state != prev_nav_state or arming_state != prev_arming_state:
+        if (
+            nav_state != prev_nav_state
+            or arming_state != prev_arming_state
+            or failsafe != prev_failsafe
+            or pre_flight_checks_pass != prev_preflight
+        ):
             print_debug(
                 f"[PX4_SIM][vehicle_status] nav_state={nav_state} arming_state={arming_state} "
+                f"failsafe={failsafe} pre_flight_checks_pass={pre_flight_checks_pass} "
                 f"(prev_nav_state={prev_nav_state} prev_arming_state={prev_arming_state})"
             )
 
@@ -290,12 +319,24 @@ class SimStateProvider(StateProvider):
             yaw = self._cache.yaw
             nav_state = self._cache.nav_state
             arming_state = self._cache.arming_state
+            failsafe = self._cache.failsafe
+            preflight = self._cache.pre_flight_checks_pass
+            control_mode = dict(getattr(self, "_last_vehicle_control_mode", {}))
         print_debug(
             f"[PX4-FAILSAFE-SNAPSHOT] reason={reason} "
-            f"vehicle_status={{'nav_state': {nav_state}, 'arming_state': {arming_state}}} "
+            f"vehicle_status={{'nav_state': {nav_state}, 'arming_state': {arming_state}, 'failsafe': {failsafe}, 'pre_flight_checks_pass': {preflight}}} "
             f"vehicle_local_position={{'x': {position[0]:.3f}, 'y': {position[1]:.3f}, 'z': {position[2]:.3f}, 'vx': {velocity[0]:.3f}, 'vy': {velocity[1]:.3f}, 'vz': {velocity[2]:.3f}, 'yaw': {yaw:.3f}}} "
-            f"vehicle_land_detected={self._last_land_detected} vehicle_attitude={self._last_attitude} failsafe_flags={self._last_failsafe_flags}"
+            f"vehicle_land_detected={self._last_land_detected} vehicle_attitude={self._last_attitude} "
+            f"vehicle_control_mode={control_mode} failsafe_flags={self._last_failsafe_flags}"
         )
+
+    def is_failsafe(self) -> bool:
+        with self._lock:
+            return bool(self._cache.failsafe)
+
+    def pre_flight_checks_pass(self) -> bool:
+        with self._lock:
+            return bool(self._cache.pre_flight_checks_pass)
 
     def _resolve_user_position_msg_type(self, point_cls, point_stamped_cls) -> Optional[Type]:
         """Resolve a single ROS2 message type for /sim/user_position subscription."""
