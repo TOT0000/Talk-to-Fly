@@ -60,7 +60,7 @@ C_ZONE_3D_AX_POSITION = [0.00, 0.00, 0.90, 0.92]
 C_ZONE_3D_DPI = 140
 C_ZONE_3D_PAD_INCHES = 0.02
 C_ZONE_3D_CAMERA_DIST = 2
-UAV_3D_ICON_ZOOM = 0.10
+UAV_3D_ICON_ZOOM = 0.12
 C_ZONE_3D_VIEW_ELEV_DEG = 40
 C_ZONE_3D_VIEW_AZIM_DEG = -90
 
@@ -1646,7 +1646,7 @@ class TypeFly:
         plt.close(fig_xy)
         return Image.open(buf_xy)
 
-    def _draw_cylinder(self, ax, center_xy, radius=OBSTACLE_CYLINDER_RADIUS_M, height=OBSTACLE_CYLINDER_HEIGHT_M, color="#9E9E9E", alpha=0.55):
+    def _draw_cylinder(self, ax, center_xy, radius=OBSTACLE_CYLINDER_RADIUS_M, height=OBSTACLE_CYLINDER_HEIGHT_M, color="#9E9E9E", alpha=1.0):
         if center_xy is None:
             return
         cx, cy = float(center_xy[0]), float(center_xy[1])
