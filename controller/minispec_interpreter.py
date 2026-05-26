@@ -342,6 +342,7 @@ class Statement:
         else:
             skill_instance = Statement.low_level_skillset.get_skill(name)
             if skill_instance is not None:
+                print_t(f"[MINISPEC-EXEC] executing skill={skill_instance.get_name()} args={args}")
                 print_debug(f'Executing low-level skill: {skill_instance.get_name()} {args}')
                 return MiniSpecReturnValue.from_tuple(skill_instance.execute(args))
 
@@ -683,6 +684,10 @@ class MiniSpecInterpreter:
         return drained
 
     def execute(self, code: Any | List[str]) -> MiniSpecReturnValue:
+        if self.execution_thread is None or (not self.execution_thread.is_alive()):
+            print_t("[MINISPEC] executor thread not alive; restarting")
+            self.execution_thread = Thread(target=self.executor)
+            self.execution_thread.start()
         print_t(f'>>> Get a stream')
         self.execution_history = []
         self.timestamp_get_plan = time.time()
@@ -691,6 +696,8 @@ class MiniSpecInterpreter:
         # consuming statements and program_count initialization.
         program.parse(code, False)
         self.program_count = len(program.statements)
+        for statement in program.statements:
+            print_t(f"[MINISPEC-EXEC] queue statement={statement}")
         for statement in program.statements:
             self.execution_queue.put(statement)
         t2 = time.time()
@@ -750,6 +757,7 @@ class MiniSpecInterpreter:
                     print_t(">>> Start execution")
                 statement = self.execution_queue.get()
                 print_debug(f'Queue get statement: {statement}')
+                print_t(f"[MINISPEC-EXEC] queue statement={statement}")
                 try:
                     ret_val = statement.eval()
                 except Exception as e:

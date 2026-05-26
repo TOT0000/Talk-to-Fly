@@ -2615,6 +2615,8 @@ class LLMController():
         return image
     
     def execute_minispec(self, minispec: str, silent: bool = False, allow_auto_interrupt: bool = True):
+        print_t(f"[MINISPEC-EXEC] received plan={str(minispec or '').strip()}")
+        self._ensure_px4_mission_takeoff_before_minispec(minispec)
         statement_count = len([segment for segment in str(minispec or "").split(";") if str(segment).strip()])
         print_t(
             "[PLAN-QUEUE] "
@@ -2644,6 +2646,50 @@ class LLMController():
         ):
             raise RuntimeError(ret_val.value)
         return ret_val
+
+    def _plan_contains_takeoff(self, minispec: str) -> bool:
+        text = str(minispec or "").strip().lower()
+        return bool(re.search(r"\b(?:takeoff|to)\s*(?:\(|;|$)", text))
+
+    def _plan_contains_motion_statement(self, minispec: str) -> bool:
+        text = str(minispec or "").strip().lower()
+        return bool(re.search(r"\b(?:gc|go_checkpoint|mf|move_forward|mb|move_backward|ml|move_left|mr|move_right|tu|turn_ccw|tc|turn_cw|up|move_up|down|move_down)\s*\(", text))
+
+    def _ensure_px4_mission_takeoff_before_minispec(self, minispec: str) -> None:
+        if self.robot_type != RobotType.PX4_SIM:
+            return
+        print_t("[PX4-MISSION-START] ensure takeoff before MiniSpec execution")
+        provider = getattr(self, "state_provider", None)
+        if provider is None:
+            print_t("[PX4-MISSION-START] state_provider missing")
+            return
+        if getattr(provider, "_spin_thread", None) is None or not provider._spin_thread.is_alive():
+            print_t("[PX4-MISSION-START] state_provider not started; starting now")
+            try:
+                provider.start()
+            except Exception as exc:
+                print_t(f"[PX4-MISSION-START] state_provider start failed: {exc}")
+                return
+        has_valid_position = bool(hasattr(provider, "wait_for_position") and provider.wait_for_position(timeout_s=3.0))
+        print_t(f"[PX4-MISSION-START] local_position_valid={has_valid_position}")
+        if not has_valid_position:
+            return
+        nav_state = int(getattr(self.drone, "get_navigation_state", lambda: 0)() or 0)
+        arming_state = int(getattr(self.drone, "get_arming_state", lambda: 0)() or 0)
+        drone_pos = tuple(float(v) for v in (self.drone.get_drone_position() or (0.0, 0.0, 0.0)))
+        already_airborne = drone_pos[2] < -0.3
+        plan_has_takeoff = self._plan_contains_takeoff(minispec)
+        plan_has_motion = self._plan_contains_motion_statement(minispec)
+        already_ready = (arming_state == 2 and nav_state == 14) or already_airborne
+        print_t(
+            "[PX4-MISSION-START] "
+            f"plan_has_takeoff={plan_has_takeoff} plan_has_motion={plan_has_motion} "
+            f"armed={arming_state == 2} offboard={nav_state == 14} airborne={already_airborne}"
+        )
+        if plan_has_takeoff or already_ready or (not plan_has_motion):
+            return
+        result = bool(self.drone.takeoff())
+        print_t(f"[PX4-MISSION-START] takeoff result={result}")
 
     def _extract_first_checkpoint_from_plan(self, minispec: str) -> Optional[str]:
         text = str(minispec or "")
