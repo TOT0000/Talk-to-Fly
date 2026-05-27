@@ -1748,6 +1748,7 @@ class TypeFly:
                 label="UAV ground projection",
             )
 
+        drone_xy = positions.get("drone_gt") or positions.get("drone_est")
         obstacles = snapshot.get("obstacles") or []
         # Reuse existing collision_count signal and map the latest collision to the nearest obstacle.
         collision_count = int(snapshot.get("collision_count", self._collision_prev_count) or 0)
