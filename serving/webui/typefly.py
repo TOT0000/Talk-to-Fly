@@ -60,7 +60,7 @@ C_ZONE_3D_AX_POSITION = [0.00, 0.00, 0.90, 0.92]
 C_ZONE_3D_DPI = 140
 C_ZONE_3D_PAD_INCHES = 0.02
 C_ZONE_3D_CAMERA_DIST = 2
-UAV_3D_ICON_ZOOM = 0.12
+UAV_3D_ICON_ZOOM = 0.14
 C_ZONE_3D_VIEW_ELEV_DEG = 40
 C_ZONE_3D_VIEW_AZIM_DEG = -90
 UAV_GROUND_PROJECTION_Z_M = 0.03
@@ -178,6 +178,11 @@ class TypeFly:
         self._last_status_render_ts = 0.0
         self._last_postrun_render_ts = 0.0
         self.mission_collision_count = 0
+        self._collision_prev_count = 0
+        self.collision_flash_counter = 0
+        self.collision_flash_interval_frames = 1  # ultra-fast flash cadence
+        self.collision_flash_frames = self.collision_flash_interval_frames * 6  # 3 flashes: red/gray x 3
+        self.hit_pillar_id = None
         self.plot_style = {
             "drone": {"main": "#0B57D0", "light": "#8AB4F8"},
             "user": {"main": "#C5221F", "light": "#F28B82"},
@@ -963,6 +968,9 @@ class TypeFly:
             )
             self.obstacle_collision_active = {k: False for k in self.obstacle_collision_active.keys()}
             self.mission_collision_count = 0
+            self._collision_prev_count = 0
+            self.collision_flash_counter = 0
+            self.hit_pillar_id = None
             framework_mode = MODE_TYPEFLY_ONESHOT
             self.llm_controller.set_selected_pipeline(self.selected_baseline_id)
             print_debug(
@@ -1436,6 +1444,10 @@ class TypeFly:
 
     def render_entity_markdown(self, snapshot):
         positions = self._extract_ui_positions(snapshot)
+        drone_xy = positions.get("drone_gt") or positions.get("drone_est")
+        drone_xy = positions.get("drone_gt") or positions.get("drone_est")
+        drone_xy = positions.get("drone_gt") or positions.get("drone_est")
+        drone_xy = positions.get("drone_gt") or positions.get("drone_est")
         obstacles = snapshot.get("obstacles") or []
         obstacle_map = {str(item.get("id")): item for item in obstacles}
 
@@ -1684,12 +1696,12 @@ class TypeFly:
         ax = fig.add_subplot(111, projection="3d")
         ax.set_position(C_ZONE_3D_AX_POSITION)
         ax.view_init(elev=C_ZONE_3D_VIEW_ELEV_DEG, azim=C_ZONE_3D_VIEW_AZIM_DEG)
-        ax.set_box_aspect((12, 6, 5.5))
+        ax.set_box_aspect((15, 10, 5.5))
         try:
             ax.dist = C_ZONE_3D_CAMERA_DIST
         except Exception:
             pass
-        xx, yy = np.meshgrid(np.linspace(0.0, 12.0, 2), np.linspace(0.0, 6.0, 2))
+        xx, yy = np.meshgrid(np.linspace(0.0, 15.0, 2), np.linspace(0.0, 10.0, 2))
         zz = np.zeros_like(xx)
         ax.plot_surface(xx, yy, zz, color="#ECEFF1", alpha=0.25, linewidth=0, shade=False)
 
@@ -1730,19 +1742,47 @@ class TypeFly:
                 [p[0] for p in gt_history],
                 [p[1] for p in gt_history],
                 [UAV_GROUND_PROJECTION_Z_M for _ in gt_history],
-                color="#64B5F6",
+                color="#000000",
                 linewidth=1.4,
-                linestyle="--",
-                alpha=0.45,
+                linestyle="-",
+                alpha=0.85,
                 label="UAV ground projection",
             )
 
+        drone_xy = positions.get("drone_gt") or positions.get("drone_est")
         obstacles = snapshot.get("obstacles") or []
+        # Reuse existing collision_count signal and map the latest collision to the nearest obstacle.
+        collision_count = int(snapshot.get("collision_count", self._collision_prev_count) or 0)
+        if collision_count > self._collision_prev_count and obstacles:
+            # Use current UAV position first; fallback to latest trajectory point for immediate flash mapping.
+            collision_ref_xy = drone_xy if drone_xy is not None else (gt_history[-1] if len(gt_history) > 0 else None)
+            ux, uy = (float(collision_ref_xy[0]), float(collision_ref_xy[1])) if collision_ref_xy is not None else (None, None)
+            nearest = min(
+                obstacles,
+                key=(
+                    (lambda obs: (
+                        (float((obs.get("ui_xy") or obs.get("est_xy_bias_corrected") or obs.get("gt_xy") or [1e9, 1e9])[0]) - ux) ** 2
+                        + (float((obs.get("ui_xy") or obs.get("est_xy_bias_corrected") or obs.get("gt_xy") or [1e9, 1e9])[1]) - uy) ** 2
+                    ))
+                    if ux is not None and uy is not None
+                    else (lambda _obs: 0.0)
+                ),
+            )
+            self.hit_pillar_id = str(nearest.get("id"))
+            self.collision_flash_counter = self.collision_flash_frames
+        self._collision_prev_count = collision_count
+
         obstacle_footprint_label_added = False
         for obstacle in obstacles:
             xy = obstacle.get("ui_xy") or obstacle.get("est_xy_bias_corrected") or obstacle.get("gt_xy")
             if xy is None:
                 continue
+            obstacle_id = str(obstacle.get("id"))
+            is_hit_pillar = self.collision_flash_counter > 0 and self.hit_pillar_id == obstacle_id
+            # Start red immediately on collision frame, then alternate red/gray quickly.
+            flash_phase = (self.collision_flash_counter - 1) // self.collision_flash_interval_frames
+            flash_on = is_hit_pillar and (flash_phase % 2 == 0)
+            pillar_color = "#E53935" if flash_on else "#9E9E9E"
             self._draw_ground_circle(
                 ax,
                 center_xy=xy,
@@ -1766,10 +1806,14 @@ class TypeFly:
                     label="Obstacle footprint",
                 )
                 obstacle_footprint_label_added = True
-            self._draw_cylinder(ax, xy)
+            # Flash the collided pillar in red, then restore gray without pausing animation.
+            self._draw_cylinder(ax, xy, color=pillar_color)
             ax.text(float(xy[0]), float(xy[1]), OBSTACLE_CYLINDER_HEIGHT_M + 0.1, self._display_obstacle_id(obstacle.get("id")), fontsize=8, color="#263238")
+        if self.collision_flash_counter > 0:
+            self.collision_flash_counter -= 1
+            if self.collision_flash_counter == 0:
+                self.hit_pillar_id = None
 
-        drone_xy = positions.get("drone_gt") or positions.get("drone_est")
         uav_legend_proxy = None
         if drone_xy is not None:
             ux, uy = float(drone_xy[0]), float(drone_xy[1])
@@ -1784,8 +1828,8 @@ class TypeFly:
                 ax.scatter([ux], [uy], [UAV_3D_ALTITUDE_M], c="#0B57D0", s=40, label="UAV")
                 ax.text(ux, uy, UAV_3D_ALTITUDE_M + 0.12, "UAV", fontsize=8, color="#0B57D0")
 
-        ax.set_xlim(0.0, 12.0)
-        ax.set_ylim(0.0, 6.0)
+        ax.set_xlim(0.0, 15.0)
+        ax.set_ylim(0.0, 10.0)
         ax.set_zlim(0.0, 5.5)
         ax.set_xlabel("X (m)")
         ax.set_ylabel("Y (m)")
