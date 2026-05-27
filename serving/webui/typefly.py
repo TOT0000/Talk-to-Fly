@@ -180,7 +180,7 @@ class TypeFly:
         self.mission_collision_count = 0
         self._collision_prev_count = 0
         self.collision_flash_counter = 0
-        self.collision_flash_interval_frames = 2  # faster flash cadence
+        self.collision_flash_interval_frames = 1  # ultra-fast flash cadence
         self.collision_flash_frames = self.collision_flash_interval_frames * 6  # 3 flashes: red/gray x 3
         self.hit_pillar_id = None
         self.plot_style = {
