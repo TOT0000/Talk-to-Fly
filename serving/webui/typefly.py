@@ -180,7 +180,8 @@ class TypeFly:
         self.mission_collision_count = 0
         self._collision_prev_count = 0
         self.collision_flash_counter = 0
-        self.collision_flash_frames = 18  # 3 flashes (red/gray alternating every 3 frames)
+        self.collision_flash_interval_frames = 2  # faster flash cadence
+        self.collision_flash_frames = self.collision_flash_interval_frames * 6  # 3 flashes: red/gray x 3
         self.hit_pillar_id = None
         self.plot_style = {
             "drone": {"main": "#0B57D0", "light": "#8AB4F8"},
@@ -1752,13 +1753,19 @@ class TypeFly:
         obstacles = snapshot.get("obstacles") or []
         # Reuse existing collision_count signal and map the latest collision to the nearest obstacle.
         collision_count = int(snapshot.get("collision_count", self._collision_prev_count) or 0)
-        if collision_count > self._collision_prev_count and obstacles and drone_xy is not None:
-            ux, uy = float(drone_xy[0]), float(drone_xy[1])
+        if collision_count > self._collision_prev_count and obstacles:
+            # Use current UAV position first; fallback to latest trajectory point for immediate flash mapping.
+            collision_ref_xy = drone_xy if drone_xy is not None else (gt_history[-1] if len(gt_history) > 0 else None)
+            ux, uy = (float(collision_ref_xy[0]), float(collision_ref_xy[1])) if collision_ref_xy is not None else (None, None)
             nearest = min(
                 obstacles,
-                key=lambda obs: (
-                    (float((obs.get("ui_xy") or obs.get("est_xy_bias_corrected") or obs.get("gt_xy") or [1e9, 1e9])[0]) - ux) ** 2
-                    + (float((obs.get("ui_xy") or obs.get("est_xy_bias_corrected") or obs.get("gt_xy") or [1e9, 1e9])[1]) - uy) ** 2
+                key=(
+                    (lambda obs: (
+                        (float((obs.get("ui_xy") or obs.get("est_xy_bias_corrected") or obs.get("gt_xy") or [1e9, 1e9])[0]) - ux) ** 2
+                        + (float((obs.get("ui_xy") or obs.get("est_xy_bias_corrected") or obs.get("gt_xy") or [1e9, 1e9])[1]) - uy) ** 2
+                    ))
+                    if ux is not None and uy is not None
+                    else (lambda _obs: 0.0)
                 ),
             )
             self.hit_pillar_id = str(nearest.get("id"))
@@ -1772,7 +1779,9 @@ class TypeFly:
                 continue
             obstacle_id = str(obstacle.get("id"))
             is_hit_pillar = self.collision_flash_counter > 0 and self.hit_pillar_id == obstacle_id
-            flash_on = is_hit_pillar and ((self.collision_flash_counter // 3) % 2 == 1)
+            # Start red immediately on collision frame, then alternate red/gray quickly.
+            flash_phase = (self.collision_flash_counter - 1) // self.collision_flash_interval_frames
+            flash_on = is_hit_pillar and (flash_phase % 2 == 0)
             pillar_color = "#E53935" if flash_on else "#9E9E9E"
             self._draw_ground_circle(
                 ax,
