@@ -63,6 +63,7 @@ C_ZONE_3D_CAMERA_DIST = 2
 UAV_3D_ICON_ZOOM = 0.12
 C_ZONE_3D_VIEW_ELEV_DEG = 40
 C_ZONE_3D_VIEW_AZIM_DEG = -90
+UAV_GROUND_PROJECTION_Z_M = 0.03
 
 
 def _load_icon(path):
@@ -1661,7 +1662,7 @@ class TypeFly:
         top_z = np.full_like(top_x, float(height))
         ax.plot_trisurf(top_x, top_y, top_z, color=color, alpha=min(0.95, alpha + 0.15), linewidth=0)
 
-    def _draw_ground_circle(self, ax, center_xy, radius, color, alpha=0.35, edge_alpha=0.95):
+    def _draw_ground_circle(self, ax, center_xy, radius, color, alpha=0.35, edge_alpha=0.95, z=0.0):
         if center_xy is None:
             return
         cx, cy = float(center_xy[0]), float(center_xy[1])
@@ -1670,11 +1671,11 @@ class TypeFly:
         theta_grid, r_grid = np.meshgrid(theta, rr)
         x_grid = cx + r_grid * np.cos(theta_grid)
         y_grid = cy + r_grid * np.sin(theta_grid)
-        z_grid = np.zeros_like(x_grid)
+        z_grid = np.full_like(x_grid, float(z))
         ax.plot_surface(x_grid, y_grid, z_grid, color=color, alpha=alpha, linewidth=0, shade=False)
         edge_x = cx + float(radius) * np.cos(theta)
         edge_y = cy + float(radius) * np.sin(theta)
-        edge_z = np.zeros_like(edge_x)
+        edge_z = np.full_like(edge_x, float(z))
         ax.plot(edge_x, edge_y, edge_z, color=color, linewidth=1.6, alpha=edge_alpha)
 
     def _render_c_zone_3d_view(self, snapshot, title="C Zone 3D View", figsize=(5, 4)):
@@ -1725,12 +1726,46 @@ class TypeFly:
                 alpha=0.8,
                 label="UAV trajectory",
             )
+            ax.plot(
+                [p[0] for p in gt_history],
+                [p[1] for p in gt_history],
+                [UAV_GROUND_PROJECTION_Z_M for _ in gt_history],
+                color="#64B5F6",
+                linewidth=1.4,
+                linestyle="--",
+                alpha=0.45,
+                label="UAV ground projection",
+            )
 
         obstacles = snapshot.get("obstacles") or []
+        obstacle_footprint_label_added = False
         for obstacle in obstacles:
             xy = obstacle.get("ui_xy") or obstacle.get("est_xy_bias_corrected") or obstacle.get("gt_xy")
             if xy is None:
                 continue
+            self._draw_ground_circle(
+                ax,
+                center_xy=xy,
+                radius=OBSTACLE_RADIUS_M,
+                color="#8D6E63",
+                alpha=0.28,
+                edge_alpha=0.85,
+                z=0.01,
+            )
+            if not obstacle_footprint_label_added:
+                ax.plot(
+                    [float(xy[0])],
+                    [float(xy[1])],
+                    [0.01],
+                    marker="o",
+                    markersize=6,
+                    linestyle="None",
+                    markerfacecolor="#8D6E63",
+                    markeredgecolor="#5D4037",
+                    alpha=0.5,
+                    label="Obstacle footprint",
+                )
+                obstacle_footprint_label_added = True
             self._draw_cylinder(ax, xy)
             ax.text(float(xy[0]), float(xy[1]), OBSTACLE_CYLINDER_HEIGHT_M + 0.1, self._display_obstacle_id(obstacle.get("id")), fontsize=8, color="#263238")
 
