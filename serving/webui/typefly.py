@@ -1786,12 +1786,12 @@ class TypeFly:
         ax = fig.add_subplot(111, projection="3d")
         ax.set_position(C_ZONE_3D_AX_POSITION)
         ax.view_init(elev=C_ZONE_3D_VIEW_ELEV_DEG, azim=C_ZONE_3D_VIEW_AZIM_DEG)
-        ax.set_box_aspect((12, 12, 4))
+        ax.set_box_aspect((12, 8, 4))
         try:
             ax.dist = C_ZONE_3D_CAMERA_DIST
         except Exception:
             pass
-        xx, yy = np.meshgrid(np.linspace(0.0, 12.0, 2), np.linspace(0.0, 12.0, 2))
+        xx, yy = np.meshgrid(np.linspace(0.0, 12.0, 2), np.linspace(0.0, 8.0, 2))
         zz = np.zeros_like(xx)
         ax.plot_surface(xx, yy, zz, color="#ECEFF1", alpha=0.25, linewidth=0, shade=False)
 
@@ -1910,7 +1910,7 @@ class TypeFly:
                 # Keep the UAV marker while suppressing the "UAV" text label.
 
         ax.set_xlim(0.0, 12.0)
-        ax.set_ylim(0.0, 12.0)
+        ax.set_ylim(0.0, 8.0)
         ax.set_zlim(0.0, 4.0)
         axis_label_style = {"fontsize": 18, "fontweight": "bold", "labelpad": 12}
         ax.set_xlabel("X (m)", **axis_label_style)
@@ -1953,8 +1953,8 @@ class TypeFly:
             legend_labels,
             handler_map=legend_handler_map,
             fontsize=16,
-            loc="upper right",
-            bbox_to_anchor=(0.98, 0.94),
+            loc="upper center",
+            bbox_to_anchor=(0.45, 0.96),
             ncol=3,
             frameon=True,
             borderaxespad=0.0,
