@@ -17,7 +17,9 @@ from matplotlib.patches import Ellipse, Circle, Arc, Rectangle
 from matplotlib.lines import Line2D
 from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 from mpl_toolkits.mplot3d import proj3d
+from matplotlib.image import BboxImage
 from matplotlib.legend_handler import HandlerBase
+from matplotlib.transforms import Bbox, TransformedBbox
 from PIL import Image
 from threading import Thread
 from flask import Flask, Response, request
@@ -107,11 +109,14 @@ class HandlerCylinder(HandlerBase):
         return [body, top, bottom]
 
 
-class HandlerOffsetImage(HandlerBase):
+class HandlerUavIcon(HandlerBase):
     def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
-        image = OffsetImage(orig_handle, zoom=UAV_3D_ICON_ZOOM * 0.9)
-        image.set_offset((xdescent + width / 2.0, ydescent + height / 2.0))
-        image.set_transform(trans)
+        # Render the actual UAV image inside the legend handle box.  Using
+        # BboxImage is more reliable for legends than OffsetImage because the
+        # legend supplies an explicit drawing bounding box and transform.
+        icon_box = Bbox.from_bounds(xdescent, ydescent, width, height)
+        image = BboxImage(TransformedBbox(icon_box, trans), interpolation="bilinear")
+        image.set_data(orig_handle)
         return [image]
 
 
@@ -1785,7 +1790,7 @@ class TypeFly:
                 color="#0B57D0",
                 linewidth=3.6,
                 alpha=0.95,
-                label="blue line: UAV trajectory",
+                label="UAV trajectory",
             )
             ax.plot(
                 [p[0] for p in gt_history],
@@ -1795,7 +1800,7 @@ class TypeFly:
                 linewidth=3.2,
                 linestyle="-",
                 alpha=0.95,
-                label="black line: ground-projected trajectory",
+                label="ground-projected trajectory",
             )
 
         drone_xy = positions.get("drone_gt") or positions.get("drone_est")
@@ -1890,8 +1895,8 @@ class TypeFly:
         ax.set_title(title, pad=2)
         ax.grid(True, linestyle="--", linewidth=0.5)
         legend_handles = [
-            Line2D([0], [0], color="#0B57D0", linewidth=3.6, label="blue line: UAV trajectory"),
-            Line2D([0], [0], color="#000000", linewidth=3.2, label="black line: ground-projected trajectory"),
+            Line2D([0], [0], color="#0B57D0", linewidth=4.2, label="UAV trajectory"),
+            Line2D([0], [0], color="#000000", linewidth=3.8, label="ground-projected trajectory"),
             CylinderLegendHandle(facecolor="#9E9E9E", edgecolor="#616161"),
             CylinderLegendHandle(facecolor="#E53935", edgecolor="#B71C1C"),
             Line2D([0], [0], marker="o", linestyle="None", markerfacecolor="#2E7D32", markeredgecolor="#1B5E20", markersize=9, label="green circle: inspection checkpoint"),
@@ -1899,33 +1904,33 @@ class TypeFly:
         legend_handler_map = {CylinderLegendHandle: HandlerCylinder()}
         if uav_legend_icon is not None:
             legend_handles.append(uav_legend_icon)
-            legend_handler_map[np.ndarray] = HandlerOffsetImage()
+            legend_handler_map[np.ndarray] = HandlerUavIcon()
         else:
-            legend_handles.append(Line2D([0], [0], marker="o", linestyle="None", color="#0B57D0", markersize=7, label="UAV icon: UAV"))
+            legend_handles.append(Line2D([0], [0], marker="o", linestyle="None", color="#0B57D0", markersize=12, label="UAV"))
 
         legend_labels = [
-            "blue line: UAV trajectory",
-            "black line: ground-projected trajectory",
-            "gray cylinder: obstacle",
-            "red cylinder: collided obstacle",
-            "green circle: inspection checkpoint",
-            "UAV icon: UAV",
+            "UAV trajectory",
+            "ground-projected trajectory",
+            "obstacle",
+            "collided obstacle",
+            "inspection checkpoint",
+            "UAV",
         ]
         fig.legend(
             legend_handles,
             legend_labels,
             handler_map=legend_handler_map,
-            fontsize=8,
+            fontsize=14,
             loc="lower center",
-            bbox_to_anchor=(0.5, 0.01),
+            bbox_to_anchor=(0.5, 0.015),
             ncol=6,
             frameon=True,
             borderaxespad=0.0,
-            columnspacing=0.9,
-            handlelength=1.6,
-            handletextpad=0.4,
+            columnspacing=1.2,
+            handlelength=2.0,
+            handletextpad=0.6,
         )
-        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.10, top=0.96)
+        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.14, top=0.96)
         buf = io.BytesIO()
         fig.savefig(
             buf,
