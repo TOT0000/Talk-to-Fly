@@ -13,10 +13,13 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # 非互動後端避免開啟GUI視窗
 import matplotlib.pyplot as plt
-from matplotlib.patches import Ellipse, Circle, Arc
+from matplotlib.patches import Ellipse, Circle, Arc, Rectangle
 from matplotlib.lines import Line2D
 from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 from mpl_toolkits.mplot3d import proj3d
+from matplotlib.image import BboxImage
+from matplotlib.legend_handler import HandlerBase
+from matplotlib.transforms import Bbox, TransformedBbox
 from PIL import Image
 from threading import Thread
 from flask import Flask, Response, request
@@ -64,6 +67,91 @@ UAV_3D_ICON_ZOOM = 0.14
 C_ZONE_3D_VIEW_ELEV_DEG = 40
 C_ZONE_3D_VIEW_AZIM_DEG = -90
 UAV_GROUND_PROJECTION_Z_M = 0.03
+
+
+class CylinderLegendHandle:
+    def __init__(self, facecolor, edgecolor):
+        self.facecolor = facecolor
+        self.edgecolor = edgecolor
+
+
+class HandlerCylinder(HandlerBase):
+    def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
+        body_height = height * 0.62
+        body_y = ydescent + height * 0.18
+        body = Rectangle(
+            (xdescent + width * 0.25, body_y),
+            width * 0.50,
+            body_height,
+            facecolor=orig_handle.facecolor,
+            edgecolor=orig_handle.edgecolor,
+            linewidth=1.0,
+            transform=trans,
+        )
+        top = Ellipse(
+            (xdescent + width * 0.50, body_y + body_height),
+            width * 0.50,
+            height * 0.22,
+            facecolor=orig_handle.facecolor,
+            edgecolor=orig_handle.edgecolor,
+            linewidth=1.0,
+            transform=trans,
+        )
+        bottom = Ellipse(
+            (xdescent + width * 0.50, body_y),
+            width * 0.50,
+            height * 0.22,
+            facecolor=orig_handle.facecolor,
+            edgecolor=orig_handle.edgecolor,
+            linewidth=1.0,
+            transform=trans,
+        )
+        return [body, top, bottom]
+
+
+class GroundCircleLegendHandle:
+    def __init__(self, color, alpha=0.32, edge_alpha=0.95):
+        self.color = color
+        self.alpha = alpha
+        self.edge_alpha = edge_alpha
+
+
+class HandlerGroundCircle(HandlerBase):
+    def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
+        diameter = min(width, height) * 0.88
+        center = (xdescent + width / 2.0, ydescent + height / 2.0)
+        circle = Ellipse(
+            center,
+            diameter,
+            diameter,
+            facecolor=orig_handle.color,
+            edgecolor=orig_handle.color,
+            alpha=orig_handle.alpha,
+            linewidth=1.8,
+            transform=trans,
+        )
+        edge = Ellipse(
+            center,
+            diameter,
+            diameter,
+            facecolor="none",
+            edgecolor=orig_handle.color,
+            alpha=orig_handle.edge_alpha,
+            linewidth=1.8,
+            transform=trans,
+        )
+        return [circle, edge]
+
+
+class HandlerUavIcon(HandlerBase):
+    def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
+        # Render the actual UAV image inside the legend handle box.  Using
+        # BboxImage is more reliable for legends than OffsetImage because the
+        # legend supplies an explicit drawing bounding box and transform.
+        icon_box = Bbox.from_bounds(xdescent, ydescent, width, height)
+        image = BboxImage(TransformedBbox(icon_box, trans), interpolation="bilinear")
+        image.set_data(orig_handle)
+        return [image]
 
 
 def _load_icon(path):
@@ -179,9 +267,7 @@ class TypeFly:
         self._last_postrun_render_ts = 0.0
         self.mission_collision_count = 0
         self._collision_prev_count = 0
-        self.collision_flash_counter = 0
-        self.collision_flash_interval_frames = 1  # ultra-fast flash cadence
-        self.collision_flash_frames = self.collision_flash_interval_frames * 6  # 3 flashes: red/gray x 3
+        self.collided_pillar_ids = set()
         self.hit_pillar_id = None
         self.plot_style = {
             "drone": {"main": "#0B57D0", "light": "#8AB4F8"},
@@ -969,7 +1055,7 @@ class TypeFly:
             self.obstacle_collision_active = {k: False for k in self.obstacle_collision_active.keys()}
             self.mission_collision_count = 0
             self._collision_prev_count = 0
-            self.collision_flash_counter = 0
+            self.collided_pillar_ids = set()
             self.hit_pillar_id = None
             framework_mode = MODE_TYPEFLY_ONESHOT
             self.llm_controller.set_selected_pipeline(self.selected_baseline_id)
@@ -1696,12 +1782,12 @@ class TypeFly:
         ax = fig.add_subplot(111, projection="3d")
         ax.set_position(C_ZONE_3D_AX_POSITION)
         ax.view_init(elev=C_ZONE_3D_VIEW_ELEV_DEG, azim=C_ZONE_3D_VIEW_AZIM_DEG)
-        ax.set_box_aspect((15, 10, 5.5))
+        ax.set_box_aspect((12, 12, 4))
         try:
             ax.dist = C_ZONE_3D_CAMERA_DIST
         except Exception:
             pass
-        xx, yy = np.meshgrid(np.linspace(0.0, 15.0, 2), np.linspace(0.0, 10.0, 2))
+        xx, yy = np.meshgrid(np.linspace(0.0, 12.0, 2), np.linspace(0.0, 12.0, 2))
         zz = np.zeros_like(xx)
         ax.plot_surface(xx, yy, zz, color="#ECEFF1", alpha=0.25, linewidth=0, shade=False)
 
@@ -1725,7 +1811,7 @@ class TypeFly:
                 alpha=0.32,
                 edge_alpha=0.95,
             )
-            ax.text(float(cp.x), float(cp.y), 0.2, cid, fontsize=8, color="#37474F")
+            # Scene 4 keeps checkpoint markers but suppresses text labels for a cleaner figure.
 
         gt_history = self._trajectory_xy_history()
         if len(gt_history) >= 2:
@@ -1734,8 +1820,8 @@ class TypeFly:
                 [p[1] for p in gt_history],
                 [UAV_3D_ALTITUDE_M for _ in gt_history],
                 color="#0B57D0",
-                linewidth=1.5,
-                alpha=0.8,
+                linewidth=3.6,
+                alpha=0.95,
                 label="UAV trajectory",
             )
             ax.plot(
@@ -1743,10 +1829,10 @@ class TypeFly:
                 [p[1] for p in gt_history],
                 [UAV_GROUND_PROJECTION_Z_M for _ in gt_history],
                 color="#000000",
-                linewidth=1.4,
+                linewidth=3.2,
                 linestyle="-",
-                alpha=0.85,
-                label="UAV ground projection",
+                alpha=0.95,
+                label="ground-projected trajectory",
             )
 
         drone_xy = positions.get("drone_gt") or positions.get("drone_est")
@@ -1769,7 +1855,7 @@ class TypeFly:
                 ),
             )
             self.hit_pillar_id = str(nearest.get("id"))
-            self.collision_flash_counter = self.collision_flash_frames
+            self.collided_pillar_ids.add(self.hit_pillar_id)
         self._collision_prev_count = collision_count
 
         obstacle_footprint_label_added = False
@@ -1778,11 +1864,8 @@ class TypeFly:
             if xy is None:
                 continue
             obstacle_id = str(obstacle.get("id"))
-            is_hit_pillar = self.collision_flash_counter > 0 and self.hit_pillar_id == obstacle_id
-            # Start red immediately on collision frame, then alternate red/gray quickly.
-            flash_phase = (self.collision_flash_counter - 1) // self.collision_flash_interval_frames
-            flash_on = is_hit_pillar and (flash_phase % 2 == 0)
-            pillar_color = "#E53935" if flash_on else "#9E9E9E"
+            # Once a pillar has collided, keep it red permanently for the current mission.
+            pillar_color = "#E53935" if obstacle_id in self.collided_pillar_ids else "#9E9E9E"
             self._draw_ground_circle(
                 ax,
                 center_xy=xy,
@@ -1803,18 +1886,13 @@ class TypeFly:
                     markerfacecolor="#8D6E63",
                     markeredgecolor="#5D4037",
                     alpha=0.5,
-                    label="Obstacle footprint",
                 )
                 obstacle_footprint_label_added = True
-            # Flash the collided pillar in red, then restore gray without pausing animation.
+            # Keep collided pillars red permanently instead of flashing back to gray.
             self._draw_cylinder(ax, xy, color=pillar_color)
-            ax.text(float(xy[0]), float(xy[1]), OBSTACLE_CYLINDER_HEIGHT_M + 0.1, self._display_obstacle_id(obstacle.get("id")), fontsize=8, color="#263238")
-        if self.collision_flash_counter > 0:
-            self.collision_flash_counter -= 1
-            if self.collision_flash_counter == 0:
-                self.hit_pillar_id = None
+            # Suppress obstacle text labels in the Scene 4 3D view.
 
-        uav_legend_proxy = None
+        uav_legend_icon = np.asarray(self._uav_3d_icon_image) if self._uav_3d_icon_image is not None else None
         if drone_xy is not None:
             ux, uy = float(drone_xy[0]), float(drone_xy[1])
             if self._uav_3d_icon_image is not None:
@@ -1822,35 +1900,65 @@ class TypeFly:
                 icon = OffsetImage(np.asarray(self._uav_3d_icon_image), zoom=UAV_3D_ICON_ZOOM)
                 ab = AnnotationBbox(icon, (x2d, y2d), xycoords="data", frameon=False)
                 ax.add_artist(ab)
-                ax.text(ux, uy, UAV_3D_ALTITUDE_M + 0.12, "UAV", fontsize=8, color="#0B57D0")
-                uav_legend_proxy = Line2D([0], [0], marker='o', linestyle='None', color="#0B57D0", markersize=6, label="UAV")
+                # Keep the UAV icon while suppressing the "UAV" text label.
             else:
-                ax.scatter([ux], [uy], [UAV_3D_ALTITUDE_M], c="#0B57D0", s=40, label="UAV")
-                ax.text(ux, uy, UAV_3D_ALTITUDE_M + 0.12, "UAV", fontsize=8, color="#0B57D0")
+                ax.scatter([ux], [uy], [UAV_3D_ALTITUDE_M], c="#0B57D0", s=40)
+                # Keep the UAV marker while suppressing the "UAV" text label.
 
-        ax.set_xlim(0.0, 15.0)
-        ax.set_ylim(0.0, 10.0)
-        ax.set_zlim(0.0, 5.5)
-        ax.set_xlabel("X (m)")
-        ax.set_ylabel("Y (m)")
-        ax.set_zlabel("Z (m)")
+        ax.set_xlim(0.0, 12.0)
+        ax.set_ylim(0.0, 12.0)
+        ax.set_zlim(0.0, 4.0)
+        axis_label_style = {"fontsize": 18, "fontweight": "bold", "labelpad": 12}
+        ax.set_xlabel("X (m)", **axis_label_style)
+        ax.set_ylabel("Y (m)", **axis_label_style)
+        ax.set_zlabel("Z (m)", **axis_label_style)
+        ax.set_zticks(np.arange(0.0, 4.1, 1.0))
+        ax.tick_params(axis="both", which="major", labelsize=13, width=1.4)
+        ax.tick_params(axis="z", which="major", labelsize=13, width=1.4)
+        for tick_label in ax.get_xticklabels() + ax.get_yticklabels() + ax.get_zticklabels():
+            tick_label.set_fontweight("bold")
         ax.set_title(title, pad=2)
         ax.grid(True, linestyle="--", linewidth=0.5)
-        handles, labels = ax.get_legend_handles_labels()
-        if uav_legend_proxy is not None and "UAV" not in labels:
-            handles.append(uav_legend_proxy)
-            labels.append("UAV")
-        if handles:
-            dedup = dict(zip(labels, handles))
-            ax.legend(
-                dedup.values(),
-                dedup.keys(),
-                fontsize=8,
-                loc="upper right",
-                bbox_to_anchor=(1.02, 0.98),
-                borderaxespad=0.0,
-            )
-        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=0.96)
+        legend_handles = [
+            Line2D([0], [0], color="#0B57D0", linewidth=4.2, label="UAV trajectory"),
+            Line2D([0], [0], color="#000000", linewidth=3.8, label="ground-projected trajectory"),
+            CylinderLegendHandle(facecolor="#9E9E9E", edgecolor="#616161"),
+            CylinderLegendHandle(facecolor="#E53935", edgecolor="#B71C1C"),
+            GroundCircleLegendHandle(color="#2E7D32", alpha=0.32, edge_alpha=0.95),
+        ]
+        legend_handler_map = {
+            CylinderLegendHandle: HandlerCylinder(),
+            GroundCircleLegendHandle: HandlerGroundCircle(),
+        }
+        if uav_legend_icon is not None:
+            legend_handles.append(uav_legend_icon)
+            legend_handler_map[np.ndarray] = HandlerUavIcon()
+        else:
+            legend_handles.append(Line2D([0], [0], marker="o", linestyle="None", color="#0B57D0", markersize=12, label="UAV"))
+
+        legend_labels = [
+            "UAV trajectory",
+            "ground-projected trajectory",
+            "obstacle",
+            "collided obstacle",
+            "inspection checkpoint",
+            "UAV",
+        ]
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            handler_map=legend_handler_map,
+            fontsize=16,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.015),
+            ncol=6,
+            frameon=True,
+            borderaxespad=0.0,
+            columnspacing=1.4,
+            handlelength=2.4,
+            handletextpad=0.7,
+        )
+        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.16, top=0.96)
         buf = io.BytesIO()
         fig.savefig(
             buf,
