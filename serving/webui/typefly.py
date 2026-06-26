@@ -1859,6 +1859,73 @@ class TypeFly:
                 alpha=0.95,
                 label="ground-projected trajectory",
             )
+            if mission_finished:
+                end_x, end_y = float(gt_history[-1][0]), float(gt_history[-1][1])
+                ax.scatter(
+                    [end_x],
+                    [end_y],
+                    [UAV_3D_ALTITUDE_M],
+                    marker="s",
+                    c="#E53935",
+                    edgecolors="#B71C1C",
+                    s=70,
+                    linewidths=1.2,
+                    depthshade=False,
+                )
+
+        if len(gt_history) >= 1:
+            start_x, start_y = float(gt_history[0][0]), float(gt_history[0][1])
+            ax.scatter(
+                [start_x],
+                [start_y],
+                [UAV_3D_ALTITUDE_M],
+                marker="*",
+                c="#2E7D32",
+                edgecolors="#1B5E20",
+                s=150,
+                linewidths=1.2,
+                depthshade=False,
+            )
+            if mission_finished:
+                end_x, end_y = float(gt_history[-1][0]), float(gt_history[-1][1])
+                ax.scatter(
+                    [end_x],
+                    [end_y],
+                    [UAV_3D_ALTITUDE_M],
+                    marker="s",
+                    c="#E53935",
+                    edgecolors="#B71C1C",
+                    s=110,
+                    linewidths=1.2,
+                    depthshade=False,
+                )
+
+        if len(gt_history) >= 1:
+            start_x, start_y = float(gt_history[0][0]), float(gt_history[0][1])
+            ax.scatter(
+                [start_x],
+                [start_y],
+                [UAV_3D_ALTITUDE_M],
+                marker="*",
+                c="#2E7D32",
+                edgecolors="#1B5E20",
+                s=225,
+                linewidths=1.2,
+                depthshade=False,
+            )
+            if mission_finished:
+                end_x, end_y = float(gt_history[-1][0]), float(gt_history[-1][1])
+                ax.scatter(
+                    [end_x],
+                    [end_y],
+                    [UAV_3D_ALTITUDE_M],
+                    marker="s",
+                    c="#E53935",
+                    edgecolors="#B71C1C",
+                    s=165,
+                    linewidths=1.2,
+                    depthshade=False,
+                )
 
         if len(gt_history) >= 1:
             start_x, start_y = float(gt_history[0][0]), float(gt_history[0][1])
