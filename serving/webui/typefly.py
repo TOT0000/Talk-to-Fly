@@ -51,7 +51,7 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 ICON_DIR = os.path.join(CURRENT_DIR, "assets")
 DRONE_ICON_PATH = os.path.join(ICON_DIR, "drone.png")
 OBSTACLE_ICON_PATH = os.path.join(ICON_DIR, "obstacle.png")
-UAV_3D_ICON_PATH = os.path.join(ICON_DIR, "technology.png")
+UAV_3D_ICON_PATH = os.path.join(PARENT_DIR, "controller", "assets", "fly.png")
 UI_TRAJECTORY_REFRESH_SECONDS = 0.25
 TRAJECTORY_HISTORY_MAX_POINTS = int(os.getenv("TYPEFLY_TRAJECTORY_HISTORY_MAX_POINTS", "100000"))
 UAV_3D_ICON_WIDTH_M = 0.8
@@ -70,9 +70,10 @@ UAV_GROUND_PROJECTION_Z_M = 0.03
 
 
 class CylinderLegendHandle:
-    def __init__(self, facecolor, edgecolor):
+    def __init__(self, facecolor, edgecolor, alpha=0.55):
         self.facecolor = facecolor
         self.edgecolor = edgecolor
+        self.alpha = alpha
 
 
 class HandlerCylinder(HandlerBase):
@@ -86,6 +87,7 @@ class HandlerCylinder(HandlerBase):
             facecolor=orig_handle.facecolor,
             edgecolor=orig_handle.edgecolor,
             linewidth=1.0,
+            alpha=orig_handle.alpha,
             transform=trans,
         )
         top = Ellipse(
@@ -95,6 +97,7 @@ class HandlerCylinder(HandlerBase):
             facecolor=orig_handle.facecolor,
             edgecolor=orig_handle.edgecolor,
             linewidth=1.0,
+            alpha=orig_handle.alpha,
             transform=trans,
         )
         bottom = Ellipse(
@@ -104,6 +107,7 @@ class HandlerCylinder(HandlerBase):
             facecolor=orig_handle.facecolor,
             edgecolor=orig_handle.edgecolor,
             linewidth=1.0,
+            alpha=orig_handle.alpha,
             transform=trans,
         )
         return [body, top, bottom]
@@ -1830,7 +1834,7 @@ class TypeFly:
                 [UAV_GROUND_PROJECTION_Z_M for _ in gt_history],
                 color="#000000",
                 linewidth=3.2,
-                linestyle="-",
+                linestyle="--",
                 alpha=0.95,
                 label="ground-projected trajectory",
             )
@@ -1889,7 +1893,7 @@ class TypeFly:
                 )
                 obstacle_footprint_label_added = True
             # Keep collided pillars red permanently instead of flashing back to gray.
-            self._draw_cylinder(ax, xy, color=pillar_color)
+            self._draw_cylinder(ax, xy, color=pillar_color, alpha=0.55)
             # Suppress obstacle text labels in the Scene 4 3D view.
 
         uav_legend_icon = np.asarray(self._uav_3d_icon_image) if self._uav_3d_icon_image is not None else None
@@ -1921,9 +1925,9 @@ class TypeFly:
         ax.grid(True, linestyle="--", linewidth=0.5)
         legend_handles = [
             Line2D([0], [0], color="#0B57D0", linewidth=4.2, label="UAV trajectory"),
-            Line2D([0], [0], color="#000000", linewidth=3.8, label="ground-projected trajectory"),
-            CylinderLegendHandle(facecolor="#9E9E9E", edgecolor="#616161"),
-            CylinderLegendHandle(facecolor="#E53935", edgecolor="#B71C1C"),
+            Line2D([0], [0], color="#000000", linewidth=3.8, linestyle="--", label="ground-projected trajectory"),
+            CylinderLegendHandle(facecolor="#9E9E9E", edgecolor="#616161", alpha=0.55),
+            CylinderLegendHandle(facecolor="#E53935", edgecolor="#B71C1C", alpha=0.55),
             GroundCircleLegendHandle(color="#2E7D32", alpha=0.32, edge_alpha=0.95),
         ]
         legend_handler_map = {
