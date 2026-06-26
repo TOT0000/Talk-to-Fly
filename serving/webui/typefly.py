@@ -109,6 +109,40 @@ class HandlerCylinder(HandlerBase):
         return [body, top, bottom]
 
 
+class GroundCircleLegendHandle:
+    def __init__(self, color, alpha=0.32, edge_alpha=0.95):
+        self.color = color
+        self.alpha = alpha
+        self.edge_alpha = edge_alpha
+
+
+class HandlerGroundCircle(HandlerBase):
+    def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
+        diameter = min(width, height) * 0.88
+        center = (xdescent + width / 2.0, ydescent + height / 2.0)
+        circle = Ellipse(
+            center,
+            diameter,
+            diameter,
+            facecolor=orig_handle.color,
+            edgecolor=orig_handle.color,
+            alpha=orig_handle.alpha,
+            linewidth=1.8,
+            transform=trans,
+        )
+        edge = Ellipse(
+            center,
+            diameter,
+            diameter,
+            facecolor="none",
+            edgecolor=orig_handle.color,
+            alpha=orig_handle.edge_alpha,
+            linewidth=1.8,
+            transform=trans,
+        )
+        return [circle, edge]
+
+
 class HandlerUavIcon(HandlerBase):
     def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
         # Render the actual UAV image inside the legend handle box.  Using
@@ -1899,9 +1933,12 @@ class TypeFly:
             Line2D([0], [0], color="#000000", linewidth=3.8, label="ground-projected trajectory"),
             CylinderLegendHandle(facecolor="#9E9E9E", edgecolor="#616161"),
             CylinderLegendHandle(facecolor="#E53935", edgecolor="#B71C1C"),
-            Line2D([0], [0], marker="o", linestyle="None", markerfacecolor="#2E7D32", markeredgecolor="#1B5E20", markersize=9, label="green circle: inspection checkpoint"),
+            GroundCircleLegendHandle(color="#2E7D32", alpha=0.32, edge_alpha=0.95),
         ]
-        legend_handler_map = {CylinderLegendHandle: HandlerCylinder()}
+        legend_handler_map = {
+            CylinderLegendHandle: HandlerCylinder(),
+            GroundCircleLegendHandle: HandlerGroundCircle(),
+        }
         if uav_legend_icon is not None:
             legend_handles.append(uav_legend_icon)
             legend_handler_map[np.ndarray] = HandlerUavIcon()
@@ -1920,17 +1957,17 @@ class TypeFly:
             legend_handles,
             legend_labels,
             handler_map=legend_handler_map,
-            fontsize=14,
+            fontsize=16,
             loc="lower center",
             bbox_to_anchor=(0.5, 0.015),
             ncol=6,
             frameon=True,
             borderaxespad=0.0,
-            columnspacing=1.2,
-            handlelength=2.0,
-            handletextpad=0.6,
+            columnspacing=1.4,
+            handlelength=2.4,
+            handletextpad=0.7,
         )
-        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.14, top=0.96)
+        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.16, top=0.96)
         buf = io.BytesIO()
         fig.savefig(
             buf,
