@@ -1696,12 +1696,12 @@ class TypeFly:
         ax = fig.add_subplot(111, projection="3d")
         ax.set_position(C_ZONE_3D_AX_POSITION)
         ax.view_init(elev=C_ZONE_3D_VIEW_ELEV_DEG, azim=C_ZONE_3D_VIEW_AZIM_DEG)
-        ax.set_box_aspect((15, 10, 5.5))
+        ax.set_box_aspect((12, 12, 4))
         try:
             ax.dist = C_ZONE_3D_CAMERA_DIST
         except Exception:
             pass
-        xx, yy = np.meshgrid(np.linspace(0.0, 15.0, 2), np.linspace(0.0, 10.0, 2))
+        xx, yy = np.meshgrid(np.linspace(0.0, 12.0, 2), np.linspace(0.0, 12.0, 2))
         zz = np.zeros_like(xx)
         ax.plot_surface(xx, yy, zz, color="#ECEFF1", alpha=0.25, linewidth=0, shade=False)
 
@@ -1725,7 +1725,7 @@ class TypeFly:
                 alpha=0.32,
                 edge_alpha=0.95,
             )
-            ax.text(float(cp.x), float(cp.y), 0.2, cid, fontsize=8, color="#37474F")
+            # Scene 4 keeps checkpoint markers but suppresses text labels for a cleaner figure.
 
         gt_history = self._trajectory_xy_history()
         if len(gt_history) >= 2:
@@ -1734,8 +1734,8 @@ class TypeFly:
                 [p[1] for p in gt_history],
                 [UAV_3D_ALTITUDE_M for _ in gt_history],
                 color="#0B57D0",
-                linewidth=1.5,
-                alpha=0.8,
+                linewidth=3.6,
+                alpha=0.95,
                 label="UAV trajectory",
             )
             ax.plot(
@@ -1743,9 +1743,9 @@ class TypeFly:
                 [p[1] for p in gt_history],
                 [UAV_GROUND_PROJECTION_Z_M for _ in gt_history],
                 color="#000000",
-                linewidth=1.4,
+                linewidth=3.2,
                 linestyle="-",
-                alpha=0.85,
+                alpha=0.95,
                 label="UAV ground projection",
             )
 
@@ -1808,7 +1808,7 @@ class TypeFly:
                 obstacle_footprint_label_added = True
             # Flash the collided pillar in red, then restore gray without pausing animation.
             self._draw_cylinder(ax, xy, color=pillar_color)
-            ax.text(float(xy[0]), float(xy[1]), OBSTACLE_CYLINDER_HEIGHT_M + 0.1, self._display_obstacle_id(obstacle.get("id")), fontsize=8, color="#263238")
+            # Suppress obstacle text labels in the Scene 4 3D view.
         if self.collision_flash_counter > 0:
             self.collision_flash_counter -= 1
             if self.collision_flash_counter == 0:
@@ -1822,18 +1822,23 @@ class TypeFly:
                 icon = OffsetImage(np.asarray(self._uav_3d_icon_image), zoom=UAV_3D_ICON_ZOOM)
                 ab = AnnotationBbox(icon, (x2d, y2d), xycoords="data", frameon=False)
                 ax.add_artist(ab)
-                ax.text(ux, uy, UAV_3D_ALTITUDE_M + 0.12, "UAV", fontsize=8, color="#0B57D0")
+                # Keep the UAV icon while suppressing the "UAV" text label.
                 uav_legend_proxy = Line2D([0], [0], marker='o', linestyle='None', color="#0B57D0", markersize=6, label="UAV")
             else:
                 ax.scatter([ux], [uy], [UAV_3D_ALTITUDE_M], c="#0B57D0", s=40, label="UAV")
-                ax.text(ux, uy, UAV_3D_ALTITUDE_M + 0.12, "UAV", fontsize=8, color="#0B57D0")
+                # Keep the UAV marker while suppressing the "UAV" text label.
 
-        ax.set_xlim(0.0, 15.0)
-        ax.set_ylim(0.0, 10.0)
-        ax.set_zlim(0.0, 5.5)
-        ax.set_xlabel("X (m)")
-        ax.set_ylabel("Y (m)")
-        ax.set_zlabel("Z (m)")
+        ax.set_xlim(0.0, 12.0)
+        ax.set_ylim(0.0, 12.0)
+        ax.set_zlim(0.0, 4.0)
+        axis_label_style = {"fontsize": 18, "fontweight": "bold", "labelpad": 12}
+        ax.set_xlabel("X (m)", **axis_label_style)
+        ax.set_ylabel("Y (m)", **axis_label_style)
+        ax.set_zlabel("Z (m)", **axis_label_style)
+        ax.tick_params(axis="both", which="major", labelsize=13, width=1.4)
+        ax.tick_params(axis="z", which="major", labelsize=13, width=1.4)
+        for tick_label in ax.get_xticklabels() + ax.get_yticklabels() + ax.get_zticklabels():
+            tick_label.set_fontweight("bold")
         ax.set_title(title, pad=2)
         ax.grid(True, linestyle="--", linewidth=0.5)
         handles, labels = ax.get_legend_handles_labels()
