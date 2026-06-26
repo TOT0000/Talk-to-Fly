@@ -1839,6 +1839,38 @@ class TypeFly:
                 label="ground-projected trajectory",
             )
 
+        if len(gt_history) >= 1:
+            start_x, start_y = float(gt_history[0][0]), float(gt_history[0][1])
+            ax.scatter(
+                [start_x],
+                [start_y],
+                [UAV_3D_ALTITUDE_M],
+                marker="*",
+                c="#2E7D32",
+                edgecolors="#1B5E20",
+                s=55,
+                depthshade=False,
+            )
+            final_summary = snapshot.get("final_mission_summary") or {}
+            mission_finished = (
+                self.mission_clock.get("completed_at") is not None
+                or bool(final_summary.get("mission_end_ts"))
+                or bool(final_summary.get("final_mission_success"))
+                or bool(final_summary.get("mission_success"))
+            )
+            if mission_finished:
+                end_x, end_y = float(gt_history[-1][0]), float(gt_history[-1][1])
+                ax.scatter(
+                    [end_x],
+                    [end_y],
+                    [UAV_3D_ALTITUDE_M],
+                    marker="s",
+                    c="#E53935",
+                    edgecolors="#B71C1C",
+                    s=38,
+                    depthshade=False,
+                )
+
         drone_xy = positions.get("drone_gt") or positions.get("drone_est")
         obstacles = snapshot.get("obstacles") or []
         # Reuse existing collision_count signal and map the latest collision to the nearest obstacle.
