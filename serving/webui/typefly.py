@@ -13,10 +13,11 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # 非互動後端避免開啟GUI視窗
 import matplotlib.pyplot as plt
-from matplotlib.patches import Ellipse, Circle, Arc
+from matplotlib.patches import Ellipse, Circle, Arc, Rectangle
 from matplotlib.lines import Line2D
 from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 from mpl_toolkits.mplot3d import proj3d
+from matplotlib.legend_handler import HandlerBase
 from PIL import Image
 from threading import Thread
 from flask import Flask, Response, request
@@ -64,6 +65,54 @@ UAV_3D_ICON_ZOOM = 0.14
 C_ZONE_3D_VIEW_ELEV_DEG = 40
 C_ZONE_3D_VIEW_AZIM_DEG = -90
 UAV_GROUND_PROJECTION_Z_M = 0.03
+
+
+class CylinderLegendHandle:
+    def __init__(self, facecolor, edgecolor):
+        self.facecolor = facecolor
+        self.edgecolor = edgecolor
+
+
+class HandlerCylinder(HandlerBase):
+    def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
+        body_height = height * 0.62
+        body_y = ydescent + height * 0.18
+        body = Rectangle(
+            (xdescent + width * 0.25, body_y),
+            width * 0.50,
+            body_height,
+            facecolor=orig_handle.facecolor,
+            edgecolor=orig_handle.edgecolor,
+            linewidth=1.0,
+            transform=trans,
+        )
+        top = Ellipse(
+            (xdescent + width * 0.50, body_y + body_height),
+            width * 0.50,
+            height * 0.22,
+            facecolor=orig_handle.facecolor,
+            edgecolor=orig_handle.edgecolor,
+            linewidth=1.0,
+            transform=trans,
+        )
+        bottom = Ellipse(
+            (xdescent + width * 0.50, body_y),
+            width * 0.50,
+            height * 0.22,
+            facecolor=orig_handle.facecolor,
+            edgecolor=orig_handle.edgecolor,
+            linewidth=1.0,
+            transform=trans,
+        )
+        return [body, top, bottom]
+
+
+class HandlerOffsetImage(HandlerBase):
+    def create_artists(self, legend, orig_handle, xdescent, ydescent, width, height, fontsize, trans):
+        image = OffsetImage(orig_handle, zoom=UAV_3D_ICON_ZOOM * 0.9)
+        image.set_offset((xdescent + width / 2.0, ydescent + height / 2.0))
+        image.set_transform(trans)
+        return [image]
 
 
 def _load_icon(path):
@@ -1736,7 +1785,7 @@ class TypeFly:
                 color="#0B57D0",
                 linewidth=3.6,
                 alpha=0.95,
-                label="UAV trajectory",
+                label="blue line: UAV trajectory",
             )
             ax.plot(
                 [p[0] for p in gt_history],
@@ -1746,7 +1795,7 @@ class TypeFly:
                 linewidth=3.2,
                 linestyle="-",
                 alpha=0.95,
-                label="UAV ground projection",
+                label="black line: ground-projected trajectory",
             )
 
         drone_xy = positions.get("drone_gt") or positions.get("drone_est")
@@ -1803,7 +1852,6 @@ class TypeFly:
                     markerfacecolor="#8D6E63",
                     markeredgecolor="#5D4037",
                     alpha=0.5,
-                    label="Obstacle footprint",
                 )
                 obstacle_footprint_label_added = True
             # Flash the collided pillar in red, then restore gray without pausing animation.
@@ -1814,7 +1862,7 @@ class TypeFly:
             if self.collision_flash_counter == 0:
                 self.hit_pillar_id = None
 
-        uav_legend_proxy = None
+        uav_legend_icon = np.asarray(self._uav_3d_icon_image) if self._uav_3d_icon_image is not None else None
         if drone_xy is not None:
             ux, uy = float(drone_xy[0]), float(drone_xy[1])
             if self._uav_3d_icon_image is not None:
@@ -1823,9 +1871,8 @@ class TypeFly:
                 ab = AnnotationBbox(icon, (x2d, y2d), xycoords="data", frameon=False)
                 ax.add_artist(ab)
                 # Keep the UAV icon while suppressing the "UAV" text label.
-                uav_legend_proxy = Line2D([0], [0], marker='o', linestyle='None', color="#0B57D0", markersize=6, label="UAV")
             else:
-                ax.scatter([ux], [uy], [UAV_3D_ALTITUDE_M], c="#0B57D0", s=40, label="UAV")
+                ax.scatter([ux], [uy], [UAV_3D_ALTITUDE_M], c="#0B57D0", s=40)
                 # Keep the UAV marker while suppressing the "UAV" text label.
 
         ax.set_xlim(0.0, 12.0)
@@ -1835,27 +1882,50 @@ class TypeFly:
         ax.set_xlabel("X (m)", **axis_label_style)
         ax.set_ylabel("Y (m)", **axis_label_style)
         ax.set_zlabel("Z (m)", **axis_label_style)
+        ax.set_zticks(np.arange(0.0, 4.1, 1.0))
         ax.tick_params(axis="both", which="major", labelsize=13, width=1.4)
         ax.tick_params(axis="z", which="major", labelsize=13, width=1.4)
         for tick_label in ax.get_xticklabels() + ax.get_yticklabels() + ax.get_zticklabels():
             tick_label.set_fontweight("bold")
         ax.set_title(title, pad=2)
         ax.grid(True, linestyle="--", linewidth=0.5)
-        handles, labels = ax.get_legend_handles_labels()
-        if uav_legend_proxy is not None and "UAV" not in labels:
-            handles.append(uav_legend_proxy)
-            labels.append("UAV")
-        if handles:
-            dedup = dict(zip(labels, handles))
-            ax.legend(
-                dedup.values(),
-                dedup.keys(),
-                fontsize=8,
-                loc="upper right",
-                bbox_to_anchor=(1.02, 0.98),
-                borderaxespad=0.0,
-            )
-        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=0.96)
+        legend_handles = [
+            Line2D([0], [0], color="#0B57D0", linewidth=3.6, label="blue line: UAV trajectory"),
+            Line2D([0], [0], color="#000000", linewidth=3.2, label="black line: ground-projected trajectory"),
+            CylinderLegendHandle(facecolor="#9E9E9E", edgecolor="#616161"),
+            CylinderLegendHandle(facecolor="#E53935", edgecolor="#B71C1C"),
+            Line2D([0], [0], marker="o", linestyle="None", markerfacecolor="#2E7D32", markeredgecolor="#1B5E20", markersize=9, label="green circle: inspection checkpoint"),
+        ]
+        legend_handler_map = {CylinderLegendHandle: HandlerCylinder()}
+        if uav_legend_icon is not None:
+            legend_handles.append(uav_legend_icon)
+            legend_handler_map[np.ndarray] = HandlerOffsetImage()
+        else:
+            legend_handles.append(Line2D([0], [0], marker="o", linestyle="None", color="#0B57D0", markersize=7, label="UAV icon: UAV"))
+
+        legend_labels = [
+            "blue line: UAV trajectory",
+            "black line: ground-projected trajectory",
+            "gray cylinder: obstacle",
+            "red cylinder: collided obstacle",
+            "green circle: inspection checkpoint",
+            "UAV icon: UAV",
+        ]
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            handler_map=legend_handler_map,
+            fontsize=8,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.01),
+            ncol=6,
+            frameon=True,
+            borderaxespad=0.0,
+            columnspacing=0.9,
+            handlelength=1.6,
+            handletextpad=0.4,
+        )
+        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.10, top=0.96)
         buf = io.BytesIO()
         fig.savefig(
             buf,
