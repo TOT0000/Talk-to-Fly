@@ -267,9 +267,7 @@ class TypeFly:
         self._last_postrun_render_ts = 0.0
         self.mission_collision_count = 0
         self._collision_prev_count = 0
-        self.collision_flash_counter = 0
-        self.collision_flash_interval_frames = 1  # ultra-fast flash cadence
-        self.collision_flash_frames = self.collision_flash_interval_frames * 6  # 3 flashes: red/gray x 3
+        self.collided_pillar_ids = set()
         self.hit_pillar_id = None
         self.plot_style = {
             "drone": {"main": "#0B57D0", "light": "#8AB4F8"},
@@ -1057,7 +1055,7 @@ class TypeFly:
             self.obstacle_collision_active = {k: False for k in self.obstacle_collision_active.keys()}
             self.mission_collision_count = 0
             self._collision_prev_count = 0
-            self.collision_flash_counter = 0
+            self.collided_pillar_ids = set()
             self.hit_pillar_id = None
             framework_mode = MODE_TYPEFLY_ONESHOT
             self.llm_controller.set_selected_pipeline(self.selected_baseline_id)
@@ -1857,7 +1855,7 @@ class TypeFly:
                 ),
             )
             self.hit_pillar_id = str(nearest.get("id"))
-            self.collision_flash_counter = self.collision_flash_frames
+            self.collided_pillar_ids.add(self.hit_pillar_id)
         self._collision_prev_count = collision_count
 
         obstacle_footprint_label_added = False
@@ -1866,11 +1864,8 @@ class TypeFly:
             if xy is None:
                 continue
             obstacle_id = str(obstacle.get("id"))
-            is_hit_pillar = self.collision_flash_counter > 0 and self.hit_pillar_id == obstacle_id
-            # Start red immediately on collision frame, then alternate red/gray quickly.
-            flash_phase = (self.collision_flash_counter - 1) // self.collision_flash_interval_frames
-            flash_on = is_hit_pillar and (flash_phase % 2 == 0)
-            pillar_color = "#E53935" if flash_on else "#9E9E9E"
+            # Once a pillar has collided, keep it red permanently for the current mission.
+            pillar_color = "#E53935" if obstacle_id in self.collided_pillar_ids else "#9E9E9E"
             self._draw_ground_circle(
                 ax,
                 center_xy=xy,
@@ -1893,13 +1888,9 @@ class TypeFly:
                     alpha=0.5,
                 )
                 obstacle_footprint_label_added = True
-            # Flash the collided pillar in red, then restore gray without pausing animation.
+            # Keep collided pillars red permanently instead of flashing back to gray.
             self._draw_cylinder(ax, xy, color=pillar_color)
             # Suppress obstacle text labels in the Scene 4 3D view.
-        if self.collision_flash_counter > 0:
-            self.collision_flash_counter -= 1
-            if self.collision_flash_counter == 0:
-                self.hit_pillar_id = None
 
         uav_legend_icon = np.asarray(self._uav_3d_icon_image) if self._uav_3d_icon_image is not None else None
         if drone_xy is not None:
