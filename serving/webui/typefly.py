@@ -1838,6 +1838,18 @@ class TypeFly:
                 alpha=0.95,
                 label="ground-projected trajectory",
             )
+            if mission_finished:
+                end_x, end_y = float(gt_history[-1][0]), float(gt_history[-1][1])
+                ax.scatter(
+                    [end_x],
+                    [end_y],
+                    [UAV_3D_ALTITUDE_M],
+                    marker="s",
+                    c="#E53935",
+                    edgecolors="#B71C1C",
+                    s=38,
+                    depthshade=False,
+                )
 
         if len(gt_history) >= 1:
             start_x, start_y = float(gt_history[0][0]), float(gt_history[0][1])
@@ -1848,7 +1860,8 @@ class TypeFly:
                 marker="*",
                 c="#2E7D32",
                 edgecolors="#1B5E20",
-                s=55,
+                s=95,
+                linewidths=1.2,
                 depthshade=False,
             )
             final_summary = snapshot.get("final_mission_summary") or {}
@@ -1867,7 +1880,8 @@ class TypeFly:
                     marker="s",
                     c="#E53935",
                     edgecolors="#B71C1C",
-                    s=38,
+                    s=70,
+                    linewidths=1.2,
                     depthshade=False,
                 )
 
@@ -1971,6 +1985,10 @@ class TypeFly:
             legend_handler_map[np.ndarray] = HandlerUavIcon()
         else:
             legend_handles.append(Line2D([0], [0], marker="o", linestyle="None", color="#0B57D0", markersize=12, label="UAV"))
+        legend_handles.extend([
+            Line2D([0], [0], marker="*", linestyle="None", markerfacecolor="#2E7D32", markeredgecolor="#1B5E20", markeredgewidth=1.2, markersize=16, label="start point"),
+            Line2D([0], [0], marker="s", linestyle="None", markerfacecolor="#E53935", markeredgecolor="#B71C1C", markeredgewidth=1.2, markersize=13, label="end point"),
+        ])
 
         legend_labels = [
             "UAV trajectory",
@@ -1979,6 +1997,8 @@ class TypeFly:
             "collided obstacle",
             "inspection checkpoint",
             "UAV",
+            "start point",
+            "end point",
         ]
         fig.legend(
             legend_handles,
@@ -1987,7 +2007,7 @@ class TypeFly:
             fontsize=16,
             loc="upper center",
             bbox_to_anchor=(0.45, 0.96),
-            ncol=3,
+            ncol=4,
             frameon=True,
             borderaxespad=0.0,
             columnspacing=1.4,
