@@ -765,6 +765,14 @@ class TypeFly:
             "obstacle_3": False,
         }
         self.mission_collision_count = 0
+        self._collision_prev_count = 0
+        self.collided_pillar_ids = set()
+        self.hit_pillar_id = None
+        if getattr(self, "llm_controller", None) is not None:
+            if hasattr(self.llm_controller, "final_mission_summary"):
+                self.llm_controller.final_mission_summary = None
+            if hasattr(self.llm_controller, "collision_count"):
+                self.llm_controller.collision_count = 0
         self.mission_clock = {
             "started_at": None,
             "completed_at": None,
@@ -1819,11 +1827,17 @@ class TypeFly:
 
         gt_history = self._trajectory_xy_history()
         final_summary = snapshot.get("final_mission_summary") or {}
+        mission_has_started = self.mission_clock.get("started_at") is not None
         mission_finished = (
             self.mission_clock.get("completed_at") is not None
-            or bool(final_summary.get("mission_end_ts"))
-            or bool(final_summary.get("final_mission_success"))
-            or bool(final_summary.get("mission_success"))
+            or (
+                mission_has_started
+                and (
+                    bool(final_summary.get("mission_end_ts"))
+                    or bool(final_summary.get("final_mission_success"))
+                    or bool(final_summary.get("mission_success"))
+                )
+            )
         )
         if len(gt_history) >= 2:
             ax.plot(
@@ -1844,33 +1858,6 @@ class TypeFly:
                 linestyle="--",
                 alpha=0.95,
                 label="ground-projected trajectory",
-            )
-            if mission_finished:
-                end_x, end_y = float(gt_history[-1][0]), float(gt_history[-1][1])
-                ax.scatter(
-                    [end_x],
-                    [end_y],
-                    [UAV_3D_ALTITUDE_M],
-                    marker="s",
-                    c="#E53935",
-                    edgecolors="#B71C1C",
-                    s=70,
-                    linewidths=1.2,
-                    depthshade=False,
-                )
-
-        if len(gt_history) >= 1:
-            start_x, start_y = float(gt_history[0][0]), float(gt_history[0][1])
-            ax.scatter(
-                [start_x],
-                [start_y],
-                [UAV_3D_ALTITUDE_M],
-                marker="*",
-                c="#2E7D32",
-                edgecolors="#1B5E20",
-                s=95,
-                linewidths=1.2,
-                depthshade=False,
             )
             if mission_finished:
                 end_x, end_y = float(gt_history[-1][0]), float(gt_history[-1][1])
@@ -1923,6 +1910,33 @@ class TypeFly:
                 c="#2E7D32",
                 edgecolors="#1B5E20",
                 s=225,
+                linewidths=1.2,
+                depthshade=False,
+            )
+            if mission_finished:
+                end_x, end_y = float(gt_history[-1][0]), float(gt_history[-1][1])
+                ax.scatter(
+                    [end_x],
+                    [end_y],
+                    [UAV_3D_ALTITUDE_M],
+                    marker="s",
+                    c="#E53935",
+                    edgecolors="#B71C1C",
+                    s=165,
+                    linewidths=1.2,
+                    depthshade=False,
+                )
+
+        if len(gt_history) >= 1:
+            start_x, start_y = float(gt_history[0][0]), float(gt_history[0][1])
+            ax.scatter(
+                [start_x],
+                [start_y],
+                [UAV_3D_ALTITUDE_M],
+                marker="*",
+                c="#2E7D32",
+                edgecolors="#1B5E20",
+                s=275,
                 linewidths=1.2,
                 depthshade=False,
             )
@@ -2061,7 +2075,7 @@ class TypeFly:
             handler_map=legend_handler_map,
             fontsize=16,
             loc="upper center",
-            bbox_to_anchor=(0.45, 0.96),
+            bbox_to_anchor=(0.45, 0.91),
             ncol=4,
             frameon=True,
             borderaxespad=0.0,
