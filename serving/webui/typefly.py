@@ -63,9 +63,9 @@ C_ZONE_3D_AX_POSITION = [0.00, 0.00, 0.90, 0.92]
 C_ZONE_3D_DPI = 140
 C_ZONE_3D_PAD_INCHES = 0.02
 C_ZONE_3D_CAMERA_DIST = 2
-UAV_3D_ICON_ZOOM = 0.14
-C_ZONE_3D_VIEW_ELEV_DEG = 40
-C_ZONE_3D_VIEW_AZIM_DEG = -90
+UAV_3D_ICON_ZOOM = 0.09
+C_ZONE_3D_VIEW_ELEV_DEG = 28
+C_ZONE_3D_VIEW_AZIM_DEG = -45
 UAV_GROUND_PROJECTION_Z_M = 0.03
 
 
@@ -1953,16 +1953,16 @@ class TypeFly:
             legend_labels,
             handler_map=legend_handler_map,
             fontsize=16,
-            loc="lower center",
-            bbox_to_anchor=(0.5, 0.015),
-            ncol=6,
+            loc="upper right",
+            bbox_to_anchor=(0.98, 0.94),
+            ncol=3,
             frameon=True,
             borderaxespad=0.0,
             columnspacing=1.4,
             handlelength=2.4,
             handletextpad=0.7,
         )
-        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.16, top=0.96)
+        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=0.96)
         buf = io.BytesIO()
         fig.savefig(
             buf,
